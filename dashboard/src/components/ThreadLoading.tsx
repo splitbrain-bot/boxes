@@ -4,9 +4,9 @@ import { Skeleton } from '@/components/ui/skeleton';
  * Pulsing placeholder in the shape of a conversation, shown until the thread
  * has been read.
  *
- * It replaces the composer, which would suggest an empty thread while the
- * replay runs. Its layout matches the reading column, so the swap moves the
- * eye little.
+ * It replaces the thread with its composer, because an empty thread looks like
+ * a new conversation while the replay runs. Its layout matches the reading
+ * column, so the text stays near the same place when the thread appears.
  */
 export function ThreadLoading() {
   return (

@@ -4,7 +4,7 @@
  * It caches only the content-hashed assets, which cannot go stale. Everything
  * else goes to the network, so a cached bundle never talks to a newer API.
  *
- * Plain JavaScript, because it is outside the Vite graph and served as is.
+ * It is plain JavaScript, because Vite does not build it and the server sends it as is.
  */
 
 /* global self, clients, caches */
@@ -47,7 +47,7 @@ self.addEventListener('fetch', (event) => {
       const hit = await cache.match(request);
       if (hit) return hit;
       const response = await fetch(request);
-      // A 404 or 502 during a deploy must not become the answer for good.
+      // A 404 or 502 during a deploy must not stay in the cache.
       if (response.ok) await cache.put(request, response.clone());
       return response;
     })(),
@@ -105,8 +105,7 @@ self.addEventListener('notificationclick', (event) => {
 
 /**
  * Subscribes again and registers the new subscription with the orchestrator
- * when the push service rotates the old one out. Safari does this on its own
- * schedule.
+ * when the push service replaces the old one.
  */
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(
@@ -121,8 +120,8 @@ self.addEventListener('pushsubscriptionchange', (event) => {
       await fetch('/api/push/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // The same label the page sends, so the deployment's list stays
-        // readable.
+        // Uses the same label as the page, so the subscription list of the
+        // deployment stays readable.
         body: JSON.stringify({
           ...subscription.toJSON(),
           label: navigator.userAgent.slice(0, 100),

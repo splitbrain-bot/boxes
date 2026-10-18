@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
 
 /**
- * Whether a CSS media query matches right now.
+ * Checks if a CSS media query matches now.
  *
- * For layout choices CSS cannot make, such as a component rendered into a
- * portal, or an inline height and `inert` that a breakpoint cannot undo.
+ * Use it for layout choices that CSS cannot make, e.g., a component rendered
+ * into a portal, or an inline height and `inert` that a breakpoint cannot undo.
+ *
+ * @param query The CSS media query.
+ * @returns True while the query matches.
  */
 export function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() =>

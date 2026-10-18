@@ -1,7 +1,3 @@
-import { afterAll, beforeAll, expect, test } from 'vitest';
-import { closeBrowser, openPage, shoot } from './browser.ts';
-import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
-
 /**
  * Browser tests for the installed assistant-ui components, rendered over
  * canned messages on the playground page.
@@ -9,6 +5,11 @@ import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
  * They catch a registry re-run that leaves a part kind unstyled or broken.
  */
 
+import { afterAll, beforeAll, expect, test } from 'vitest';
+import { closeBrowser, openPage, shoot } from './browser.ts';
+import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+
+/** The orchestrator that the tests in this file share. */
 let stub: TestOrchestrator;
 
 beforeAll(async () => {
@@ -28,7 +29,7 @@ for (const scheme of ['light', 'dark'] as const) {
       await expect.poll(() => page.getByLabel('Message input').isVisible()).toBe(true);
       await expect.poll(() => page.getByText('security boundary').first().isVisible()).toBe(true);
 
-      // Markdown: the bold run, the code fence and the table became elements.
+      // The markdown renderer turned the bold run, the code fence and the table into elements.
       expect(await page.locator('strong', { hasText: 'security boundary' }).count()).toBe(1);
       expect(await page.locator('pre code').count()).toBeGreaterThan(0);
       expect(await page.locator('table').count()).toBe(1);
@@ -40,8 +41,8 @@ for (const scheme of ['light', 'dark'] as const) {
 
       await groups.first().click();
 
-      // Opening the group reveals the call; opening the call reveals its
-      // arguments and its output.
+      // Opening the group shows the call. Opening the call shows its arguments
+      // and its output.
       const call = page.locator('[data-slot="tool-fallback-trigger"]');
       await expect.poll(() => call.count()).toBe(1);
       await call.first().click();

@@ -13,7 +13,7 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 /**
- * An age as one number and one letter: `5s`, `5m`, `5h`, `5d`.
+ * Formats an age as one number and one letter: `5s`, `5m`, `5h`, `5d`.
  *
  * Uses the largest unit that leaves a whole number, and rounds down, so a
  * thread never looks older than it is. Days are the largest unit.
@@ -22,6 +22,7 @@ const DAY = 24 * HOUR;
  * orchestrator's clock disagree.
  *
  * @param ms The age in milliseconds.
+ * @returns The short age.
  */
 export function shortAge(ms: number): string {
   if (ms < MINUTE) return `${Math.max(Math.floor(ms / SECOND), 0)}s`;
@@ -30,14 +31,17 @@ export function shortAge(ms: number): string {
   return `${Math.floor(ms / DAY)}d`;
 }
 
-/** The units a size is said in, smallest first, each 1024 of the last. */
+/** The size units, smallest first. Each unit is 1024 times the previous unit. */
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
 
 /**
- * A byte count in the largest fitting unit: `12 KB`, `5.2 MB`, `1.4 GB`.
+ * Formats a byte count in the largest fitting unit: `12 KB`, `5.2 MB`, `1.4 GB`.
  *
- * One decimal below ten and none from ten up. A count in bytes has no
- * decimal. Sized for a whole workspace.
+ * Uses one decimal below ten and none from ten up. A count in bytes has no
+ * decimal. The units go up to TB, so the size of a whole workspace fits.
+ *
+ * @param bytes The byte count.
+ * @returns The short size.
  */
 export function shortSize(bytes: number): string {
   let value = Math.max(bytes, 0);

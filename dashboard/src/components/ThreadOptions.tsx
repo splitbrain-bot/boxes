@@ -20,25 +20,25 @@ import type {
 } from '../../../shared/types.ts';
 import { rememberDialog, useHarnesses } from '../stores/harnesses.ts';
 
-/** The block's state, held by the hook and rendered by the component. */
+/** The state of the thread options block, held by the hook and rendered by the component. */
 export interface ThreadOptionsState {
   /** Every harness, or null while the list is still loading. */
   harnesses: HarnessInfo[] | null;
-  /** The one chosen, or null while nothing has loaded. */
+  /** The chosen harness, or null while nothing has loaded. */
   chosen: HarnessInfo | null;
-  /** What the last load failed with, or null. */
+  /** The error of the last load, or null. */
   error: string | null;
   /**
-   * Whether the harness list has loaded or failed. Callers hold their submit
+   * True when the harness list has loaded or failed. Callers hold their submit
    * until then, because an earlier submit would start the thread on the
-   * orchestrator's default agent.
+   * default agent of the orchestrator.
    */
   ready: boolean;
   /** The mode chosen, or null for a harness whose catalogue has no modes. */
   modeId: string | null;
-  /** Every other setting, by the adapter's own id for it. */
+  /** Every other setting, by the id that the adapter gives it. */
   config: Record<string, string>;
-  /** What a create request should carry, or null while nothing is chosen. */
+  /** The options for a create request, or null while nothing is chosen. */
   value: ThreadOptionsBody | null;
   /** Picks a harness and resets the mode and settings to its start values. */
   setHarness: (id: HarnessId) => void;
@@ -47,21 +47,21 @@ export interface ThreadOptionsState {
   /** Sets one config option by its id. */
   setConfig: (optionId: string, value: string) => void;
   /**
-   * Stores the choice as this harness's dialog default, so the next dialog on
+   * Stores the choice as the dialog default of this harness, so the next dialog on
    * any device opens on it. Callers call it once the thread exists.
    */
   remember: () => void;
 }
 
 /**
- * Returns the start values for a harness: the last dialog's choice for it,
- * laid over the registry's defaults.
+ * Returns the start values for a harness. The choice of the last dialog for the
+ * harness overrides the defaults of the registry.
  *
- * The merge gives an option that the adapter added since the last choice its
- * default value.
+ * With the merge, an option that the adapter added after the last choice gets
+ * its default value.
  *
  * @param info The harness.
- * @param saved The last dialog's choice for it, if any.
+ * @param saved The choice of the last dialog for the harness, if any.
  * @returns The mode, or null without modes, and the config values.
  */
 function prefill(
@@ -81,7 +81,11 @@ function prefill(
   return { modeId, config: { ...info.defaultConfig, ...saved?.config } };
 }
 
-/** Holds the block's state, wired to the harness store. */
+/**
+ * Holds the state of the block, connected to the harness store.
+ *
+ * @returns The state for {@link ThreadOptions}.
+ */
 export function useThreadOptions(): ThreadOptionsState {
   const { harnesses, dialogs, error } = useHarnesses();
   const [harnessId, setHarnessId] = useState<HarnessId | null>(null);
@@ -109,8 +113,8 @@ export function useThreadOptions(): ThreadOptionsState {
   const setHarness = useCallback(
     (id: HarnessId) => {
       const info = harnesses?.find((harness) => harness.id === id);
-      // Modes and models belong to one adapter, so a switch starts from the new
-      // harness's own values.
+      // Modes and models belong to one adapter, so a switch starts from the
+      // values of the new harness.
       if (info) choose(info, dialogs[info.id]);
     },
     [harnesses, dialogs, choose],
@@ -152,12 +156,12 @@ export function useThreadOptions(): ThreadOptionsState {
 /**
  * Returns the value a select shows for one option.
  *
- * The block's choice wins while the adapter still offers it. Otherwise the
- * adapter's current value or the first offered value keeps the select from
- * showing nothing, for example after a model was dropped.
+ * The choice of the block wins while the adapter offers it. Otherwise the
+ * current value of the adapter or the first offered value keeps the select from
+ * showing nothing, for example after the adapter dropped a model.
  *
  * @param option The config option.
- * @param config The block's chosen values.
+ * @param config The chosen values of the block.
  * @returns The value to select, or an empty string without choices.
  */
 function selectedValue(option: ThreadConfigOption, config: Record<string, string>): string {
@@ -174,7 +178,8 @@ function selectedValue(option: ThreadConfigOption, config: Record<string, string
  *
  * The modes and options come from the harness catalogue. The orchestrator
  * caches what the adapter advertised the last time it ran. A value chosen here
- * is a request, and the adapter corrects it on the thread's first turn.
+ * is a request. The adapter can reject it when the orchestrator sets it on the
+ * new thread.
  *
  * @param state The state from `useThreadOptions`.
  */
@@ -189,8 +194,8 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
     );
   }
 
-  // The cached `currentModeId` is the last thread's mode, so the block's
-  // choice replaces it.
+  // The cached `currentModeId` comes from the last answer of the adapter, so the
+  // choice of the block replaces it.
   const cached = chosen?.catalog?.modes ?? null;
   const modes = cached ? { ...cached, currentModeId: state.modeId ?? cached.currentModeId } : null;
   const hasModes = (modes?.availableModes.length ?? 0) > 1;

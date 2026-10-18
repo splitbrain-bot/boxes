@@ -31,10 +31,10 @@ import type {
 } from '../../shared/types.ts';
 
 /**
- * A request the API refused, with the HTTP status and the API's message.
+ * A request that the API refused, with the HTTP status and the message of the API.
  *
- * A caller shows the message. The status lets a caller act on a refusal, such
- * as a save the file's hash turned down.
+ * A caller shows the message. A caller can use the status to handle one type of refusal, e.g., a save that the API
+ * refused because the file hash changed.
  */
 export class ApiError extends Error {
   /**
@@ -52,10 +52,14 @@ export class ApiError extends Error {
 
 /**
  * Sends one JSON request and returns the parsed body, or undefined for a 204.
- * Throws an {@link ApiError} when the response is not a success.
  *
  * Sets the JSON content type only when the call has a body, because the API
  * rejects an empty body that claims to be JSON.
+ *
+ * @param path The URL path of the request.
+ * @param init The fetch options.
+ * @returns The parsed response body.
+ * @throws {ApiError} When the response is not a success.
  */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -71,7 +75,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const body = (await res.json()) as { error?: string };
       if (body.error) message = body.error;
     } catch {
-      // non-JSON error body
+      // The error body is not JSON.
     }
     throw new ApiError(res.status, message);
   }
@@ -81,25 +85,64 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 /** Typed client for the orchestrator's REST API. */
 export const api = {
-  /** Lists every box. */
+  /**
+   * Lists every box.
+   *
+   * @returns The summary of each box.
+   */
   listBoxes: () => request<BoxSummary[]>('/api/boxes'),
-  /** Reads one box. */
+  /**
+   * Reads one box.
+   *
+   * @param id The id of the box.
+   * @returns The details of the box.
+   */
   getBox: (id: string) => request<BoxDetail>(`/api/boxes/${id}`),
-  /** Creates a box. */
+  /**
+   * Creates a box.
+   *
+   * @param body The settings of the new box.
+   * @returns The details of the new box.
+   */
   createBox: (body: CreateBoxBody) =>
     request<BoxDetail>('/api/boxes', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  /** Starts a box's container. */
+  /**
+   * Starts the container of a box.
+   *
+   * @param id The id of the box.
+   * @returns The details of the box after the start.
+   */
   startBox: (id: string) => request<BoxDetail>(`/api/boxes/${id}/start`, { method: 'POST' }),
-  /** Stops a box's container. */
+  /**
+   * Stops the container of a box.
+   *
+   * @param id The id of the box.
+   * @returns The details of the box after the stop.
+   */
   stopBox: (id: string) => request<BoxDetail>(`/api/boxes/${id}/stop`, { method: 'POST' }),
-  /** Deletes a box. */
+  /**
+   * Deletes a box.
+   *
+   * @param id The id of the box.
+   */
   deleteBox: (id: string) => request<void>(`/api/boxes/${id}`, { method: 'DELETE' }),
-  /** Lists a box's threads. */
+  /**
+   * Lists the threads of a box.
+   *
+   * @param id The id of the box.
+   * @returns The summary of each thread.
+   */
   listThreads: (id: string) => request<ThreadSummary[]>(`/api/boxes/${id}/threads`),
-  /** Adds a thread to a box, empty or with the context of the thread named by `from`. */
+  /**
+   * Adds a thread to a box, empty or with the context of the thread named by `from`.
+   *
+   * @param id The id of the box.
+   * @param body The thread to fork and the options of the new thread.
+   * @returns The summary of the new thread.
+   */
   createThread: (id: string, body: CreateThreadBody = {}) =>
     request<ThreadSummary>(`/api/boxes/${id}/threads`, {
       method: 'POST',
@@ -108,7 +151,12 @@ export const api = {
   /**
    * Marks a thread done, or removes the mark, and returns the thread.
    *
-   * The mark only changes how the thread is drawn.
+   * The mark changes only how the dashboard shows the thread.
+   *
+   * @param id The id of the box.
+   * @param threadId The id of the thread.
+   * @param done True to set the mark, false to remove it.
+   * @returns The summary of the thread.
    */
   setThreadDone: (id: string, threadId: string, done: boolean) =>
     request<ThreadSummary>(`/api/boxes/${id}/threads/${threadId}/done`, {
@@ -119,11 +167,14 @@ export const api = {
    * Stops one task a thread left running, or every task it has, and returns
    * how many the adapter stopped.
    *
-   * A cancel does not reach a background command, because the command
-   * outlives the turn that started it.
+   * A cancel does not stop a background command, because the command
+   * continues to run after the turn that started it.
    *
+   * @param id The id of the box.
+   * @param threadId The id of the thread.
    * @param processId The adapter's id for the task. Without it, every task
    *   of the thread stops.
+   * @returns The number of tasks that the adapter stopped.
    */
   stopBackgroundWork: (id: string, threadId: string, processId?: string) =>
     request<{ stopped: number }>(`/api/boxes/${id}/threads/${threadId}/background/stop`, {
@@ -131,11 +182,14 @@ export const api = {
       body: JSON.stringify({ processId }),
     }),
   /**
-   * Kills every process in a box that Boxes did not start itself, and returns
+   * Kills every process in a box that Boxes did not start, and returns
    * how many processes got the signal.
    *
-   * After an adapter restart, no adapter knows the tasks the old process left
-   * running. The orchestrator reads the box's process table instead.
+   * After an adapter restart, no adapter knows the tasks that the old process
+   * left running. The orchestrator uses the process table of the box container.
+   *
+   * @param id The id of the box.
+   * @returns The number of processes that got the signal.
    */
   stopBoxWork: (id: string) =>
     request<{ stopped: number }>(`/api/boxes/${id}/background/stop`, { method: 'POST' }),
@@ -143,7 +197,11 @@ export const api = {
    * Uploads one attached file into the box's workspace and returns where it
    * was stored.
    *
-   * The body is the raw bytes. The file name travels in the query.
+   * The body holds the raw bytes. The query holds the file name.
+   *
+   * @param id The id of the box.
+   * @param file The file to upload.
+   * @returns The stored name, path and size of the file.
    */
   uploadAttachment: (id: string, file: File) =>
     request<StoredAttachment>(
@@ -154,180 +212,338 @@ export const api = {
         body: file,
       },
     ),
-  /** Reads the orchestrator's health probe. */
+  /**
+   * Reads the orchestrator's health probe.
+   *
+   * @returns The health of the deployment.
+   */
   health: () => request<HealthResponse>('/healthz'),
-  /** Reads the public key a browser subscribes to push with. */
+  /**
+   * Reads the public key a browser subscribes to push with.
+   *
+   * @returns The public key.
+   */
   pushKey: () => request<PushKeyResponse>('/api/push/key'),
-  /** Registers a browser's push subscription. */
+  /**
+   * Registers a browser's push subscription.
+   *
+   * @param body The push subscription of the browser.
+   */
   subscribePush: (body: PushSubscribeBody) =>
     request<void>('/api/push/subscribe', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  /** Removes the push subscription with this endpoint. */
+  /**
+   * Removes the push subscription with this endpoint.
+   *
+   * @param endpoint The endpoint URL of the subscription.
+   */
   unsubscribePush: (endpoint: string) =>
     request<void>('/api/push/subscribe', {
       method: 'DELETE',
       body: JSON.stringify({ endpoint }),
     }),
 
-  // --- code review over the box's workspace ---------------------------
-
   /**
-   * Reads one directory of the review, with everything the side panel needs
-   * around it.
+   * Reads one directory of the review, with all the data that the side panel needs.
    *
-   * @param path Workspace-relative, and empty for the workspace root.
-   * @param fresh True when the browser has just arrived rather than opened a
-   *   folder. It makes the orchestrator ask git again.
+   * @param id The id of the box.
+   * @param path The path relative to the workspace, or empty for the workspace root.
+   * @param fresh True when the browser arrives at the review, and false when it opens a folder.
+   *   When true, the orchestrator reads the git state again.
+   * @returns The directory data.
    */
   reviewDir: (id: string, path: string, fresh: boolean) =>
     request<ReviewDirResponse>(
       `/api/boxes/${id}/review/dir?path=${encodeURIComponent(path)}${fresh ? '&fresh=1' : ''}`,
     ),
-  /** Reads one file of the review, with everything the file view needs. */
+  /**
+   * Reads one file of the review, with all the data that the file view needs.
+   *
+   * @param id The id of the box.
+   * @param path The path of the file, relative to the workspace.
+   * @returns The file data.
+   */
   reviewFile: (id: string, path: string) =>
     request<ReviewFileResponse>(`/api/boxes/${id}/review/file?path=${encodeURIComponent(path)}`),
-  /** Saves an edited file and returns it as read back. */
+  /**
+   * Saves an edited file.
+   *
+   * @param id The id of the box.
+   * @param body The path, the new content and the hash that the browser last read.
+   * @returns The file as the orchestrator reads it back.
+   */
   saveReviewFile: (id: string, body: ReviewFileBody) =>
     request<ReviewFileResponse>(`/api/boxes/${id}/review/file`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
-  /** Adds or replaces the comment on one line. */
+  /**
+   * Adds or replaces the comment on one line.
+   *
+   * @param id The id of the box.
+   * @param body The file, the line and the comment.
+   * @returns The comments after the change.
+   */
   setAnnotation: (id: string, body: ReviewAnnotationBody) =>
     request<ReviewAnnotationsResponse>(`/api/boxes/${id}/review/annotations`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
-  /** Removes the comment on one line. */
+  /**
+   * Removes the comment on one line.
+   *
+   * @param id The id of the box.
+   * @param path The path of the file, relative to the workspace.
+   * @param line The line of the comment.
+   * @returns The comments after the change.
+   */
   deleteAnnotation: (id: string, path: string, line: number) =>
     request<ReviewAnnotationsResponse>(
       `/api/boxes/${id}/review/annotations?path=${encodeURIComponent(path)}&line=${line}`,
       { method: 'DELETE' },
     ),
-  /** Sets the revision the review compares against, or null for HEAD. */
+  /**
+   * Sets the revision the review compares against.
+   *
+   * @param id The id of the box.
+   * @param rev The revision, or null for HEAD.
+   * @returns The stored base and the commit it resolves to in each repository.
+   */
   setReviewBase: (id: string, rev: string | null) =>
     request<ReviewBaseResponse>(`/api/boxes/${id}/review/base`, {
       method: 'PUT',
       body: JSON.stringify({ rev }),
     }),
-  /** Deletes the box's REVIEW.md, which holds the review. */
+  /**
+   * Deletes the REVIEW.md of a box, which holds the review.
+   *
+   * @param id The id of the box.
+   */
   deleteReview: (id: string) => request<void>(`/api/boxes/${id}/review`, { method: 'DELETE' }),
 
-  // --- agent configuration -------------------------------------------------
-  // Every change returns the whole set.
-
-  /** Lists every agent set. */
+  /**
+   * Lists every agent set.
+   *
+   * @returns The summary of each agent set.
+   */
   listAgentSets: () => request<AgentSetSummary[]>('/api/agent-sets'),
-  /** Reads one agent set. */
+  /**
+   * Reads one agent set.
+   *
+   * @param setId The id of the agent set.
+   * @returns The whole set.
+   */
   getAgentSet: (setId: string) => request<AgentSetDetail>(`/api/agent-sets/${setId}`),
-  /** Creates an empty agent set. */
+  /**
+   * Creates an empty agent set.
+   *
+   * @param name The name of the new set.
+   * @returns The whole new set.
+   */
   createAgentSet: (name: string) =>
     request<AgentSetDetail>('/api/agent-sets', {
       method: 'POST',
       body: JSON.stringify({ name }),
     }),
-  /** Renames a set or replaces its AGENTS.md. */
+  /**
+   * Renames a set or replaces its AGENTS.md.
+   *
+   * @param setId The id of the agent set.
+   * @param body The new name, the new AGENTS.md, or both.
+   * @returns The whole set after the change.
+   */
   updateAgentSet: (setId: string, body: { name?: string; agentsMd?: string }) =>
     request<AgentSetDetail>(`/api/agent-sets/${setId}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
-  /** Deletes an agent set. */
+  /**
+   * Deletes an agent set.
+   *
+   * @param setId The id of the agent set.
+   */
   deleteAgentSet: (setId: string) =>
     request<void>(`/api/agent-sets/${setId}`, { method: 'DELETE' }),
-  /** Adds or replaces one skill of a set. */
+  /**
+   * Adds or replaces one skill of a set.
+   *
+   * @param setId The id of the agent set.
+   * @param body The name and the SKILL.md of the skill.
+   * @returns The whole set after the change.
+   */
   putAgentItem: (setId: string, body: AgentItemBody) =>
     request<AgentSetDetail>(`/api/agent-sets/${setId}/items`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
-  /** Removes one skill of a set. */
+  /**
+   * Removes one skill of a set.
+   *
+   * @param setId The id of the agent set.
+   * @param name The name of the skill.
+   * @returns The whole set after the change.
+   */
   deleteAgentItem: (setId: string, name: string) =>
     request<AgentSetDetail>(`/api/agent-sets/${setId}/items?name=${encodeURIComponent(name)}`, {
       method: 'DELETE',
     }),
-  /** Adds a repository to take skills from, and pulls it. */
+  /**
+   * Adds a repository to take skills from, and pulls it.
+   *
+   * @param setId The id of the agent set.
+   * @param body The URL and the ref of the repository.
+   * @returns The whole set after the change.
+   */
   addAgentRepo: (setId: string, body: AgentRepoBody) =>
     request<AgentSetDetail>(`/api/agent-sets/${setId}/repos`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  /** Removes a repository from a set. */
+  /**
+   * Removes a repository from a set.
+   *
+   * @param setId The id of the agent set.
+   * @param repoId The id of the repository.
+   * @returns The whole set after the change.
+   */
   deleteAgentRepo: (setId: string, repoId: string) =>
     request<AgentSetDetail>(`/api/agent-sets/${setId}/repos/${repoId}`, { method: 'DELETE' }),
-  /** Pulls one repository of a set now. */
+  /**
+   * Pulls one repository of a set now.
+   *
+   * @param setId The id of the agent set.
+   * @param repoId The id of the repository.
+   * @returns The whole set after the pull.
+   */
   pullAgentRepo: (setId: string, repoId: string) =>
     request<AgentSetDetail>(`/api/agent-sets/${setId}/repos/${repoId}/pull`, { method: 'POST' }),
-  /** Reads what a box that selects this set receives, global set included. */
+  /**
+   * Reads the agent files that a box with this set receives, including the global set.
+   *
+   * @param setId The id of the agent set.
+   * @returns The merged AGENTS.md and skills.
+   */
   agentSetPreview: (setId: string) =>
     request<AgentBundlePreview>(`/api/agent-sets/${setId}/preview`),
 
-  // --- harnesses ------------------------------------------------------------
-
   /**
-   * Lists every harness this deployment can run, with the registry's
-   * defaults, what each adapter last advertised, and the state of its
-   * credential.
+   * Lists every harness that this deployment can run.
    *
-   * The health probe carries the same harnesses without the catalogues.
+   * Each harness has the registry defaults, the last capabilities of its adapter and the state of its credential. The
+   * health probe returns the same harnesses without the catalogues.
+   *
+   * @returns The data of each harness.
    */
   harnesses: () => request<HarnessInfo[]>('/api/harnesses'),
 
-  // --- credentials and settings ---------------------------------------------
-  // The API never returns a secret, only its account and status.
-
-  /** Lists every stored credential. */
+  /**
+   * Lists every stored credential.
+   *
+   * @returns The account and status of each credential, without the secret.
+   */
   listCredentials: () => request<CredentialSummary[]>('/api/credentials'),
-  /** Stores a pasted secret for a credential. */
+  /**
+   * Stores a pasted secret for a credential.
+   *
+   * @param id The id of the credential.
+   * @param method The type of the secret: a token, an API key or an OAuth token.
+   * @param secret The secret.
+   * @returns The account and status of the credential, without the secret.
+   */
   putCredential: (id: CredentialId, method: CredentialMethod, secret: string) =>
     request<CredentialSummary>(`/api/credentials/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ method, secret }),
     }),
-  /** Removes a stored credential. */
+  /**
+   * Removes a stored credential.
+   *
+   * @param id The id of the credential.
+   */
   deleteCredential: (id: CredentialId) =>
     request<void>(`/api/credentials/${id}`, { method: 'DELETE' }),
 
-  /** Lists every API key a user added. */
+  /**
+   * Lists every API key a user added.
+   *
+   * @returns The name, the hosts and the last four characters of each key.
+   */
   listApiKeys: () => request<ApiKeySummary[]>('/api/api-keys'),
-  /** Stores an API key, or only its hosts when no secret is given. */
+  /**
+   * Stores an API key, or only its hosts when no secret is given.
+   *
+   * @param name The environment variable name of the key.
+   * @param hosts The hosts for which the egress proxy swaps in the key.
+   * @param secret The key. Without it, the orchestrator keeps the stored key.
+   * @returns The name, the hosts and the last four characters of the key.
+   */
   putApiKey: (name: string, hosts: string[], secret?: string) =>
     request<ApiKeySummary>(`/api/api-keys/${encodeURIComponent(name)}`, {
       method: 'PUT',
       body: JSON.stringify({ hosts, ...(secret ? { secret } : {}) }),
     }),
-  /** Removes an API key. */
+  /**
+   * Removes an API key.
+   *
+   * @param name The environment variable name of the key.
+   */
   deleteApiKey: (name: string) =>
     request<void>(`/api/api-keys/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
-  // --- logging in to an account ---------------------------------------------
-  // The orchestrator runs the harness's own CLI in a throwaway container.
-
-  /** Starts a login and returns the id the other login calls take. */
+  /**
+   * Starts a login. The orchestrator runs the CLI of the harness in a temporary container.
+   *
+   * @param id The id of the credential.
+   * @returns The id that the other login calls take.
+   */
   startLogin: (id: CredentialId) =>
     request<StartLoginResponse>(`/api/credentials/${id}/login`, { method: 'POST' }),
-  /** Reads the state of a login. The page polls it. */
+  /**
+   * Reads the state of a login. `CredentialLogin` polls this call.
+   *
+   * @param id The id of the credential.
+   * @param loginId The id of the login.
+   * @returns The state of the login.
+   */
   loginState: (id: CredentialId, loginId: string) =>
     request<LoginState>(`/api/credentials/${id}/login/${loginId}`),
   /**
-   * Hands the CLI the code the login page showed the user.
+   * Sends the code from the login page of the provider to the CLI.
    *
    * Only Claude's CLI asks for a code. The login state reports what happens
    * next.
+   *
+   * @param id The id of the credential.
+   * @param loginId The id of the login.
+   * @param code The code that the user pasted.
    */
   submitLoginCode: (id: CredentialId, loginId: string, code: string) =>
     request<void>(`/api/credentials/${id}/login/${loginId}/code`, {
       method: 'POST',
       body: JSON.stringify({ code } satisfies LoginCodeBody),
     }),
-  /** Cancels a login and removes its container. */
+  /**
+   * Cancels a login and removes its container.
+   *
+   * @param id The id of the credential.
+   * @param loginId The id of the login.
+   */
   cancelLogin: (id: CredentialId, loginId: string) =>
     request<void>(`/api/credentials/${id}/login/${loginId}`, { method: 'DELETE' }),
-  /** Reads the deployment settings. */
+  /**
+   * Reads the deployment settings.
+   *
+   * @returns All settings.
+   */
   getSettings: () => request<Settings>('/api/settings'),
-  /** Writes the settings the body names and returns all of them. */
+  /**
+   * Writes the settings that the body names.
+   *
+   * @param body The settings to change.
+   * @returns All settings after the change.
+   */
   patchSettings: (body: Partial<Settings>) =>
     request<Settings>('/api/settings', {
       method: 'PATCH',

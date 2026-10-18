@@ -18,8 +18,10 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 
+/** The duration of the disclosure animation, in milliseconds. */
 export const ANIMATION_DURATION = 200;
 
+/** True while the reasoning streams and the disclosure is open, which shows the live preview. */
 const ReasoningPreviewContext = createContext(false);
 
 /**
@@ -41,28 +43,39 @@ const reasoningVariants = cva("aui-reasoning-root w-full", {
   },
 });
 
+/** The props of {@link ReasoningRoot}. */
 export type ReasoningRootProps = Omit<
   React.ComponentProps<typeof Collapsible>,
   "open" | "onOpenChange"
 > &
   VariantProps<typeof reasoningVariants> & {
+    /** The open state, for a controlled disclosure. */
     open?: boolean;
+    /** Called with the new open state when the user toggles the disclosure. */
     onOpenChange?: (open: boolean) => void;
+    /** The open state at rest, for an uncontrolled disclosure. */
     defaultOpen?: boolean;
     /**
-     * Whether the reasoning is currently streaming. While `true` the
-     * disclosure is held open with a bottom-pinned live preview; when
-     * streaming ends it returns to `defaultOpen`, and the first manual
-     * toggle takes over the open/close state permanently. The live preview
-     * keeps following the newest tokens while the disclosure is open during
-     * streaming, even after a manual toggle, and pauses while the reader is
-     * scrolled up.
+     * True while the reasoning streams. The disclosure then stays open and
+     * shows a live preview that is pinned to the bottom. When streaming ends,
+     * the disclosure returns to `defaultOpen`. After the first manual toggle,
+     * the toggle alone decides the open state.
+     *
+     * While the disclosure is open during streaming, the live preview follows
+     * the newest tokens, also after a manual toggle. It pauses while the reader
+     * is scrolled up.
      */
     streaming?: boolean;
     /** Called right before the disclosure animates, on toggle and on streaming transitions. */
     onAnimationStart?: () => void;
   };
 
+/**
+ * The collapsible block around the reasoning.
+ *
+ * @param props The variant, the open state props, the streaming flag, the animation handler, the content and the
+ *   other collapsible props.
+ */
 function ReasoningRoot({
   className,
   variant,
@@ -87,8 +100,8 @@ function ReasoningRoot({
   useLayoutEffect(() => {
     if (prevStreamingRef.current === streaming) return;
     prevStreamingRef.current = streaming;
-    // A streaming transition only animates the panel when the resting state
-    // is collapsed; with `defaultOpen` the disclosure stays open across it.
+    // A streaming transition animates the panel only when the resting state
+    // is collapsed. With `defaultOpen`, the disclosure stays open across it.
     if (!isControlled && userOpen === null && !initialOpenRef.current) {
       onAnimationStart?.();
     }
@@ -129,11 +142,21 @@ function ReasoningRoot({
   );
 }
 
+/**
+ * A gradient at the top or bottom edge of the reasoning text, which fades the text into the background.
+ *
+ * @param side The edge of the fade.
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function ReasoningFade({
   side = "bottom",
   className,
   ...props
-}: React.ComponentProps<"div"> & { side?: "top" | "bottom" }) {
+}: React.ComponentProps<"div"> & {
+  /** The edge of the fade. */
+  side?: "top" | "bottom";
+}) {
   if (side === "top") {
     return (
       <div
@@ -170,9 +193,14 @@ function ReasoningFade({
 /**
  * The row that opens and closes the reasoning.
  *
- * Boxes edit: it matches the tool group's row, with small text, a small
- * chevron and no leading icon, so the two disclosures in a message read as
- * one kind of row.
+ * Boxes edit: it matches the row of the tool group, with small text, a small
+ * chevron and no leading icon, so the two disclosures in a message look the
+ * same.
+ *
+ * @param active True while the reasoning streams, which makes the label shimmer.
+ * @param duration The reasoning time in seconds, shown after the label when set.
+ * @param className Extra classes.
+ * @param props The other collapsible trigger props.
  */
 function ReasoningTrigger({
   active,
@@ -180,7 +208,9 @@ function ReasoningTrigger({
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
+  /** True while the reasoning streams, which makes the label shimmer. */
   active?: boolean;
+  /** The reasoning time in seconds, shown after the label when set. */
   duration?: number;
 }) {
   const durationText = duration ? ` (${duration}s)` : "";
@@ -217,7 +247,13 @@ function ReasoningTrigger({
   );
 }
 
-/** The collapsible panel that holds the reasoning text. */
+/**
+ * The collapsible panel that holds the reasoning text.
+ *
+ * @param className Extra classes.
+ * @param children The reasoning text.
+ * @param props The other collapsible content props.
+ */
 function ReasoningContent({
   className,
   children,
@@ -249,7 +285,13 @@ function ReasoningContent({
   );
 }
 
-/** The reasoning text, pinned to the newest tokens while it streams. */
+/**
+ * The reasoning text, pinned to the newest tokens while it streams.
+ *
+ * @param className Extra classes.
+ * @param children The reasoning parts.
+ * @param props The other div props.
+ */
 function ReasoningText({
   className,
   children,
@@ -277,9 +319,9 @@ function ReasoningText({
       if (!pinned) return;
       scrollEl.scrollTop = scrollEl.scrollHeight;
     };
-    // A pin's own scroll event can arrive after new content grew the scroll
-    // height and read as "not at bottom"; only an upward move at unchanged
-    // scroll height is user intent.
+    // The scroll event of a pin can arrive after new content has grown the
+    // scroll height, and then it reads as not at the bottom. So only an upward
+    // move at an unchanged scroll height counts as a scroll by the reader.
     const onScroll = () => {
       if (isAtBottom()) {
         pinned = true;

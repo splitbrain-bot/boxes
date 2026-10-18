@@ -1,16 +1,18 @@
+/**
+ * Browser tests for the terminal page, over a real WebSocket and the real
+ * orchestrator. On the terminal path, only the Docker daemon is a stand-in, with
+ * a pty that echoes and answers.
+ */
+
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply } from './stub-gateway.ts';
 
-/**
- * Browser tests for the terminal page, over a real WebSocket and the real
- * orchestrator. Only Docker is a stand-in, with a pty that echoes and answers.
- */
-
 /** The box the tests drive. */
 const ID = DEFAULT_BOX.id;
 
+/** The orchestrator of the running test. */
 let stub: TestOrchestrator;
 
 beforeEach(async () => {
@@ -27,7 +29,12 @@ afterAll(async () => {
   await closeBrowser();
 });
 
-/** Everything the terminal has drawn, as the rows read left to right. */
+/**
+ * Reads everything the terminal has drawn, as the rows read left to right.
+ *
+ * @param page The page with the terminal.
+ * @returns The text of the screen.
+ */
 function screen(page: import('playwright').Page): Promise<string> {
   return page.locator('.xterm-screen').innerText();
 }
@@ -35,12 +42,13 @@ function screen(page: import('playwright').Page): Promise<string> {
 test('a terminal opens on the box and carries what is typed both ways', async () => {
   const { page, errors, close } = await openPage(stub.url, `/boxes/${ID}/terminal`);
   try {
-    // The prompt is the pty's first output, so the socket, exec and emulator work.
+    // The prompt is the pty's first output, so its arrival shows that the socket,
+    // the exec and the emulator work.
     await expect.poll(() => screen(page)).toContain('agent@box');
 
     await page.locator('.xterm-helper-textarea').fill('');
     await page.keyboard.type('echo hi');
-    // The pty echoes, not the emulator, so the keystrokes reached the box.
+    // The pty echoes and the emulator does not, so the keystrokes reached the pty.
     await expect.poll(() => screen(page)).toContain('echo hi');
 
     await page.keyboard.press('Enter');

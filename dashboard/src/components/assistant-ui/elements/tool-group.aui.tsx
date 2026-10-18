@@ -19,8 +19,10 @@ import {
 import { useDisclosureLock } from "@/hooks/use-disclosure-lock";
 import { cn } from "@/lib/utils";
 
+/** The duration of the disclosure animation, in milliseconds. */
 const ANIMATION_DURATION = 200;
 
+/** The class names of a tool group for each variant. */
 const toolGroupVariants = cva("aui-tool-group-root group/tool-group w-full", {
   variants: {
     variant: {
@@ -32,17 +34,25 @@ const toolGroupVariants = cva("aui-tool-group-root group/tool-group w-full", {
   defaultVariants: { variant: "outline" },
 });
 
+/** The props of {@link ToolGroupRoot}. */
 export type ToolGroupRootProps = Omit<
   React.ComponentProps<typeof Collapsible>,
   "open" | "onOpenChange"
 > &
   VariantProps<typeof toolGroupVariants> & {
+    /** The open state, for a controlled disclosure. */
     open?: boolean;
+    /** Called with the new open state when the user toggles the disclosure. */
     onOpenChange?: (open: boolean) => void;
+    /** The open state at mount, for an uncontrolled disclosure. */
     defaultOpen?: boolean;
   };
 
-/** The collapsible root of a tool group, with the viewport scroll locked while it animates. */
+/**
+ * The collapsible root of a tool group, with the viewport scroll locked while it animates.
+ *
+ * @param props The variant, the open state props, the content and the other collapsible props.
+ */
 function ToolGroupRoot({
   className,
   variant,
@@ -95,14 +105,23 @@ function ToolGroupRoot({
   );
 }
 
-/** The row that opens and closes a tool group, with the number of calls in it. */
+/**
+ * The row that opens and closes a tool group, with the number of calls in it.
+ *
+ * @param count The number of tool calls in the group.
+ * @param active True while a call runs, which shows a spinner and makes the label shimmer.
+ * @param className Extra classes.
+ * @param props The other collapsible trigger props.
+ */
 function ToolGroupTrigger({
   count,
   active = false,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
+  /** The number of tool calls in the group. */
   count: number;
+  /** True while a call runs, which shows a spinner and makes the label shimmer. */
   active?: boolean;
 }) {
   const label = `${count} tool ${count === 1 ? "call" : "calls"}`;
@@ -119,7 +138,7 @@ function ToolGroupTrigger({
       )}
       {...props}
     >
-      {/* Boxes edit: the shared spinner. */}
+      {/* Boxes edit: uses the spinner of the dashboard. */}
       {active && (
         <Spinner
           data-slot="tool-group-trigger-loader"
@@ -152,6 +171,13 @@ function ToolGroupTrigger({
   );
 }
 
+/**
+ * The collapsible panel with the tool calls of a group. The calls fade in one after the other.
+ *
+ * @param className Extra classes.
+ * @param children The tool calls.
+ * @param props The other collapsible content props.
+ */
 function ToolGroupContent({
   className,
   children,
@@ -192,14 +218,25 @@ function ToolGroupContent({
   );
 }
 
+/** The type of {@link ToolGroup}: the group component with its parts attached. */
 type ToolGroupComponent = FC<
   PropsWithChildren<{ startIndex: number; endIndex: number }>
 > & {
+  /** The root part. */
   Root: typeof ToolGroupRoot;
+  /** The row that opens and closes the block. */
   Trigger: typeof ToolGroupTrigger;
+  /** The collapsible panel. */
   Content: typeof ToolGroupContent;
 };
 
+/**
+ * A closed tool group around consecutive tool calls.
+ *
+ * @param children The tool calls.
+ * @param startIndex The index of the first call of the group in the message.
+ * @param endIndex The index of the last call of the group in the message.
+ */
 const ToolGroupImpl: FC<
   PropsWithChildren<{ startIndex: number; endIndex: number }>
 > = ({ children, startIndex, endIndex }) => {
@@ -214,10 +251,12 @@ const ToolGroupImpl: FC<
 };
 
 /**
- * @deprecated This wrapper targets the legacy `components.ToolGroup` prop
- * on `<MessagePrimitive.Parts>`. Use `<MessagePrimitive.GroupedParts>` with
- * a `groupBy` returning `"group-tool"` and compose `ToolGroupRoot` /
- * `ToolGroupTrigger` / `ToolGroupContent` directly.
+ * The memoized tool group, with its parts attached for custom layouts.
+ *
+ * @deprecated The wrapper is for the legacy `components.ToolGroup` prop of
+ * `MessagePrimitive.Parts`. Use `MessagePrimitive.GroupedParts` with a `groupBy`
+ * that returns `"group-tool"`, and compose `ToolGroupRoot`, `ToolGroupTrigger`
+ * and `ToolGroupContent` directly.
  */
 const ToolGroup = memo(ToolGroupImpl) as unknown as ToolGroupComponent;
 

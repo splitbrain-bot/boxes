@@ -7,7 +7,12 @@ import { cn } from '@/lib/utils';
 
 /**
  * The dialog root. Opening it pushes a history entry at the same URL, so the
- * back button closes the dialog instead of leaving the screen under it.
+ * back button closes the dialog and the screen below it stays.
+ *
+ * @param open The open state, for a controlled dialog.
+ * @param defaultOpen The open state at mount, for an uncontrolled dialog.
+ * @param onOpenChange Called with the new open state.
+ * @param props The other props of the Radix dialog root.
  */
 function Dialog({
   open,
@@ -26,18 +31,39 @@ function Dialog({
   );
 }
 
+/**
+ * The control that opens a dialog.
+ *
+ * @param props The props of the Radix dialog trigger.
+ */
 function DialogTrigger({ ...props }: React.ComponentProps<typeof DialogPrimitive.Trigger>) {
   return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} />;
 }
 
+/**
+ * The portal that renders a dialog at the end of the document.
+ *
+ * @param props The props of the Radix dialog portal.
+ */
 function DialogPortal({ ...props }: React.ComponentProps<typeof DialogPrimitive.Portal>) {
   return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />;
 }
 
+/**
+ * A control that closes a dialog.
+ *
+ * @param props The props of the Radix dialog close.
+ */
 function DialogClose({ ...props }: React.ComponentProps<typeof DialogPrimitive.Close>) {
   return <DialogPrimitive.Close data-slot="dialog-close" {...props} />;
 }
 
+/**
+ * The dimmed backdrop behind a dialog.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix dialog overlay.
+ */
 function DialogOverlay({
   className,
   ...props
@@ -54,12 +80,21 @@ function DialogOverlay({
   );
 }
 
+/**
+ * The centred panel of a dialog, with its backdrop and an optional close button.
+ *
+ * @param className Extra classes.
+ * @param children The content of the panel.
+ * @param showCloseButton True to show the close button at the top right corner.
+ * @param props The other props of the Radix dialog content.
+ */
 function DialogContent({
   className,
   children,
   showCloseButton = true,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  /** True to show the close button at the top right corner. */
   showCloseButton?: boolean;
 }) {
   return (
@@ -88,6 +123,12 @@ function DialogContent({
   );
 }
 
+/**
+ * The header area of a dialog.
+ *
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function DialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
@@ -98,12 +139,21 @@ function DialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
   );
 }
 
+/**
+ * The footer area of a dialog, for its buttons.
+ *
+ * @param className Extra classes.
+ * @param showCloseButton True to add a close button.
+ * @param children The buttons.
+ * @param props The other div props.
+ */
 function DialogFooter({
   className,
   showCloseButton = false,
   children,
   ...props
 }: React.ComponentProps<'div'> & {
+  /** True to add a close button. */
   showCloseButton?: boolean;
 }) {
   return (
@@ -122,6 +172,12 @@ function DialogFooter({
   );
 }
 
+/**
+ * The title of a dialog.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix dialog title.
+ */
 function DialogTitle({ className, ...props }: React.ComponentProps<typeof DialogPrimitive.Title>) {
   return (
     <DialogPrimitive.Title
@@ -132,6 +188,12 @@ function DialogTitle({ className, ...props }: React.ComponentProps<typeof Dialog
   );
 }
 
+/**
+ * The muted description of a dialog, below its title.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix dialog description.
+ */
 function DialogDescription({
   className,
   ...props

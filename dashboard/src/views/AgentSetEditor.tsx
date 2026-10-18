@@ -28,14 +28,14 @@ import type {
 import { api } from '../api.ts';
 
 /**
- * Editor for one agent set: its AGENTS.md and its skills.
+ * Editor for one agent set.
  *
  * Each section saves on its own. Saved changes reach a box the next time the
  * box starts.
  */
 export function AgentSetEditor() {
   const { setId = '' } = useParams();
-  /** Leaves for the list of sets. */
+  /** Goes back to the list of sets. */
   const up = useUp('/agents');
 
   const [set, setSet] = useState<AgentSetDetail | null>(null);
@@ -82,7 +82,7 @@ export function AgentSetEditor() {
   /**
    * Runs one mutation, then reloads the set.
    *
-   * @returns Whether the mutation succeeded.
+   * @returns True when the mutation succeeded.
    */
   const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
@@ -242,7 +242,18 @@ export function AgentSetEditor() {
   );
 }
 
-/** The list of skills, with its own add button. */
+/**
+ * The list of skills, with its own add button.
+ *
+ * @param title The heading of the section.
+ * @param blurb The explanation under the heading.
+ * @param items The skills of the set.
+ * @param overridden The names of the skills in this set that replace a skill of the global set.
+ * @param busy True while a change runs, which disables the buttons.
+ * @param onAdd Opens the dialog for a new skill.
+ * @param onEdit Opens the dialog for an existing skill.
+ * @param onDelete Asks to delete a skill.
+ */
 function ItemSection({
   title,
   blurb,
@@ -256,7 +267,6 @@ function ItemSection({
   title: string;
   blurb: string;
   items: AgentItem[];
-  /** Names of the skills this set takes over from the global one. */
   overridden: Set<string>;
   busy: boolean;
   onAdd: () => void;
@@ -314,7 +324,15 @@ function ItemSection({
   );
 }
 
-/** The repositories a set takes skills from, with a form to add one. */
+/**
+ * The repositories a set takes skills from, with a form to add one.
+ *
+ * @param repos The repositories of the set.
+ * @param busy True while a change runs, which disables the buttons.
+ * @param onAdd Adds and pulls a repository. Resolves to true when that succeeded.
+ * @param onPull Pulls a repository now.
+ * @param onDelete Asks to remove a repository.
+ */
 function RepoSection({
   repos,
   busy,
@@ -324,7 +342,6 @@ function RepoSection({
 }: {
   repos: AgentRepo[];
   busy: boolean;
-  /** Adds and pulls a repository. Resolves to whether that succeeded. */
   onAdd: (url: string, ref: string) => Promise<boolean>;
   onPull: (repo: AgentRepo) => void;
   onDelete: (repo: AgentRepo) => void;
@@ -332,7 +349,7 @@ function RepoSection({
   const [url, setUrl] = useState('');
   const [ref, setRef] = useState('');
 
-  /** Adds the repository in the form, and empties the form when that worked. */
+  /** Adds the repository in the form, and clears the form on success. */
   const add = async (): Promise<void> => {
     if (await onAdd(url.trim(), ref.trim())) {
       setUrl('');
@@ -423,7 +440,11 @@ function RepoSection({
   );
 }
 
-/** Summary of the merged set that a box using this set gets. */
+/**
+ * Summary of the merged set that a box using this set gets.
+ *
+ * @param preview The merged AGENTS.md and skills.
+ */
 function Merged({ preview }: { preview: AgentBundlePreview }) {
   return (
     <Card className="flex flex-col gap-3 p-4">
@@ -452,6 +473,11 @@ function Merged({ preview }: { preview: AgentBundlePreview }) {
  *
  * The name is fixed once the skill exists. A rename in place would leave the
  * old skill installed in every box until its next start.
+ *
+ * @param item The skill to edit, or null for a new skill.
+ * @param busy True while the save runs, which disables the buttons.
+ * @param onCancel Closes the dialog without a save.
+ * @param onSave Saves the name and the SKILL.md of the skill.
  */
 function ItemDialog({
   item,

@@ -5,14 +5,32 @@ import type * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
+/**
+ * A floating panel that opens from a trigger.
+ *
+ * @param props The props of the Radix popover root.
+ */
 function Popover({ ...props }: React.ComponentProps<typeof PopoverPrimitive.Root>) {
   return <PopoverPrimitive.Root data-slot="popover" {...props} />;
 }
 
+/**
+ * The control that opens and closes a popover.
+ *
+ * @param props The props of the Radix popover trigger.
+ */
 function PopoverTrigger({ ...props }: React.ComponentProps<typeof PopoverPrimitive.Trigger>) {
   return <PopoverPrimitive.Trigger data-slot="popover-trigger" {...props} />;
 }
 
+/**
+ * The panel of a popover, rendered in a portal.
+ *
+ * @param className Extra classes.
+ * @param align The alignment against the trigger.
+ * @param sideOffset The distance from the trigger, in pixels.
+ * @param props The other props of the Radix popover content.
+ */
 function PopoverContent({
   className,
   align = 'center',
@@ -35,10 +53,21 @@ function PopoverContent({
   );
 }
 
+/**
+ * An element that positions a popover in place of its trigger.
+ *
+ * @param props The props of the Radix popover anchor.
+ */
 function PopoverAnchor({ ...props }: React.ComponentProps<typeof PopoverPrimitive.Anchor>) {
   return <PopoverPrimitive.Anchor data-slot="popover-anchor" {...props} />;
 }
 
+/**
+ * The header area of a popover panel.
+ *
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function PopoverHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
@@ -49,10 +78,22 @@ function PopoverHeader({ className, ...props }: React.ComponentProps<'div'>) {
   );
 }
 
+/**
+ * The title of a popover panel. It renders as a div.
+ *
+ * @param className Extra classes.
+ * @param props The other heading props.
+ */
 function PopoverTitle({ className, ...props }: React.ComponentProps<'h2'>) {
   return <div data-slot="popover-title" className={cn('font-medium', className)} {...props} />;
 }
 
+/**
+ * The muted description of a popover panel.
+ *
+ * @param className Extra classes.
+ * @param props The other paragraph props.
+ */
 function PopoverDescription({ className, ...props }: React.ComponentProps<'p'>) {
   return (
     <p

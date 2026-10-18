@@ -25,20 +25,30 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/Spinner";
 
+/** The duration of the disclosure animation, in milliseconds. */
 const ANIMATION_DURATION = 200;
 
+/** The class that shrinks a button a little while it is pressed. */
 const pressable = "active:scale-[0.98]";
 
+/** The props of {@link ToolFallbackRoot}. */
 export type ToolFallbackRootProps = Omit<
   React.ComponentProps<typeof Collapsible>,
   "open" | "onOpenChange"
 > & {
+  /** The open state, for a controlled disclosure. */
   open?: boolean;
+  /** Called with the new open state when the user toggles the disclosure. */
   onOpenChange?: (open: boolean) => void;
+  /** The open state at mount, for an uncontrolled disclosure. */
   defaultOpen?: boolean;
 };
 
-/** The collapsible root of one tool call, with the viewport scroll locked while it animates. */
+/**
+ * The collapsible root of one tool call, with the viewport scroll locked while it animates.
+ *
+ * @param props The open state props, the classes, the content and the other collapsible props.
+ */
 function ToolFallbackRoot({
   className,
   open: controlledOpen,
@@ -88,9 +98,10 @@ function ToolFallbackRoot({
   );
 }
 
+/** The status type of a tool call. */
 type ToolStatus = ToolCallMessagePartStatus["type"];
 
-/** The trigger icon for each tool status. Boxes edit: a running call shows the shared spinner. */
+/** The trigger icon for each tool status. Boxes edit: a running call shows the spinner of the dashboard. */
 const statusIconMap: Record<ToolStatus, React.ElementType> = {
   running: Spinner,
   complete: CheckIcon,
@@ -98,6 +109,13 @@ const statusIconMap: Record<ToolStatus, React.ElementType> = {
   "requires-action": AlertCircleIcon,
 };
 
+/**
+ * Formats the run time of a tool call.
+ *
+ * @param ms The run time in milliseconds.
+ * @returns "<1s" below one second, tenths of a second below ten seconds, whole
+ *   seconds below a minute, and minutes with seconds after that.
+ */
 const formatToolDuration = (ms: number) => {
   if (ms < 1000) return "<1s";
   const seconds = ms / 1000;
@@ -106,6 +124,12 @@ const formatToolDuration = (ms: number) => {
   return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
 };
 
+/**
+ * The run time of the tool call, or nothing while the runtime does not know it.
+ *
+ * @param className Extra classes.
+ * @param props The other span props.
+ */
 function ToolFallbackDuration({
   className,
   ...props
@@ -127,7 +151,15 @@ function ToolFallbackDuration({
   );
 }
 
-/** The row that names the tool call and its status, and opens its details. */
+/**
+ * The row that names the tool call and its status, and opens its details.
+ *
+ * @param toolName The name of the tool.
+ * @param status The status of the call. Absent counts as complete.
+ * @param asking True when this call puts a question to the user.
+ * @param className Extra classes.
+ * @param props The other collapsible trigger props.
+ */
 function ToolFallbackTrigger({
   toolName,
   status,
@@ -135,9 +167,11 @@ function ToolFallbackTrigger({
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
+  /** The name of the tool. */
   toolName: string;
+  /** The status of the call. Absent counts as complete. */
   status?: ToolCallMessagePartStatus;
-  /** Whether this call is putting a question to the user. */
+  /** True when this call puts a question to the user. */
   asking?: boolean;
 }) {
   const statusType = status?.type ?? "complete";
@@ -146,7 +180,7 @@ function ToolFallbackTrigger({
     status?.type === "incomplete" && status.reason === "cancelled";
 
   const Icon = statusIconMap[statusType];
-  // Boxes edit: a call with no result inherits its message's status, so
+  // Boxes edit: a call with no result inherits the status of its message, so
   // requires-action alone does not mean the call wants to run. `asking` tells
   // the two apart.
   const label = isCancelled
@@ -168,7 +202,7 @@ function ToolFallbackTrigger({
       )}
       {...props}
     >
-      {/* Boxes edit: no animate-spin, because the shared spinner animates itself. */}
+      {/* Boxes edit: no animate-spin, because the spinner of the dashboard animates itself. */}
       <Icon
         data-slot="tool-fallback-trigger-icon"
         className={cn(
@@ -201,6 +235,13 @@ function ToolFallbackTrigger({
   );
 }
 
+/**
+ * The collapsible panel with the details of the tool call.
+ *
+ * @param className Extra classes.
+ * @param children The details.
+ * @param props The other collapsible content props.
+ */
 function ToolFallbackContent({
   className,
   children,
@@ -235,11 +276,19 @@ function ToolFallbackContent({
   );
 }
 
+/**
+ * The arguments of the tool call as text. It renders nothing without arguments.
+ *
+ * @param argsText The arguments as text.
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function ToolFallbackArgs({
   argsText,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
+  /** The arguments as text. */
   argsText?: string;
 }) {
   if (!argsText) return null;
@@ -257,11 +306,20 @@ function ToolFallbackArgs({
   );
 }
 
+/**
+ * The result of the tool call. A result that is not a string shows as JSON.
+ * It renders nothing without a result.
+ *
+ * @param result The result of the call.
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function ToolFallbackResult({
   result,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
+  /** The result of the call. */
   result?: unknown;
 }) {
   if (result === undefined) return null;
@@ -282,11 +340,20 @@ function ToolFallbackResult({
   );
 }
 
+/**
+ * The error or the cancel reason of an incomplete tool call. It renders nothing
+ * for another status or without an error.
+ *
+ * @param status The status of the call.
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function ToolFallbackError({
   status,
   className,
   ...props
 }: React.ComponentProps<"div"> & {
+  /** The status of the call. */
   status?: ToolCallMessagePartStatus;
 }) {
   if (status?.type !== "incomplete") return null;
@@ -319,9 +386,12 @@ function ToolFallbackError({
   );
 }
 
+/** The result that an Allow adds to a call without an approval request or an interrupt. */
 const APPROVED_RESULT = "Approved by user";
+/** The result that a Deny adds to a call without an approval request or an interrupt. */
 const DENIED_RESULT = "User denied tool execution";
 
+/** The button label for each known approval option kind, for an option without a label. */
 const APPROVAL_OPTION_DEFAULT_LABELS: Record<string, string> = {
   "allow-once": "Allow",
   "allow-always": "Always allow",
@@ -329,12 +399,30 @@ const APPROVAL_OPTION_DEFAULT_LABELS: Record<string, string> = {
   "reject-always": "Always deny",
 };
 
+/**
+ * Checks if an approval option kind is one of the four known kinds.
+ *
+ * @param kind The option kind.
+ * @returns True for a known kind.
+ */
 const isKnownKind = (kind: string) =>
   Object.hasOwn(APPROVAL_OPTION_DEFAULT_LABELS, kind);
 
+/**
+ * Checks if an approval option kind allows the call.
+ *
+ * @param kind The option kind.
+ * @returns True for "allow-once" and "allow-always".
+ */
 const isAllowKind = (kind: string) =>
   kind === "allow-once" || kind === "allow-always";
 
+/**
+ * Gives the button label of an approval option.
+ *
+ * @param option The option.
+ * @returns The label of the option, else the default label of its kind, else its id.
+ */
 const approvalOptionLabel = (option: ToolApprovalOption) =>
   option.label ??
   (isKnownKind(option.kind)
@@ -342,6 +430,15 @@ const approvalOptionLabel = (option: ToolApprovalOption) =>
     : undefined) ??
   option.id;
 
+/**
+ * Checks if the approval controls have something to answer.
+ *
+ * @param status The status of the call.
+ * @param approval The approval request of the call, if any.
+ * @param interrupt The interrupt of the call, if any.
+ * @returns False only for the status requires-action with the reason interrupt, when the call has no approval
+ *   request and no interrupt.
+ */
 const offersInterruptAction = (
   status: ToolCallMessagePartStatus | undefined,
   approval: ToolCallMessagePart["approval"],
@@ -353,16 +450,15 @@ const offersInterruptAction = (
   interrupt != null;
 
 /**
- * Tells whether this call is putting a question to the user right now.
+ * Checks if this call waits for an answer from the user.
  *
- * Boxes edit. The runtime derives a part's status from its message, so a call
- * that never reported back looks the same as one blocked on a permission
- * decision. The tool runs in the box container, so Allow and Deny in the
- * browser cannot answer the first kind. A click settles only an unanswered
- * approval or an interrupt the runtime can resume.
+ * Boxes edit: the runtime derives the status of a part from its message, so a
+ * call that never reported back looks the same as a call that waits on a
+ * permission decision. The tool runs in the box, so Allow and Deny in the
+ * browser cannot answer a call that never reported back.
  *
- * @param approval The call's approval request, if any.
- * @param interrupt The call's interrupt, if any.
+ * @param approval The approval request of the call, if any.
+ * @param interrupt The interrupt of the call, if any.
  * @returns True when the call waits on the user.
  */
 const isAskingUser = (
@@ -374,6 +470,20 @@ const isAskingUser = (
     approval.approved === undefined &&
     approval.resolution === undefined);
 
+/**
+ * The controls that answer a tool call that asks the user. They offer the
+ * declared options, a confirmation step for an option that asks for one, or
+ * Allow and Deny. They hide after an answer.
+ *
+ * @param className Extra classes.
+ * @param addResult Adds a result to a call without an approval request or an interrupt.
+ * @param resume Answers an interrupt.
+ * @param interrupt The interrupt of the call, if any.
+ * @param approval The approval request of the call, if any.
+ * @param respondToApproval Answers the approval request.
+ * @param status The status of the call.
+ * @param props The other div props.
+ */
 function ToolFallbackApproval({
   className,
   addResult,
@@ -390,7 +500,9 @@ function ToolFallbackApproval({
       "addResult" | "resume" | "respondToApproval" | "status"
     >
   > & {
+    /** The interrupt of the call, if any. */
     interrupt?: ToolCallMessagePart["interrupt"];
+    /** The approval request of the call, if any. */
     approval?: ToolCallMessagePart["approval"];
   }) {
   const [submitted, setSubmitted] = useState(false);
@@ -404,8 +516,8 @@ function ToolFallbackApproval({
 
   if (!offersInterruptAction(status, approval, interrupt)) return null;
 
-  // A declared option list is a host constraint: the kit never adds an
-  // approval path beyond it, but always preserves a refusal path.
+  // A declared option list limits the choices. The component adds no way to
+  // approve beyond the list, and it always keeps a way to refuse.
   const declaredOptions = respondToApproval ? approval?.options : undefined;
 
   const respond = (approved: boolean) => {
@@ -431,9 +543,8 @@ function ToolFallbackApproval({
 
   const respondWithOption = (option: ToolApprovalOption) => {
     if (submitted) return;
-    // A custom kind has no decision class for the runtime to derive, and
-    // responding without one throws; picking a declared option is an answer,
-    // so it resolves as approved.
+    // The runtime cannot derive a decision from a custom kind, and it throws
+    // when the answer has none. A picked option is an answer, so it counts as approved.
     respondToApproval?.(
       isKnownKind(option.kind)
         ? { optionId: option.id }
@@ -584,7 +695,19 @@ function ToolFallbackApproval({
   );
 }
 
-/** One tool call: its row, arguments, result, and the approval controls when it asks the user. */
+/**
+ * One tool call with its row, arguments and result, and the approval controls when it asks the user.
+ *
+ * @param toolName The name of the tool.
+ * @param argsText The arguments as text.
+ * @param result The result of the call.
+ * @param status The status of the call.
+ * @param addResult Adds a result to the call.
+ * @param resume Answers an interrupt.
+ * @param interrupt The interrupt of the call, if any.
+ * @param approval The approval request of the call, if any.
+ * @param respondToApproval Answers the approval request.
+ */
 const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   toolName,
   argsText,
@@ -599,7 +722,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
   const isRequiresAction = status?.type === "requires-action";
-  // Boxes edit: whether the call waits on the user, which the status alone does not tell.
+  // Boxes edit: the status alone does not show that the call waits on the user.
   const asking = isAskingUser(approval, interrupt);
   const shouldRenderApproval =
     isRequiresAction && asking && offersInterruptAction(status, approval, interrupt);
@@ -638,15 +761,23 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   );
 };
 
+/** The tool call component, with its parts attached for custom layouts. */
 const ToolFallback = memo(
   ToolFallbackImpl,
 ) as unknown as ToolCallMessagePartComponent & {
+  /** The root part. */
   Root: typeof ToolFallbackRoot;
+  /** The row that opens and closes the block. */
   Trigger: typeof ToolFallbackTrigger;
+  /** The collapsible panel. */
   Content: typeof ToolFallbackContent;
+  /** The arguments part. */
   Args: typeof ToolFallbackArgs;
+  /** The result part. */
   Result: typeof ToolFallbackResult;
+  /** The error part. */
   Error: typeof ToolFallbackError;
+  /** The approval controls part. */
   Approval: typeof ToolFallbackApproval;
 };
 

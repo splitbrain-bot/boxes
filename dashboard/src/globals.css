@@ -1,13 +1,13 @@
-@import "tailwindcss";
-@import "tw-animate-css";
-@import "tw-shimmer";
-
 /*
  * The dashboard's design system.
  *
  * The tokens use the shadcn names, because the installed components are
  * written against them.
  */
+
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "tw-shimmer";
 
 /* Dark mode is the .dark class, which index.html sets from prefers-color-scheme. */
 @custom-variant dark (&:where(.dark, .dark *));
@@ -34,7 +34,7 @@
   --input: #d8dde7;
   --ring: #2563eb;
 
-  /* Box state, the one vocabulary Tailwind has no name for. */
+  /* Colours for box states. Tailwind has no names for them. */
   --ok: #4ec9a0;
   --warn: #e8c46a;
   --danger: #f2777a;
@@ -204,7 +204,7 @@
 }
 
 /*
- * A quiet message: its content is only the chain-of-thought group and, while
+ * A quiet message, whose content is only the chain-of-thought group and, while
  * the turn runs, the working indicator.
  *
  * Messages sit 24px apart (gap-y-6), and each reserves 30px below for the
@@ -218,8 +218,8 @@
       > :not([data-slot="aui_chain-of-thought"], [data-slot="aui_assistant-message-indicator"])
   )
 ) {
-  /* The negative margin goes with the padding it cancels. On its own, it
-     would pull the next row up over this one. */
+  /* Resets the negative margin together with the padding that it cancels.
+     Without the padding, the margin would pull the next row up over this one. */
   padding-bottom: 0;
   margin-bottom: 0;
 
@@ -235,8 +235,8 @@
 }
 
 /*
- * A message that says something and then ends in rows: it has content other
- * than the chain-of-thought and the indicator, it has a chain-of-thought, and
+ * A message that says something and then ends in rows. It has content other
+ * than the chain-of-thought and the indicator. It has a chain-of-thought, and
  * its last child is the chain-of-thought or the indicator.
  *
  * Such a message keeps its action bar, but the 30px band for the bar would
@@ -280,7 +280,7 @@
   }
 
   /* The space an open row keeps under its body in the rule above, plus the
-     30px band, which no longer holds space here. */
+     30px band of pb-7.5, which this padding replaces. */
   &:has(:is([data-slot="reasoning-content"], [data-slot="tool-group-content"])[data-state="open"]) {
     padding-bottom: calc(9.5 * var(--spacing));
   }
@@ -319,9 +319,9 @@
 /*
  * One block of the spinner, which shrinks about its own centre and grows
  * back. The scale 0.1814 is 1.33 over 7.33, the smallest and the full block
- * size of the original spinner.
+ * size of blocks-wave from svg-spinners.
  *
- * fill-box makes the centre the block's own, not the centre of the icon.
+ * fill-box puts the transform origin at the centre of the block, and not at the centre of the icon.
  */
 @keyframes spinner-block {
   0%,

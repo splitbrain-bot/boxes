@@ -2,12 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { type ScrollAwayState, scrollAway, scrollAwayStart } from './scroll-away.ts';
 
-/** One frame in milliseconds, which is what one scroll event is worth. */
+/** One frame in milliseconds, the time between two scroll events. */
 const FRAME = 16;
 
 /**
- * A scroller with a given content and viewport height, driven a frame at a
- * time on a clock stepped by hand.
+ * Simulates a scroller with a given content height and viewport height, one
+ * frame at a time, with a manual clock.
+ *
+ * @param content The content height in pixels.
+ * @param view The viewport height in pixels.
+ * @returns The moves on the simulated scroller and the reads of its state.
  */
 function reading(
   content: number,
@@ -25,7 +29,7 @@ function reading(
   let top = 0;
   let now = 0;
 
-  /** One scroll event, from wherever the position has been put. */
+  /** Fires one scroll event at the current position. */
   const event = (): void => {
     top = Math.max(0, Math.min(top, height - view));
     now += FRAME;
@@ -33,35 +37,34 @@ function reading(
   };
 
   return {
-    /** A gesture: `dy` pixels a frame, for `frames` frames. */
+    /** Scrolls by `dy` pixels per frame for `frames` frames, as a gesture does. */
     by: (dy, frames = 1) => {
       for (let i = 0; i < frames; i += 1) {
         top += dy;
         event();
       }
     },
-    /** One enormous step, which is how the views scroll themselves. */
+    /** Moves to the given position in one large step, as the views do when they scroll themselves. */
     to: (next) => {
       top = next;
       event();
     },
     /**
-     * Content arriving under a scroller already against its bottom.
+     * Adds content under a scroller that is at its bottom.
      *
-     * A few pixels short of the end rather than exactly on it, because that is
-     * where a turn's anchor leaves the position: `slack` is the rounding
-     * `AT_BOTTOM` exists to forgive.
+     * The position stays `slack` pixels before the end, because a turn anchor
+     * leaves the position there. `AT_BOTTOM` allows for that rounding.
      */
     grows: (by, slack = 4) => {
       height += by;
       top = height - view - slack;
       event();
     },
-    /** Time passing with nothing moving. */
+    /** Advances the clock while nothing moves. */
     tick: (ms) => {
       now += ms;
     },
-    /** Whether the header is away. */
+    /** Checks if the header is away. */
     away: () => state.away,
     /** The scroll position. */
     top: () => top,

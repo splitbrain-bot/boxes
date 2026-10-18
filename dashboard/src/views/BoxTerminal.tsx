@@ -14,13 +14,13 @@ import { terminalUrlFor } from '@/lib/ws-url';
 import '@xterm/xterm/css/xterm.css';
 
 /**
- * How many scrolled-off lines the terminal keeps. The tmux scrollback in the
- * box outlives this tab.
+ * The number of scrolled-off lines that the terminal keeps. The tmux scrollback
+ * in the box continues to exist after the tab closes.
  */
 const SCROLLBACK = 2000;
 
 /**
- * Reads the terminal's colours from the page's CSS variables, which follow the
+ * Reads the terminal colours from the CSS variables of the page, which follow the
  * system scheme.
  *
  * @returns The xterm theme.
@@ -47,10 +47,10 @@ function closedText(detail: string | undefined): string {
 }
 
 /**
- * Page with a shell in the box's container, at `/boxes/:id/terminal`.
+ * Page with a shell in the box container, at `/boxes/:id/terminal`.
  *
  * Every terminal on one box attaches to the same tmux session, so two tabs
- * show the same shell. The box keeps running while this page is open.
+ * show the same shell. The reaper does not stop the box while this page is open.
  */
 export function BoxTerminal() {
   const { id = '' } = useParams();
@@ -118,6 +118,7 @@ export function BoxTerminal() {
     };
   }, [id, token, attempt]);
 
+  /** Opens a new connection after a close. */
   const reconnect = useCallback(() => {
     setStatus('connecting');
     setDetail(undefined);
@@ -159,7 +160,7 @@ export function BoxTerminal() {
         </Notice>
       ) : null}
 
-      {/* The page background matches the terminal's below the last row. */}
+      {/* The page background matches the terminal background below the last row. */}
       <div ref={host} className="min-h-0 flex-1 overflow-hidden bg-background px-2 py-1" />
     </div>
   );

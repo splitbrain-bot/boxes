@@ -3,22 +3,23 @@ import { useMediaQuery } from '@/hooks/use-media-query';
 import { type ScrollAwayState, scrollAway, scrollAwayStart } from '@/lib/scroll-away.ts';
 
 /**
- * Whether a header should move out of the way, for a scroller inside the
- * returned container. Only on a narrow screen.
+ * Decides if a header moves out of the way, for a scroller inside the
+ * returned container. The header moves away only on a narrow screen.
  *
  * Listens in the capture phase on the container, because a scroll event does
  * not bubble. A ref on the scroller would mean editing a vendored component,
  * which `npx assistant-ui add` overwrites.
  *
- * @param scroller Selector for the scroller that counts. Other scrollers in
- *   the view, such as a wide table or the file tree, do not count.
+ * @param scroller The selector of the scroller that the hook watches. The hook
+ *   ignores other scrollers in the view, e.g., a wide table or the file tree.
+ * @returns The decision, the ref for the container and a reset.
  */
 export function useScrollAway(scroller: string): {
   /** True while the header should be out of the way. */
   away: boolean;
-  /** Put on the element the scroller lives inside. */
+  /** The ref for the element that contains the scroller. */
   container: React.RefObject<HTMLDivElement | null>;
-  /** Forget the reading so far, and bring the header back. */
+  /** Clears the run so far and brings the header back. */
   reset: () => void;
 } {
   const container = useRef<HTMLDivElement>(null);
@@ -34,8 +35,8 @@ export function useScrollAway(scroller: string): {
   /**
    * Brings the header back and forgets the run so far.
    *
-   * For a view that closes its scroller or opens another. A header left away
-   * there would have no scroll to bring it back.
+   * Use it in a view that closes its scroller or opens another scroller.
+   * Without a scroll, nothing would bring the header back.
    */
   const reset = useCallback(() => {
     state.current = scrollAwayStart();

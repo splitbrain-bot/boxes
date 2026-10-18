@@ -3,8 +3,11 @@ import { Spinner } from '@/components/Spinner';
 import { Button } from '@/components/ui/button';
 
 /**
- * The top of a thread that lacks its oldest messages: a line that says so,
- * and a button that loads the full history.
+ * Notice at the top of a thread that lacks its oldest messages, with a button
+ * that loads the full history.
+ *
+ * @param loading True while the full history is loading, which disables the button.
+ * @param onLoad Loads the full history.
  */
 export function FullHistoryButton({
   loading,

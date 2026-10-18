@@ -10,6 +10,11 @@ import type { ReviewBase, ReviewRepo } from '../../../../shared/types.ts';
  * The revision is a free-text field, because the orchestrator does not list
  * refs. The same revision can resolve in one repository and not in another,
  * so the popover lists the commit it resolved to in each repository.
+ *
+ * @param base The active base. An empty revision compares each repository against its own HEAD.
+ * @param repos The repositories of the workspace, each with the commit that the revision resolved to.
+ * @param busy Disables the controls while a request runs.
+ * @param onSet Called with the new revision, or with null to compare against HEAD again.
  */
 export function BasePicker({
   base,
@@ -19,7 +24,7 @@ export function BasePicker({
 }: {
   /** The active base. An empty revision compares each repository against its own HEAD. */
   base: ReviewBase;
-  /** The workspace's repositories, each carrying the commit the revision resolved to. */
+  /** The repositories of the workspace, each with the commit that the revision resolved to. */
   repos: ReviewRepo[];
   /** Disables the controls while a request runs. */
   busy: boolean;
@@ -110,8 +115,8 @@ export function BasePicker({
               {repos.map((repo) => (
                 <li key={repo.path} className="flex items-baseline justify-between gap-2">
                   <span className="truncate">{repo.name}</span>
-                  {/* The orchestrator compares a repository the revision does not
-                      resolve in against its own HEAD instead of failing. */}
+                  {/* The orchestrator compares a repository in which the revision does
+                      not resolve against its own HEAD. */}
                   <span className={repo.baseCommit === '' ? 'text-warn' : undefined}>
                     {repo.baseCommit === '' ? 'HEAD' : repo.baseCommit.slice(0, 8)}
                   </span>
@@ -126,9 +131,9 @@ export function BasePicker({
 }
 
 /**
- * Describes how many repositories the base resolved in, for the button title.
+ * Gives the number of repositories that the base resolved in, for the button title.
  *
- * @param landed The number of repositories the base resolved in.
+ * @param landed The number of repositories that the base resolved in.
  * @param total The number of repositories in the workspace.
  * @returns Text like ", in 2 of 3 repositories", or an empty string for one repository or none.
  */

@@ -9,7 +9,11 @@ import {
   isFollowing,
 } from './follow-output.ts';
 
-/** A turn arriving into a thread, a chunk at a time, on a clock stepped by hand. */
+/**
+ * Simulates a turn that arrives in a thread one chunk at a time, with a manual clock.
+ *
+ * @returns The actions on the simulated thread and the check for its follow state.
+ */
 function turn(): {
   writes: (behind: number, opts?: { reserving?: boolean }) => boolean;
   reads: (behind: number) => void;
@@ -21,29 +25,29 @@ function turn(): {
   let now = 0;
 
   return {
-    /** A chunk lands, leaving `behind` pixels under the fold. True if it caught up. */
+    /** Adds a chunk that leaves `behind` pixels below the fold. Returns true if the scroller caught up. */
     writes: (behind, { reserving = false } = {}) => {
       now += 16;
       const grew = followGrew(state, { behind, reserving, now });
       state = grew.state;
-      // Catching up puts the scroller against the bottom, which is a scroll.
+      // A catch-up moves the scroller to the bottom, which causes a scroll event.
       if (grew.catchUp) state = followScrolled(state, { behind: 0, now });
       return grew.catchUp;
     },
-    /** The scroller moves to `behind` pixels from the end. */
+    /** Moves the scroller to `behind` pixels from the end. */
     reads: (behind) => {
       now += 16;
       state = followScrolled(state, { behind, now });
     },
-    /** A gesture: a wheel notch, a touch or a press on the scrollbar. */
+    /** Records a gesture, e.g., a wheel notch, a touch or a press on the scrollbar. */
     touches: () => {
       state = followTouched(state, now);
     },
-    /** Time passing with nothing moving. */
+    /** Advances the clock while nothing moves. */
     tick: (ms) => {
       now += ms;
     },
-    /** Whether the thread follows its output now. */
+    /** Checks if the thread follows its output now. */
     following: () => isFollowing(state, now),
   };
 }
@@ -64,7 +68,7 @@ test('and this takes over the moment it runs out', () => {
 
 test('a chunk that changed nothing is not chased', () => {
   const thread = turn();
-  // Within the rounding an anchor leaves.
+  // Both values are within the rounding error of an anchor.
   assert.equal(thread.writes(0), false);
   assert.equal(thread.writes(4), false);
 });
@@ -92,7 +96,7 @@ test('arriving back at the bottom rejoins the turn', () => {
 });
 
 test('the browser moving the scroller on its own is not a reader leaving', () => {
-  // Like a block collapsing above: a scroll away with no gesture.
+  // E.g., a block that collapses above. The scroller moves away with no gesture.
   const thread = turn();
   thread.writes(300);
   thread.reads(900);

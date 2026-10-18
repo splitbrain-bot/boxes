@@ -18,10 +18,18 @@ import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-ic
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { cn } from "@/lib/utils";
 
+/** The props of {@link MarkdownText}: the text part props and extra markdown components. */
 type MarkdownTextProps = Partial<TextMessagePartProps> & {
+  /** Components that replace the default components for some elements. */
   components?: Parameters<typeof memoizeMarkdownComponents>[0];
 };
 
+/**
+ * Keeps the previous object while a new object has the same keys and values.
+ *
+ * @param value The current object, or undefined.
+ * @returns The previous object when the current one is shallowly equal, else the current one.
+ */
 const useShallowStable = <T extends Record<string, unknown> | undefined>(
   value: T,
 ): T => {
@@ -38,6 +46,11 @@ const useShallowStable = <T extends Record<string, unknown> | undefined>(
   return ref.current;
 };
 
+/**
+ * Renders the text part of a message as GitHub-flavoured markdown.
+ *
+ * @param components Components that replace the default components for some elements.
+ */
 const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
   const stableComponents = useShallowStable(components);
   const markdownComponents = useMemo(() => {
@@ -59,13 +72,20 @@ const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
   );
 };
 
+/** The memoized markdown text part. */
 export const MarkdownText = memo(MarkdownTextImpl);
 
-// Boxes edit: a mermaid code block shows as a diagram.
+/** Boxes edit: the components by code block language. A mermaid code block shows as a diagram. */
 const componentsByLanguage = {
   mermaid: { SyntaxHighlighter: MermaidDiagram },
 };
 
+/**
+ * The header above a code block, with the language and a copy button.
+ *
+ * @param language The language of the code block.
+ * @param code The code, which the button copies.
+ */
 const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   const { isCopied, copyToClipboard } = useCopyToClipboard();
   const onCopy = () => {
@@ -90,6 +110,7 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   );
 };
 
+/** The markdown components with the styles of the dashboard. */
 const defaultComponents = memoizeMarkdownComponents({
   h1: ({ className, ...props }) => (
     <h1
@@ -163,8 +184,8 @@ const defaultComponents = memoizeMarkdownComponents({
         className,
       )}
       target={target ?? "_blank"}
-      // noreferrer implies noopener. The model wrote the href, so the new tab
-      // gets no handle on this one.
+      // The agent wrote the href, so the new tab gets no reference to this
+      // window. noreferrer implies noopener.
       rel={rel ?? "noreferrer"}
       {...props}
     />
@@ -204,7 +225,7 @@ const defaultComponents = memoizeMarkdownComponents({
   ),
   // Boxes edit: the wrapper grows past the reading column and scrolls, so a
   // wide table can use the window. The table takes the width its content
-  // needs, and at least the wrapper's width.
+  // needs, and at least the width of the wrapper.
   table: ({ className, ...props }) => (
     <div className="aui-md-table-wrap aui-md-bleed my-3">
       <table

@@ -1,5 +1,3 @@
-import type { HighlighterCore, LanguageInput, ThemedToken } from 'shiki/core';
-
 /**
  * Client-side syntax highlighting for the review's code pane.
  *
@@ -7,6 +5,8 @@ import type { HighlighterCore, LanguageInput, ThemedToken } from 'shiki/core';
  * themes and the grammars are imported lazily, so only the review route loads
  * them.
  */
+
+import type { HighlighterCore, LanguageInput, ThemedToken } from 'shiki/core';
 
 /** The Shiki themes for light and dark mode. */
 const THEMES = { light: 'github-light-default', dark: 'github-dark-default' } as const;
@@ -23,7 +23,7 @@ export interface Token {
   style: Record<string, string>;
 }
 
-/** The grammars worth loading, by the language name the API reports. */
+/** The grammars that the code pane can load, by the language name that the API reports. */
 const GRAMMARS: Record<string, LanguageInput> = {
   typescript: () => import('@shikijs/langs/typescript'),
   javascript: () => import('@shikijs/langs/javascript'),
@@ -61,7 +61,12 @@ const GRAMMARS: Record<string, LanguageInput> = {
   diff: () => import('@shikijs/langs/diff'),
 };
 
-/** Whether a language has a grammar to load at all. */
+/**
+ * Checks if a language has a grammar to load.
+ *
+ * @param language The language name that the API reports.
+ * @returns True when a grammar exists.
+ */
 function canHighlight(language: string): boolean {
   return language in GRAMMARS;
 }
@@ -70,11 +75,13 @@ function canHighlight(language: string): boolean {
 let core: Promise<HighlighterCore> | null = null;
 
 /**
- * The shared highlighter, created on first use.
+ * Gives the shared highlighter, created on first use.
  *
  * Uses the JavaScript regex engine, which needs no wasm download. In
  * `forgiving` mode it skips a pattern it cannot compile, so a grammar it
  * supports only in part still colours most of the file.
+ *
+ * @returns The highlighter.
  */
 async function highlighter(): Promise<HighlighterCore> {
   if (!core) {
@@ -99,7 +106,11 @@ async function highlighter(): Promise<HighlighterCore> {
 /** Grammars already loaded or loading, so a re-render costs nothing. */
 const loaded = new Map<string, Promise<void>>();
 
-/** Loads one grammar into the shared highlighter, at most once. */
+/**
+ * Loads one grammar into the shared highlighter, at most once.
+ *
+ * @param language The language name that the API reports.
+ */
 async function loadGrammar(language: string): Promise<void> {
   const grammar = GRAMMARS[language];
   if (!grammar) return;
@@ -115,7 +126,7 @@ async function loadGrammar(language: string): Promise<void> {
 }
 
 /**
- * The longest line, in characters, a file may have and still be tokenized.
+ * The maximum line length, in characters, for a file that the pane tokenizes.
  *
  * A minified bundle is one very long line, and tokenizing it would block the
  * tab for seconds.
@@ -123,15 +134,18 @@ async function loadGrammar(language: string): Promise<void> {
 const MAX_LINE = 2000;
 
 /**
- * The most lines a file may have and still be coloured and rendered one row
- * per line. The pane shows a longer file as one plain block.
+ * The maximum number of lines for a file that the pane colours and renders one
+ * row per line. The pane shows a longer file as one plain block.
  */
 const MAX_LINES = 8000;
 
 /**
- * Whether a file is short enough to colour and to render one row per line.
+ * Checks if a file is short enough to colour and to render one row per line.
  *
  * Stops counting at the limit and allocates nothing.
+ *
+ * @param content The text of the file.
+ * @returns True when the file has at most {@link MAX_LINES} lines.
  */
 export function withinLineLimit(content: string): boolean {
   let lines = 1;
@@ -147,6 +161,10 @@ export function withinLineLimit(content: string): boolean {
  * Returns null, and never throws, when the file should be rendered plain: no
  * grammar for the language, too many lines, a line that is too long, or a
  * failure in the grammar.
+ *
+ * @param content The text of the file.
+ * @param language The language name that the API reports.
+ * @returns One token list per line, or null for a plain file.
  */
 export async function tokenizeLines(content: string, language: string): Promise<Token[][] | null> {
   if (!canHighlight(language)) return null;
@@ -168,7 +186,12 @@ export async function tokenizeLines(content: string, language: string): Promise<
   }
 }
 
-/** One Shiki line, reduced to what the pane renders. */
+/**
+ * Reduces one Shiki line to what the pane renders.
+ *
+ * @param tokens The Shiki tokens of the line.
+ * @returns The tokens of the line.
+ */
 function toLine(tokens: ThemedToken[]): Token[] {
   return tokens.map((token) => ({
     content: token.content,

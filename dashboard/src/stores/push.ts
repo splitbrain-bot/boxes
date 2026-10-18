@@ -1,12 +1,12 @@
+/**
+ * Store for the Web Push registration of this browser. The registration lets
+ * the browser show notifications while Boxes is closed.
+ */
+
 import { useSyncExternalStore } from 'react';
 import { api } from '../api.ts';
 
-/**
- * Store for this browser's Web Push registration, which notifies while Boxes
- * is closed.
- */
-
-/** Why this browser cannot subscribe, when it cannot. */
+/** The reason why this browser cannot subscribe. */
 export type PushBlocker =
   /** The page is not a secure context, so service workers are unavailable. */
   | 'insecure'
@@ -17,20 +17,20 @@ export type PushBlocker =
   | 'needs-install'
   /** The browser has no service workers or no Push API. */
   | 'unsupported'
-  /** The user refused notifications. Only the site settings can undo this. */
+  /** The user refused notifications. Only the site settings can undo the refusal. */
   | 'denied';
 
-/** What the toggle renders. */
+/** The state that the toggle renders. */
 export interface PushState {
   /** True when this browser could subscribe if asked. */
   supported: boolean;
-  /** Why this browser cannot subscribe, or null. */
+  /** The reason why this browser cannot subscribe, or null. */
   blocker: PushBlocker | null;
   /** True once this browser is registered with the orchestrator. */
   subscribed: boolean;
   /** True while a subscribe or unsubscribe is in flight. */
   busy: boolean;
-  /** What the last attempt failed with, or null. */
+  /** The error message of the last attempt, or null. */
   error: string | null;
 }
 
@@ -45,19 +45,32 @@ let state: PushState = {
 /** The callbacks to run on every state change. */
 const listeners = new Set<() => void>();
 
-/** Merges `next` into the state and notifies every subscriber. */
+/**
+ * Merges `next` into the state and notifies every subscriber.
+ *
+ * @param next The fields to change.
+ */
 function set(next: Partial<PushState>): void {
   state = { ...state, ...next };
   for (const l of listeners) l();
 }
 
-/** Adds a subscriber and returns the function that removes it. */
+/**
+ * Adds a subscriber.
+ *
+ * @param listener The callback to run on every state change.
+ * @returns The function that removes the subscriber.
+ */
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
 
-/** Reads the registration state, re-rendering on every change. */
+/**
+ * Reads the registration state, re-rendering on every change.
+ *
+ * @returns The current state.
+ */
 export function usePush(): PushState {
   return useSyncExternalStore(
     subscribe,
@@ -66,13 +79,21 @@ export function usePush(): PushState {
   );
 }
 
-/** Whether this browser runs the page as an installed app. */
+/**
+ * Checks if this browser runs the page as an installed app.
+ *
+ * @returns True for an installed app.
+ */
 function installed(): boolean {
   const legacy = (navigator as { standalone?: boolean }).standalone;
   return legacy === true || window.matchMedia('(display-mode: standalone)').matches;
 }
 
-/** What stops this browser from subscribing, or null. */
+/**
+ * Finds the blocker that stops this browser from subscribing.
+ *
+ * @returns The blocker, or null when the browser can subscribe.
+ */
 function blockerOf(): PushBlocker | null {
   if (!window.isSecureContext) return 'insecure';
   if (!('serviceWorker' in navigator)) return 'unsupported';
@@ -84,7 +105,12 @@ function blockerOf(): PushBlocker | null {
   return null;
 }
 
-/** Encodes bytes as unpadded base64url, the form of the deployment's key. */
+/**
+ * Encodes bytes as unpadded base64url, the form of the deployment's key.
+ *
+ * @param bytes The bytes to encode.
+ * @returns The base64url text.
+ */
 function b64url(bytes: ArrayBuffer): string {
   let binary = '';
   for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
@@ -92,18 +118,26 @@ function b64url(bytes: ArrayBuffer): string {
 }
 
 /**
- * Whether a subscription uses the key the deployment holds now.
+ * Checks if a subscription uses the key the deployment holds now.
  *
  * A deployment with a replaced data volume generates a new keypair. The push
  * service then rejects every subscription made with the old key, and the
  * browser never learns about it.
+ *
+ * @param subscription The push subscription of the browser.
+ * @param publicKey The public key of the deployment, as base64url.
+ * @returns True when the subscription uses the key.
  */
 function matchesDeployment(subscription: PushSubscription, publicKey: string): boolean {
   const key = subscription.options.applicationServerKey;
   return key ? b64url(key) === publicKey : false;
 }
 
-/** The registered worker, registering it on first call. */
+/**
+ * Registers the service worker. A repeated call gets the same registration.
+ *
+ * @returns The registration.
+ */
 async function worker(): Promise<ServiceWorkerRegistration> {
   // The scope is the whole origin, so sw.js lives at the root.
   return navigator.serviceWorker.register('/sw.js', { scope: '/' });
@@ -126,10 +160,9 @@ export async function installWorker(): Promise<void> {
  * Brings the store up to date and re-registers a browser that is already
  * subscribed.
  *
- * A push service may replace a subscription at any time, and Safari expires
- * them on its own schedule. The orchestrator learns the new one only from
- * this call. It keys subscriptions by endpoint, so posting the same one twice
- * keeps one row.
+ * A push service may replace a subscription at any time. The orchestrator learns the new subscription from
+ * this call or from the service worker. It keys subscriptions by endpoint, so
+ * posting the same subscription twice keeps one row.
  */
 export async function refreshPush(): Promise<void> {
   const blocker = blockerOf();
@@ -172,7 +205,7 @@ export async function refreshPush(): Promise<void> {
  * Asks for permission and subscribes this browser.
  *
  * Only a click may call it. Some browsers refuse a permission request without
- * a user gesture, and others hold it against the origin.
+ * a user gesture, and others penalize the origin.
  */
 export async function enablePush(): Promise<void> {
   if (state.busy) return;
@@ -180,7 +213,7 @@ export async function enablePush(): Promise<void> {
   try {
     const permission = await Notification.requestPermission();
     if (permission === 'denied') {
-      // Only the site settings can undo this, so the toggle stops offering.
+      // Only the site settings can undo the refusal, so the toggle stops offering push.
       set({ supported: false, blocker: 'denied' });
       return;
     }
@@ -223,8 +256,9 @@ export async function enablePush(): Promise<void> {
 /**
  * Unsubscribes this browser, in the orchestrator and in the browser.
  *
- * The orchestrator hears first. Otherwise it keeps pushing to the dropped
- * subscription until the push service reports it gone.
+ * The function tells the orchestrator first. Otherwise, the orchestrator keeps
+ * pushing to the dropped subscription until the push service reports that the
+ * subscription is gone.
  */
 export async function disablePush(): Promise<void> {
   if (state.busy) return;

@@ -1,14 +1,14 @@
+/**
+ * Browser tests for the live thread, against a stub gateway that answers ACP
+ * the way the real gateway does.
+ */
+
 import assert from 'node:assert/strict';
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import type { ThreadUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { type GatewayScript, reply } from './stub-gateway.ts';
-
-/**
- * Browser tests for the live thread, against a stub gateway that answers ACP
- * the way the real gateway does.
- */
 
 /** The box every test here drives. */
 const BOX = DEFAULT_BOX;
@@ -20,9 +20,14 @@ const BOX = DEFAULT_BOX;
 const PNG =
   'iVBORw0KGgoAAAANSUhEUgAAAMgAAAB4CAIAAAA48Cq8AAAB4UlEQVR42u3WwUkDARRF0SklpaVcS7GGrBRcGzIDF316ws02hJnD4x+Pbz63+5t0uePx9OMBKYGFl0JYbKmChZfOwfr8sqUE1llbeOlVWHgphMWWKlh4KYR1gZdHqVdhmS5VsPBSCIstVbDwUgjLUa8QlulSBQsvhbDYUgULL4WwHPUKYZkuVbDwUgiLLR3pr+MF1m/h5ZWAZbr007DwAostDcLCCyxHvTZhmS6w8NIgLLbAwkuDsBz1YJkuDcLCCyy2NAgLL7Ac9dqEZbrAwguszf/NFlh4gfUPeHnlYJkusPDSH4bFFlh4geWoF1imCyy8wGJLYOEFlqMeLNMlsPACiy2w8MLrdVjv95u+OmXL43oeWNdt4QUWXmCxBRZeeIHlqAfLdIGFF15gsQUWXmDhxRZYpgssvMASW2DhBZajHiyZLrDwAostsIQXWI56sEwXWMILLLbAwmuNF1iOerDY2uEFFl5gsbVjCyy8wMJrxxZYpgssvHZ4gcUWWHjt8ALLUQ+WdqYLLLzA0o4tsPACSztHPVimCyzt8AKLrcQWWHglvMDCK7EFFlsJL7DwSniBxVZiCyy8El5g4ZXYAouthBdYSniBpcQWWEp4gaXkqAdLyXSBpYQXWEpsgaWE1wex055aMLbECwAAAABJRU5ErkJggg==';
 
+/** The orchestrator of the running test. */
 let stub: TestOrchestrator;
 
-/** Starts a deployment whose agent behaves as the script says. */
+/**
+ * Starts a deployment whose agent behaves as the script says.
+ *
+ * @param script The fields of the gateway script that replace the defaults.
+ */
 async function start(script?: Partial<GatewayScript>): Promise<void> {
   stub = await startOrchestrator([{}], script);
 }
@@ -107,8 +112,8 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
     expect(stub.attachmentUploads[0]!.name).toBe('shot.png');
     expect(stub.attachmentUploads[0]!.boxId).toBe(BOX.id);
 
-    // The note saying where it was saved, then what was typed. No bytes: the
-    // picture is in the workspace, and the prompt carries the path to it.
+    // First the note that says where the file was saved, then the typed text.
+    // The prompt carries no bytes, because the note holds the path in the workspace.
     await expect.poll(() => stub.gateway.promptBlocks.length).toBe(1);
     const blocks = stub.gateway.promptBlocks[0]!;
     expect(blocks.map((b) => b.type)).toEqual(['text', 'text']);
@@ -127,8 +132,8 @@ test('an attached image is uploaded, named in the prompt, and shown from the wor
     expect(await page.getByText('<attachments>').count()).toBe(0);
     await shoot(page, 'thread-attached-image');
 
-    // And the same after a reload, from the replayed transcript: the note is
-    // plain text that survives the replay.
+    // The same after a reload, from the replayed transcript. The note is plain
+    // text, so it survives the replay.
     await page.reload();
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     await expect.poll(() => page.locator('[data-slot="aui_user-message-image"]').count()).toBe(1);
@@ -154,8 +159,8 @@ test('an attached SVG is shown as the drawing it is', async () => {
     await (await chooser).setFiles({
       name: 'diagram.svg',
       mimeType: 'image/svg+xml',
-      // With a script in it: an <img> runs no script, and the response's CSP
-      // covers opening the file directly.
+      // The file holds a script. An <img> runs no script, and the response's CSP
+      // covers a direct open of the file.
       buffer: Buffer.from(
         '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">' +
           '<script>window.parent.alert(1)</script><rect width="80" height="40" fill="teal"/></svg>',
@@ -360,8 +365,8 @@ test('cancelling stops the run state', async () => {
 });
 
 test('a turn held open for background work still hands the composer back', async () => {
-  // As the adapter does it: the agent answers, spawns work that runs on, and
-  // the prompt stays open until the work settles.
+  // Like the adapter, the agent answers and starts work that keeps running.
+  // The prompt stays open until the work ends.
   await start({
     prompts: [
       {
@@ -427,7 +432,7 @@ test('a turn held open for background work still hands the composer back', async
 
 test('the bar names the work by kind, and offers no stop for a task that says it cannot be', async () => {
   // A task's kind says what a name like "watch the deploy log" is. A task
-  // whose `stoppable` is false gets no stop button.
+  // whose stoppable flag is false gets no stop button.
   await start({
     prompts: [
       {
@@ -493,7 +498,7 @@ test('the bar names the work by kind, and offers no stop for a task that says it
 });
 
 test('a thread that has not been read yet shows a placeholder, then all of it at once', async () => {
-  // Long enough to scroll, so where the reading starts is a real question.
+  // Long enough to scroll, so the test can check where the view starts.
   const said = Array.from({ length: 12 }, (_, i) => `exchange number ${i}`);
   await start({ holdLoad: true });
   for (const text of said) {
@@ -524,9 +529,9 @@ test('a thread that has not been read yet shows a placeholder, then all of it at
 
     stub.gateway.releaseLoad();
 
-    // The placeholder goes when the conversation arrives, and what arrives is
-    // the whole of it: the first exchange and the last are on screen in the
-    // same breath, not one render apart.
+    // The placeholder goes when the conversation arrives, and the whole
+    // conversation arrives at once. The first and the last exchange show in
+    // the same render.
     await expect.poll(() => page.locator('[data-slot="thread-loading"]').count()).toBe(0);
     expect(await page.getByText('asking about exchange number 0').count()).toBe(1);
     expect(await page.getByText('answering about exchange number 11').count()).toBe(1);
@@ -565,9 +570,8 @@ test('the thread sits inside the dashboard chrome rather than over it', async ()
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    // The header is the dashboard's, and the thread must not cover it: the
-    // back link, the mode switcher and the review link all have to be
-    // clickable, not painted over by a floating panel.
+    // The header belongs to the dashboard, and the thread must not cover it.
+    // The back link, the mode switcher and the review link must stay clickable.
     const header = (await page.locator('header').boundingBox())!;
     const thread = (await page.locator('.aui-thread-root').boundingBox())!;
     expect(header.height).toBeGreaterThan(0);
@@ -592,9 +596,9 @@ test('a hovered message that runs under the composer stays under it', async () =
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    // Prose and then rows: the shape whose action bar leaves the flow, and
-    // which the stylesheet raises on hover so the bar paints over the next
-    // message. Enough rows that the message runs under the composer.
+    // Prose and then rows. A message of this shape has an action bar outside
+    // the flow, and the stylesheet raises the message on hover so that the bar
+    // paints over the next message. The 40 rows make the message run under the composer.
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: 'Some prose first.\n\n' },
@@ -672,8 +676,8 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
   try {
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
 
-    // How a screenshot actually arrives: the agent reads the file back, and
-    // the adapter carries the image inline as the tool's result.
+    // A screenshot usually arrives as a tool result. The agent reads the file
+    // back, and the adapter sends the image inline.
     stub.gateway.emit({
       sessionUpdate: 'tool_call',
       toolCallId: 'tc-shot',
@@ -682,7 +686,7 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
       status: 'completed',
       content: [{ type: 'content', content: { type: 'image', mimeType: 'image/png', data: PNG } }],
     } as ThreadUpdate);
-    // And the other way one can arrive: in the message itself.
+    // An image can also arrive in the message itself.
     stub.gateway.emit({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: 'Here is the page:' },
@@ -692,8 +696,7 @@ test('an image renders wherever it arrives — a tool result, or what the agent 
       content: { type: 'image', mimeType: 'image/png', data: PNG },
     } as ThreadUpdate);
 
-    // Both of them, as loaded images rather than as parts that merely exist:
-    // a broken src renders an <img> too.
+    // Both images must load, because a broken src also renders an <img>.
     const images = page.locator(`img[src="data:image/png;base64,${PNG}"]`);
     await expect.poll(() => images.count()).toBe(2);
     await expect

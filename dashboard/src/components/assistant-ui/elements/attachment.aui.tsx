@@ -41,10 +41,17 @@ import { useAttachmentSrc } from "@/hooks/use-attachment-src";
 import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/Spinner";
 
+/** The props of {@link AttachmentPreview}. */
 type AttachmentPreviewProps = {
+  /** The URL of the image. */
   src: string;
 };
 
+/**
+ * The full image in the preview dialog. It fades in when it has loaded.
+ *
+ * @param props The URL of the image.
+ */
 const AttachmentPreview: FC<AttachmentPreviewProps> = ({ src }) => {
   const [isLoaded, setIsLoaded] = useState(false);
   return (
@@ -62,6 +69,12 @@ const AttachmentPreview: FC<AttachmentPreviewProps> = ({ src }) => {
   );
 };
 
+/**
+ * Wraps an attachment tile in a trigger that opens the image in a dialog.
+ * An attachment without an image source gets no dialog.
+ *
+ * @param children The tile.
+ */
 const AttachmentPreviewDialog: FC<PropsWithChildren> = ({ children }) => {
   const src = useAttachmentSrc();
 
@@ -91,6 +104,7 @@ const AttachmentPreviewDialog: FC<PropsWithChildren> = ({ children }) => {
   );
 };
 
+/** The image of an attachment as a square thumbnail, or a file icon when there is no image. */
 const AttachmentThumb: FC = () => {
   const src = useAttachmentSrc();
 
@@ -108,6 +122,10 @@ const AttachmentThumb: FC = () => {
   );
 };
 
+/**
+ * One attachment tile in the composer or in a sent message. It shows the upload state and a tooltip with the
+ * name. In the composer it also has a remove button.
+ */
 const AttachmentUI: FC = () => {
   const aui = useAui();
   const isComposer = aui.attachment.source !== "message";
@@ -189,7 +207,7 @@ const AttachmentUI: FC = () => {
                     aria-hidden="true"
                     className="aui-attachment-tile-uploading bg-background/60 animate-in fade-in-0 absolute inset-0 flex items-center justify-center backdrop-blur-[2px] motion-reduce:animate-none"
                   >
-                    {/* Boxes edit: the shared spinner. */}
+                    {/* Boxes edit: uses the spinner of the dashboard. */}
                     <Spinner className="text-muted-foreground" />
                   </div>
                 )}
@@ -217,6 +235,7 @@ const AttachmentUI: FC = () => {
   );
 };
 
+/** The button on a composer attachment that removes it. */
 const AttachmentRemove: FC = () => {
   return (
     <AttachmentPrimitive.Remove asChild>
@@ -231,6 +250,7 @@ const AttachmentRemove: FC = () => {
   );
 };
 
+/** The attachments of a user message, in a row above the text. */
 export const UserMessageAttachments: FC = () => {
   return (
     <div className="aui-user-message-attachments-end col-span-full col-start-1 row-start-1 flex w-full flex-row justify-end gap-2">
@@ -241,6 +261,7 @@ export const UserMessageAttachments: FC = () => {
   );
 };
 
+/** The attachments in the composer, in a row that scrolls sideways. It is hidden while empty. */
 export const ComposerAttachments: FC = () => {
   return (
     <div className="aui-composer-attachments flex w-full flex-row items-center gap-2 overflow-x-auto empty:hidden">
@@ -251,6 +272,7 @@ export const ComposerAttachments: FC = () => {
   );
 };
 
+/** The composer button that adds an attachment. */
 export const ComposerAddAttachment: FC = () => {
   return (
     <ComposerPrimitive.AddAttachment asChild>

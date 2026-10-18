@@ -1,10 +1,10 @@
 import { shortSize } from '@/lib/rough';
 import type { DeploymentImages, ImageInfo } from '../../../shared/types.ts';
 
-/** The images, in the order the footer names them, and under the name it uses. */
+/** The images in the order that the footer shows them. Each key is also the label in the footer. */
 const ORDER: Array<keyof DeploymentImages> = ['orchestrator', 'proxy', 'box'];
 
-/** How much of a digest is shown, in hex characters. */
+/** The length of a shown digest, in hex characters. */
 const SHORT_DIGEST = 12;
 
 /**
@@ -58,7 +58,7 @@ function Entry({ label, image }: { label: string; image: ImageInfo }) {
  *
  * Renders nothing when no image could be read, as outside Docker.
  *
- * @param images The deployment's images.
+ * @param images The images of the deployment.
  */
 export function ImageFooter({ images }: { images: DeploymentImages }) {
   const present = ORDER.flatMap((name) => {

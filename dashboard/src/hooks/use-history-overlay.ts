@@ -3,19 +3,21 @@ import { useLocation, useNavigate } from 'react-router';
 import { historyIndex } from '@/lib/history';
 
 /**
- * Makes the back button close a modal surface instead of leaving the screen
- * under it. On a phone, back is the usual way to dismiss.
+ * Makes the back button close a modal surface and stay on the screen under
+ * it. On a phone, back is the usual way to dismiss.
  *
- * Opening pushes a marker: one history entry at the same URL. Back pops it,
- * and the hook closes the surface. Closing from inside the surface pops the
- * marker too, so no spent entry is left behind.
+ * Opening the surface pushes a marker, which is one history entry at the same
+ * URL. Back pops the marker, and the hook closes the surface. Closing from
+ * inside the surface also pops the marker, so no used entry stays in the
+ * history.
  *
- * Only for surfaces that block what is behind them. A popover closes on a tap
- * anywhere, and a pop after that tap could undo a navigation the tap started.
+ * Use the hook only for surfaces that block what is behind them. A popover
+ * closes on a tap anywhere, and a pop after that tap could undo a navigation
+ * that the tap started.
  *
- * @param open Whether the surface is showing.
- * @param onClose Called when back closed the surface. It has to close the
- *   surface, because the marker is already gone.
+ * @param open True while the surface is open.
+ * @param onClose Called when the back button popped the marker. It must close
+ *   the surface, because the marker is already gone.
  */
 export function useHistoryOverlay(open: boolean, onClose: () => void): void {
   const navigate = useNavigate();
@@ -36,13 +38,13 @@ export function useHistoryOverlay(open: boolean, onClose: () => void): void {
   const state = useRef<unknown>(null);
   state.current = location.state;
 
-  /** The index of the entry opening pushed, while it is still ours to pop. */
+  /** The index of the entry that opening pushed, while the hook can still pop it. */
   const marker = useRef<number | null>(null);
   /** The URL the marker was pushed at. */
   const markerUrl = useRef('');
-  /** Set when back is what closed this, so closing does not pop twice. */
+  /** True when the back button closed the surface, so the close does not pop twice. */
   const popped = useRef(false);
-  /** A pop the unmount scheduled, which a remount cancels. */
+  /** The timer of a pop that the unmount scheduled. A remount cancels it. */
   const pending = useRef<number | null>(null);
 
   /*
@@ -52,8 +54,8 @@ export function useHistoryOverlay(open: boolean, onClose: () => void): void {
   useLayoutEffect(() => {
     /*
      * A remount in place, as StrictMode does in development, cancels the pop
-     * its unmount scheduled. That pop would land after the new marker and
-     * read as a back press.
+     * its unmount scheduled. Otherwise, the pop would come after the new marker
+     * and look like a back press.
      */
     if (pending.current !== null) {
       clearTimeout(pending.current);
@@ -61,8 +63,8 @@ export function useHistoryOverlay(open: boolean, onClose: () => void): void {
     }
     if (!open || marker.current !== null) return;
     popped.current = false;
-    // Keeps the entry's state, which a view may read, such as the thread a
-    // review was opened from.
+    // Keeps the state of the entry, because a view can read it, e.g., the
+    // thread that opened a review.
     nav.current(url.current, {
       state: { ...(state.current as object | null), overlay: true },
       preventScrollReset: true,
@@ -72,8 +74,8 @@ export function useHistoryOverlay(open: boolean, onClose: () => void): void {
   }, [open]);
 
   /*
-   * The browser's own event, because the router applies a location change
-   * in a transition. A back press before the push reached the router leaves
+   * Listens to the popstate event of the browser, because the router applies
+   * a location change in a transition. A back press before the push reached the router leaves
    * the router's location as it was, so an effect on it would not run.
    */
   useEffect(() => {
@@ -122,11 +124,15 @@ export function useHistoryOverlay(open: boolean, onClose: () => void): void {
 }
 
 /**
- * Whether the current entry is still the marker at index `idx` and URL `at`.
+ * Checks if the current entry is still the marker at index `idx` and URL `at`.
  *
  * The index alone is not enough, because a replace keeps it. Deleting a box
  * replaces the entry with the list while its dialog is still mounted, and a
  * pop would then go back to the deleted box.
+ *
+ * @param idx The history index of the marker.
+ * @param at The URL of the marker.
+ * @returns True when the current entry is the marker.
  */
 function stillOnMarker(idx: number, at: string): boolean {
   const { pathname, search, hash } = window.location;
@@ -134,12 +140,17 @@ function stillOnMarker(idx: number, at: string): boolean {
 }
 
 /**
- * The open state of a Radix root, wired to the back button with
+ * Holds the open state of a Radix root, wired to the back button with
  * {@link useHistoryOverlay}.
  *
  * Works for a controlled root with an `open` prop and for an uncontrolled one.
  * The dialog, sheet and select primitives call it, so each of them gets the
  * behaviour.
+ *
+ * @param open The open state of a controlled root, or undefined for an uncontrolled root.
+ * @param defaultOpen The first open state of an uncontrolled root.
+ * @param onOpenChange Called with each new open state.
+ * @returns The current open state and the function that changes it.
  */
 export function useOverlayState({
   open,

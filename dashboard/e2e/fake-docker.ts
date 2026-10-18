@@ -1,13 +1,14 @@
 import { Duplex, PassThrough } from 'node:stream';
 import * as dk from '../../orchestrator/src/docker.ts';
 
-/** The prompt the fake shell draws, which is how a test knows it is there. */
+/** The prompt the fake shell writes. A test waits for it to know that the shell is ready. */
 const PROMPT = 'agent@box:/workspace$ ';
 
 /**
- * A pty that behaves enough like a shell to drive a terminal against.
+ * Creates a fake shell pty. It echoes the typed input and writes the prompt after each answer.
  *
- * It echoes what is typed and answers each finished line with `answer`.
+ * @param answer Gives the output for each finished line.
+ * @returns The stream of the pty.
  */
 function fakeShell(answer: (line: string) => string): Duplex {
   let line = '';
@@ -37,7 +38,7 @@ type DockerClient = NonNullable<Parameters<typeof dk.setDockerForTests>[0]>;
 interface FakeContainer {
   /** The image it was created from, which decides whether it is current. */
   image: string;
-  /** Whether the container runs. */
+  /** True when the container runs. */
   running: boolean;
 }
 
@@ -45,9 +46,9 @@ interface FakeContainer {
 interface FakeImage {
   /** The digest the registry it was pulled from knows it by. */
   repoDigest: string;
-  /** The image's own id, which is what a container inspect points at. */
+  /** The image id. A container inspect returns this id as the image of the container. */
   id: string;
-  /** When the image was built, as an ISO timestamp. */
+  /** The build time of the image, as an ISO timestamp. */
   builtAt: string;
   /** The image size in bytes. */
   sizeBytes: number;
@@ -55,11 +56,16 @@ interface FakeImage {
 
 /** The fake daemon, and the handles a test needs on it. */
 export interface FakeDocker {
-  /** What the fake shell answers a typed line with. Replaced by a test. */
+  /** The answer of the fake shell to a typed line. A test can replace it. */
   terminalAnswer: (line: string) => string;
-  /** Puts a container the orchestrator will ask about into the daemon. */
+  /**
+   * Adds a container of the box image to the fake daemon.
+   *
+   * @param id The container id.
+   * @param running True when the container runs.
+   */
   addContainer(id: string, running: boolean): void;
-  /** Takes the fake client back out again. */
+  /** Removes the fake client from the orchestrator. */
   close(): void;
 }
 
@@ -93,26 +99,31 @@ const ORCHESTRATOR_IMAGE: FakeImage = {
 
 /**
  * The container this process pretends to run in, so the orchestrator can read
- * its own image as it does in a deployment. The real id comes from files under
- * `/proc` that a test process cannot arrange.
+ * its own image as it does in a deployment. In a deployment, the orchestrator reads the real id from system files,
+ * for example `/proc/self/mountinfo`. A test process cannot arrange these files.
  */
 const SELF_CONTAINER = 'a'.repeat(64);
 
-/** The container id a test process stands in, for the orchestrator's own image. */
+/** The container id that a test gives to the orchestrator as the id of its own container. */
 export const FAKE_SELF_CONTAINER = SELF_CONTAINER;
 
-/** A 404 as the daemon spells one, which is how absence is told from trouble. */
+/**
+ * Creates a 404 error in the form of the daemon. The status code tells a missing object from a failure.
+ *
+ * @param what The kind and name of the missing object.
+ * @returns The error.
+ */
 function notFound(what: string): Error & { statusCode: number } {
   return Object.assign(new Error(`no such ${what}`), { statusCode: 404 });
 }
 
 /**
- * Replaces the orchestrator's shared Docker client with one that answers from
- * memory, and returns the handles a test drives it with.
+ * Replaces the shared Docker client of the orchestrator with a client that answers from memory.
  *
- * It models only what the routes read back: whether a container runs, which
- * image it was made from, and a shell for the terminal. A container's id is
- * the name it was created with, so a box container's id names its box.
+ * @param boxImage The tag of the box image. An image inspect by this tag gives the fake box image.
+ * @param selfContainerId The id that the orchestrator reads as the id of its own container. Undefined makes the
+ *   orchestrator read the real sources.
+ * @returns The handles that a test uses to drive the fake daemon.
  */
 export function installFakeDocker(boxImage: string, selfContainerId?: string): FakeDocker {
   /** Containers by id, including the ones the orchestrator creates itself. */
@@ -129,14 +140,25 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     [ORCHESTRATOR_IMAGE.id, ORCHESTRATOR_IMAGE],
   ]);
 
-  /** The container behind an id, or the daemon's own 404. */
+  /**
+   * Finds the container with the id.
+   *
+   * @param id The container id.
+   * @returns The container.
+   * @throws Error The 404 of the daemon when the fake daemon has no such container.
+   */
   const must = (id: string): FakeContainer => {
     const found = containers.get(id);
     if (!found) throw notFound(`container: ${id}`);
     return found;
   };
 
-  /** One container's handle, with only the calls the orchestrator makes. */
+  /**
+   * Creates one container's handle, with the calls that the orchestrator makes.
+   *
+   * @param id The container id.
+   * @returns The handle.
+   */
   const handle = (id: string): unknown => ({
     id,
     start: async () => {
@@ -152,8 +174,8 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
       const container = must(id);
       return { Id: id, Image: container.image, State: { Running: container.running } };
     },
-    // A terminal asks for a pty. Every other exec produces no output here.
-    // Review runs git through its own injected runner.
+    // A terminal asks for a pty. Every other exec gives no output, because the
+    // review runs git through an injected runner.
     exec: async (opts: { Tty?: boolean }) => ({
       start: async () => {
         if (opts.Tty) return fakeShell((line) => terminalAnswer(line));
@@ -166,7 +188,11 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
     }),
   });
 
-  /** One network's handle. The egress proxy is always on it. */
+  /**
+   * Creates one network's handle. The egress proxy is always on the network.
+   *
+   * @returns The handle.
+   */
   const network = (): unknown => ({
     inspect: async () => ({
       Containers: { proxy: { Name: PROXY_CONTAINER } },
@@ -197,8 +223,7 @@ export function installFakeDocker(boxImage: string, selfContainerId?: string): F
       remove: async () => undefined,
     }),
     createContainer: async (spec: { name: string }) => {
-      // A box container is named after its box, so the review's git runner
-      // can find the workspace from the id.
+      // The orchestrator finds a box container by its name, so the name is the id.
       const id = spec.name;
       containers.set(id, { image: BOX_IMAGE.id, running: false });
       return handle(id);

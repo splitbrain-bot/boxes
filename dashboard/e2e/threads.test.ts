@@ -1,23 +1,28 @@
+/**
+ * Browser tests for several threads on one box.
+ *
+ * A box's threads share its container, workspace and home. Each thread has a transcript of its own.
+ */
+
 import { afterAll, afterEach, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { reply } from './stub-gateway.ts';
 
-/**
- * Browser tests for several threads on one box.
- *
- * A box's threads share its container, workspace and home, so only their
- * transcripts differ.
- */
-
 /** The box the tests drive. */
 const ID = DEFAULT_BOX.id;
 
-/** The `text-decoration-line` the browser computed for one element. */
+/**
+ * Reads the `text-decoration-line` that the browser computed for one element.
+ *
+ * @param target The element.
+ * @returns The computed value.
+ */
 function decoration(target: import('playwright').Locator): Promise<string> {
   return target.evaluate((el) => getComputedStyle(el).textDecorationLine);
 }
 
+/** The orchestrator of the running test. */
 let stub: TestOrchestrator;
 
 beforeEach(async () => {
@@ -34,13 +39,21 @@ afterAll(async () => {
   await closeBrowser();
 });
 
-/** Starts a fresh thread from the list, with the dialog's defaults. */
+/**
+ * Starts a fresh thread from the list, with the dialog's defaults.
+ *
+ * @param page The page that shows the box list.
+ */
 async function startThread(page: import('playwright').Page): Promise<void> {
   await page.getByRole('button', { name: 'New thread' }).click();
   await page.getByRole('button', { name: 'Start thread' }).click();
 }
 
-/** Waits for the connection, asks one question, and waits for the answer. */
+/**
+ * Waits for the connection, asks one question, and waits for the answer.
+ *
+ * @param page The page that shows the thread.
+ */
 async function askOnce(page: import('playwright').Page): Promise<void> {
   await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
   const input = page.getByLabel('Message input');
@@ -149,8 +162,8 @@ test('a fork from inside the thread leaves it where it is and offers a new tab',
 
     await page.getByLabel('Fork this thread').click();
 
-    // The link is revealed rather than followed: a window.open after the
-    // await is what popup blockers exist to stop.
+    // The link is shown and not followed, because popup blockers stop a
+    // window.open after an await.
     const link = page.getByRole('link', { name: 'Open it in a new tab' });
     await expect.poll(() => link.isVisible()).toBe(true);
     expect(await link.getAttribute('href')).toBe(`/boxes/${ID}/threads/th2`);

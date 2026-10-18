@@ -10,8 +10,8 @@ import type { CredentialId, LoginState } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 
 /**
- * How often the login state is polled, in milliseconds. Faster than other
- * polls, because the reader is waiting for this answer.
+ * The poll interval for the login state, in milliseconds. Shorter than other
+ * poll intervals, because the reader is waiting for this answer.
  */
 const POLL_MS = 1_000;
 
@@ -23,6 +23,13 @@ const POLL_MS = 1_000;
  * and waits until the code is pasted back. For Dev Tunnels the orchestrator
  * runs GitHub's device flow itself, which shows a URL and a code like Codex.
  * The page starts the login, so a remount does not start a second one.
+ *
+ * @param credential The credential that the login is for.
+ * @param label The name of the credential, for the screen reader labels.
+ * @param loginId The id of the login, from the answer to `POST /api/credentials/:id/login`.
+ * @param onDone Called when the CLI stored the credential. The caller keeps it stable.
+ * @param onClose Called when the reader closes the panel, after a cancel or a failure.
+ * @param onRetry Starts another login after a failure.
  */
 export function CredentialLogin({
   credential,
@@ -32,11 +39,11 @@ export function CredentialLogin({
   onClose,
   onRetry,
 }: {
-  /** The credential the login is for. */
+  /** The credential that the login is for. */
   credential: CredentialId;
-  /** The credential's name, for the screen reader labels. */
+  /** The name of the credential, for the screen reader labels. */
   label: string;
-  /** The login to follow, as `POST /api/credentials/:id/login` answered. */
+  /** The id of the login, from the answer to `POST /api/credentials/:id/login`. */
   loginId: string;
   /**
    * Called when the CLI stored the credential. The caller keeps it stable,
@@ -99,13 +106,13 @@ export function CredentialLogin({
     if (state.state === 'done') onDone();
   }, [state.state, onDone]);
 
-  /** Cancels the login, so the orchestrator removes its container now. */
+  /** Cancels the login, so the orchestrator removes its container at once. */
   const cancel = async (): Promise<void> => {
     setBusy(true);
     try {
       await api.cancelLogin(credential, loginId);
     } catch {
-      // The orchestrator ends an unfinished login after ten minutes anyway.
+      // The orchestrator ends an unfinished login after ten minutes.
     }
     setBusy(false);
     onClose();

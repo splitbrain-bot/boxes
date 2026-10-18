@@ -3,11 +3,19 @@ import type * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
+/**
+ * A round frame for a user picture or its fallback.
+ *
+ * @param className Extra classes.
+ * @param size The size of the avatar.
+ * @param props The other props of the Radix avatar root.
+ */
 function Avatar({
   className,
   size = 'default',
   ...props
 }: React.ComponentProps<typeof AvatarPrimitive.Root> & {
+  /** The size of the avatar. */
   size?: 'default' | 'sm' | 'lg';
 }) {
   return (
@@ -23,6 +31,12 @@ function Avatar({
   );
 }
 
+/**
+ * The picture of an avatar.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix avatar image.
+ */
 function AvatarImage({ className, ...props }: React.ComponentProps<typeof AvatarPrimitive.Image>) {
   return (
     <AvatarPrimitive.Image
@@ -33,6 +47,12 @@ function AvatarImage({ className, ...props }: React.ComponentProps<typeof Avatar
   );
 }
 
+/**
+ * The content that an avatar shows while its picture is not loaded.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix avatar fallback.
+ */
 function AvatarFallback({
   className,
   ...props
@@ -49,6 +69,12 @@ function AvatarFallback({
   );
 }
 
+/**
+ * A small dot at the bottom right corner of an avatar. Its size follows the size of the avatar.
+ *
+ * @param className Extra classes.
+ * @param props The other span props.
+ */
 function AvatarBadge({ className, ...props }: React.ComponentProps<'span'>) {
   return (
     <span
@@ -65,6 +91,12 @@ function AvatarBadge({ className, ...props }: React.ComponentProps<'span'>) {
   );
 }
 
+/**
+ * A row of overlapping avatars.
+ *
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function AvatarGroup({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
@@ -78,6 +110,12 @@ function AvatarGroup({ className, ...props }: React.ComponentProps<'div'>) {
   );
 }
 
+/**
+ * A round count at the end of an avatar group, with the size of the avatars in the group.
+ *
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function AvatarGroupCount({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div

@@ -1,7 +1,3 @@
-import { afterAll, afterEach, expect, test } from 'vitest';
-import { closeBrowser, openPage, shoot } from './browser.ts';
-import { type BoxSpec, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
-
 /**
  * Browser tests for the new-thread dialog and the new-box form.
  *
@@ -9,12 +5,21 @@ import { type BoxSpec, startOrchestrator, type TestOrchestrator } from './orches
  * agent, so the tests check the request body the orchestrator received.
  */
 
+import { afterAll, afterEach, expect, test } from 'vitest';
+import { closeBrowser, openPage, shoot } from './browser.ts';
+import { type BoxSpec, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+
 /** The box the tests drive. */
 const ID = 'a1b2c3d4';
 
+/** The orchestrator of the running test. */
 let stub: TestOrchestrator;
 
-/** Starts a deployment with a credential and a catalogue for both agents. */
+/**
+ * Starts a deployment with a credential and a catalogue for both agents.
+ *
+ * @param boxes The boxes to create.
+ */
 async function twoHarnesses(boxes: BoxSpec[] = [{}]): Promise<void> {
   stub = await startOrchestrator(boxes);
   stub.state.openaiCredential = 'ok';
@@ -88,7 +93,6 @@ test('the new-box form creates the box and its first thread in one request', asy
 
     await page.getByRole('button', { name: 'Create' }).click();
 
-    // One request makes the box and its first thread on the chosen agent.
     await expect.poll(() => stub.boxCalls.length).toBe(1);
     expect(stub.boxCalls[0]).toEqual({
       name: 'second box',
@@ -187,12 +191,11 @@ test('the dialog opens on what the last one chose, from the deployment', async (
       .poll(async () => (await stub.settings()).dialogs.claude)
       .toEqual({
         modeId: 'plan',
-        // No effort: nobody changed it, and the registry has no default for it.
+        // No effort, because nobody changed it and the registry has no default for it.
         config: { model: 'sonnet' },
       });
 
     await page.waitForURL(`**/boxes/${ID}/threads/th2`);
-    // The back control appears once the thread is connected.
     await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
     await page.getByLabel('Back to boxes').click();
     await page.getByRole('button', { name: 'New thread' }).click();

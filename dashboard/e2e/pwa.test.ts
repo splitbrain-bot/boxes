@@ -1,7 +1,3 @@
-import { afterAll, beforeAll, expect, test } from 'vitest';
-import { closeBrowser, getBrowser, launchProfile } from './browser.ts';
-import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
-
 /**
  * Browser tests for installing the dashboard as an app.
  *
@@ -9,9 +5,14 @@ import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
  * there does it matter how the page fetches its manifest.
  */
 
+import { afterAll, beforeAll, expect, test } from 'vitest';
+import { closeBrowser, getBrowser, launchProfile } from './browser.ts';
+import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+
 /** The cookie the stand-in proxy checks. */
 const COOKIE = 'boxes_proxy_session';
 
+/** The orchestrator that the tests in this file share. */
 let stub: TestOrchestrator;
 
 beforeAll(async () => {
@@ -37,7 +38,7 @@ test('Chrome will install the app from behind an authenticating proxy', async ()
     await page.goto(stub.url, { waitUntil: 'networkidle' });
 
     // A browser fetches the manifest without credentials unless the link asks
-    // for them. A 302 to the login page here breaks the install alone.
+    // for them. A 302 to the login page breaks only the install.
     expect(manifestStatus).toEqual([200]);
 
     const cdp = await context.newCDPSession(page);

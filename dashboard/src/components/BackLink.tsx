@@ -6,7 +6,7 @@ import type { Up } from '@/hooks/use-up';
  *
  * A page draws it while loading and again with its data, so it must keep its
  * place and shape. It is an anchor with an href, so a middle click and copy
- * link work. A plain click steps back in the history instead of pushing.
+ * link work. A plain click steps back in the history and pushes no entry.
  *
  * @param up The parent route and the step-out handlers.
  * @param label The link text.

@@ -3,14 +3,14 @@ import { pollWhileVisible } from '@/lib/poll';
 import type { BoxDetail } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 
-/** How often a view watching one box re-reads it, while its tab is visible. */
+/** The poll interval in milliseconds for a view that watches one box, while its tab is visible. */
 const POLL_MS = 5000;
 
-/** One box, as the view watching it holds it. */
+/** The state of one box in the view that watches it. */
 export interface WatchedBox {
   /** The box as it was last read, or null before the first answer. */
   box: BoxDetail | null;
-  /** What the last read failed with, or null when it answered. */
+  /** The error of the last read, or null when the read succeeded. */
   error: Error | null;
   /** Reads the box again, for a view that has just changed it. */
   reload: () => Promise<void>;
@@ -20,6 +20,9 @@ export interface WatchedBox {
  * Reads one box and polls it while the tab is visible.
  *
  * A view renders again only when the box changed.
+ *
+ * @param id The id of the box.
+ * @returns The box, the error of the last read and a function to read the box again.
  */
 export function useBox(id: string): WatchedBox {
   const [box, setBox] = useState<BoxDetail | null>(null);
@@ -46,7 +49,13 @@ export function useBox(id: string): WatchedBox {
   return { box, error, reload };
 }
 
-/** Whether two readings of a box say the same thing. */
+/**
+ * Checks if two reads of a box have the same content.
+ *
+ * @param a The first read.
+ * @param b The second read.
+ * @returns True when both reads have the same content.
+ */
 function same(a: BoxDetail, b: BoxDetail): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }

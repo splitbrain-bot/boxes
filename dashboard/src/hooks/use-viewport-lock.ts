@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 
 /**
- * How many mounted views hold the lock. The last one to unmount removes the
- * class.
+ * The number of mounted views that hold the lock. The last one to unmount
+ * removes the class.
  */
 let held = 0;
 
@@ -14,8 +14,8 @@ let held = 0;
  * document, and the header goes off the top. Touches land in the view's own
  * scroller, so no gesture could scroll the document back.
  *
- * Only for views that fill the viewport. The reading-column views scroll the
- * document.
+ * Use it only in views that fill the viewport. The reading-column views
+ * scroll the document.
  */
 export function useViewportLock(): void {
   useEffect(() => {

@@ -10,18 +10,20 @@ const TRACK = [0, 1, 2] as const;
 /** The props of {@link Spinner}: any svg prop but children, plus a label. */
 export type SpinnerProps = Omit<React.ComponentProps<'svg'>, 'children'> & {
   /**
-   * What the spinner waits for, for a screen reader. Without it the spinner is
+   * The name of the wait, for a screen reader. Without it the spinner is
    * hidden from assistive technology, for use beside text that already says so.
    */
   label?: string;
 };
 
 /**
- * The dashboard's spinner: a 3×3 wave of blocks.
+ * The spinner of the dashboard, a 3×3 wave of blocks.
  *
  * It reproduces `blocks-wave` from svg-spinners by n3r4zzurr0 (MIT). Each
- * block runs the one `.spinner-block` keyframe from globals.css, and starts
- * (row + col) tenths of a second after the first.
+ * block runs the `spinner-block` animation and starts (row + col) tenths of a
+ * second after the first.
+ *
+ * @param props The svg props and the label.
  */
 export function Spinner({ className, label, ...props }: SpinnerProps) {
   return (

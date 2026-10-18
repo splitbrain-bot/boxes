@@ -1,9 +1,10 @@
+/** Browser tests for the box list, the forms and the box views. */
+
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
-/** Browser tests for the box list, the forms and the box views. */
-
+/** The orchestrator that the tests in this file share. */
 let stub: TestOrchestrator;
 
 beforeAll(async () => {
@@ -46,7 +47,7 @@ for (const scheme of ['light', 'dark'] as const) {
       await expect.poll(() => page.getByText('2 approvals').isVisible()).toBe(true);
       await expect.poll(() => page.getByText('thinking').isVisible()).toBe(true);
       await expect.poll(() => page.getByText('1 job').isVisible()).toBe(true);
-      // The thread that is running it, said in a dot and readable as words.
+      // The thread that runs the job shows a dot with a text label for screen readers.
       await expect.poll(() => page.getByRole('img', { name: 'jobs' }).isVisible()).toBe(true);
       // Time since each thread was active, and disk use per box. The seconds
       // are matched by shape, because the clock moves while the page loads.
@@ -100,7 +101,7 @@ test('a deep link into the SPA is served by the index fallback', async () => {
 test('tapping a card opens nothing, and tapping a thread opens that thread', async () => {
   const { page, errors, close } = await openPage(stub.url, '/');
   try {
-    // The card is not a link: a box has no thread it would open on its own.
+    // The card is not a link, because a box has no default thread to open.
     await page.getByText('refactor auth').click();
     expect(new URL(page.url()).pathname).toBe('/');
 
@@ -167,7 +168,7 @@ test('the box list says which build of each image is running', async () => {
 
 test('a box busy with work no conversation claims offers to stop all of it', async () => {
   // The box is busy, but no thread has a task, so no thread bar can stop the
-  // work. After an adapter respawn, every build the old adapter left looks like this.
+  // work. After an adapter respawn, every build of the old adapter is in the same state.
   stub.createBox({
     id: 'orphan01',
     name: 'orphaned build',
@@ -185,8 +186,7 @@ test('a box busy with work no conversation claims offers to stop all of it', asy
 
     // Confirmed first, because it kills work nobody is watching.
     await stop.click();
-    // The confirmation lists the processes with their age, because no other
-    // place in the dashboard names them.
+    // On the card, only the confirmation lists the processes with their age.
     await expect.poll(() => page.getByText('james -config conf/james.yaml').isVisible()).toBe(true);
     expect(await page.getByText('4h 39m').count()).toBe(2);
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
@@ -260,8 +260,8 @@ test('the info view lists what the box is running, whoever left it there', async
 test('the box list offers to notify this browser', async () => {
   const { page, errors, close } = await openPage(stub.url, '/', 'dark');
   try {
-    // A browser that can subscribe is offered the choice rather than
-    // subscribed for it: the permission prompt has to come from a click.
+    // A browser that can subscribe gets the choice and is not subscribed
+    // automatically, because the permission prompt must come from a click.
     const toggle = page.getByRole('button', { name: 'Notify me' });
     await expect.poll(() => toggle.isVisible()).toBe(true);
     expect(await toggle.getAttribute('aria-pressed')).toBe('false');
@@ -270,8 +270,6 @@ test('the box list offers to notify this browser', async () => {
     await close();
   }
 });
-
-// --- the lifecycle ----------------------------------------------------------
 
 test('a box is created from the form and is on the list afterwards', async () => {
   const { page, errors, close } = await openPage(stub.url, '/new');

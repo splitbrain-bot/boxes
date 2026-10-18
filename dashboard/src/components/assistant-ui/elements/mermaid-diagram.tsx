@@ -11,8 +11,8 @@ import { useMediaQuery } from "@/hooks/use-media-query";
 let renders = 0;
 
 /**
- * The render that runs now. Mermaid's configuration is global, so a render
- * waits for the one before it.
+ * The last render in the queue. The configuration of mermaid is global, so each
+ * render waits for the one before it.
  */
 let queue: Promise<unknown> = Promise.resolve();
 
@@ -24,9 +24,9 @@ let queue: Promise<unknown> = Promise.resolve();
  * would show at a default width.
  *
  * @param code The mermaid source.
- * @param dark Whether to use the dark theme.
+ * @param dark True to use the dark theme.
  * @returns The SVG as a data URL.
- * @throws When mermaid cannot parse the source.
+ * @throws Error when mermaid cannot parse the source.
  */
 const renderDiagram = (code: string, dark: boolean): Promise<string> => {
   const job = queue.then(async () => {
@@ -64,7 +64,10 @@ const renderDiagram = (code: string, dark: boolean): Promise<string> => {
  *
  * While the message is still streaming, and when the source does not parse,
  * the block shows its source text. A tap opens the diagram in the full screen
- * view that images use, where the browser's own pinch zoom works.
+ * view that images use, where the pinch zoom of the browser works.
+ *
+ * @param code The mermaid source.
+ * @param components The Pre and Code components that show the source text.
  */
 export const MermaidDiagram: FC<SyntaxHighlighterProps> = ({
   code,
@@ -99,8 +102,8 @@ export const MermaidDiagram: FC<SyntaxHighlighterProps> = ({
         <ImageZoom
           src={result.src}
           alt="Diagram"
-          // The diagram is drawn on a transparent background, and grows to
-          // fill the screen.
+          // The diagram has a transparent background, so the full screen view
+          // adds one. The diagram fills most of the screen width.
           contentClassName="bg-background h-auto w-[90vw] rounded-lg p-3"
         >
           <img

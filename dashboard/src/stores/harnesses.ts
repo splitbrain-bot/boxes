@@ -1,15 +1,15 @@
-import { useEffect, useSyncExternalStore } from 'react';
-import type { HarnessInfo, ThreadDialogDefaults } from '../../../shared/types.ts';
-import { api } from '../api.ts';
-import { refetchOnVisible } from '../lib/poll.ts';
-
 /**
  * Store for the harness list and the last dialog choice per harness.
  *
  * The new-thread dialog and the new-box form share it.
  */
 
-/** What a dialog reads. */
+import { useEffect, useSyncExternalStore } from 'react';
+import type { HarnessInfo, ThreadDialogDefaults } from '../../../shared/types.ts';
+import { api } from '../api.ts';
+import { refetchOnVisible } from '../lib/poll.ts';
+
+/** The state that a dialog reads. */
 export interface HarnessesState {
   /**
    * Every harness, in the registry's order. Null until the first answer, so a
@@ -30,13 +30,22 @@ let state: HarnessesState = { harnesses: null, dialogs: {}, error: null };
 /** The callbacks to run on every state change. */
 const listeners = new Set<() => void>();
 
-/** Merges `next` into the state and notifies every subscriber. */
+/**
+ * Merges `next` into the state and notifies every subscriber.
+ *
+ * @param next The fields to change.
+ */
 function set(next: Partial<HarnessesState>): void {
   state = { ...state, ...next };
   for (const l of listeners) l();
 }
 
-/** Adds a subscriber and returns the function that removes it. */
+/**
+ * Adds a subscriber.
+ *
+ * @param listener The callback to run on every state change.
+ * @returns The function that removes the subscriber.
+ */
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -59,11 +68,14 @@ export async function loadHarnesses(): Promise<void> {
 }
 
 /**
- * Stores what a dialog chose for one harness, so the next dialog opens on it.
+ * Stores the dialog choice for one harness, so the next dialog opens with that choice.
  *
  * The patch names only this harness. The orchestrator merges the dialogs
  * entry by entry, so two browsers that set two harnesses keep both choices.
  * A failure stays silent, because the thread already exists by then.
+ *
+ * @param harnessId The id of the harness.
+ * @param defaults The chosen mode and config options.
  */
 export async function rememberDialog(
   harnessId: string,
@@ -84,8 +96,10 @@ export async function rememberDialog(
  * Reads the harness list, loading it on mount and again whenever the tab
  * becomes visible.
  *
- * Nothing here changes on its own, so there is no timer. The surfaces that
+ * The data does not change by itself, so the hook has no timer. The surfaces that
  * offer the choice call it, so the list loads only when a dialog opens.
+ *
+ * @returns The current state.
  */
 export function useHarnesses(): HarnessesState {
   const current = useSyncExternalStore(

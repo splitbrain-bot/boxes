@@ -20,22 +20,27 @@ import {
   useReview,
 } from './review.ts';
 
-/** Requests the stub answered, in order. */
+/** The URLs of the requests that the stub answered, in order. */
 let requested: string[] = [];
 
-/** The bodies of the requests that carried one, in order. */
+/** The bodies of the requests that had a body, in order. */
 let bodies: string[] = [];
 
 /** The canned answers, by URL fragment. */
 let answers: Record<string, unknown>;
 
-/** How the next matching request should fail, if at all. */
+/** The error message for every request while it is set, or null for success. */
 let failWith: string | null = null;
 
-/** The status of that failure, for the refusals a caller can act on. */
+/** The HTTP status of the failure, for the refusals that a caller can handle. */
 let failStatus = 500;
 
-/** A directory answer for the root, with `over` applied. */
+/**
+ * Builds a directory answer for the root, with `over` applied.
+ *
+ * @param over The fields that differ from the default answer.
+ * @returns The directory answer.
+ */
 function dir(over: Partial<ReviewDirResponse> = {}): ReviewDirResponse {
   return {
     path: '',
@@ -54,7 +59,12 @@ function dir(over: Partial<ReviewDirResponse> = {}): ReviewDirResponse {
   };
 }
 
-/** A file answer for a.ts, with `over` applied. */
+/**
+ * Builds a file answer for a.ts, with `over` applied.
+ *
+ * @param over The fields that differ from the default answer.
+ * @returns The file answer.
+ */
 function file(over: Partial<ReviewFileResponse> = {}): ReviewFileResponse {
   return {
     path: 'a.ts',
@@ -114,22 +124,37 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** What the last request that carried a body sent. */
+/**
+ * Gives the body of the last request that had a body.
+ *
+ * @returns The body, or '' when no request had a body.
+ */
 function lastBody(): string {
   return bodies.at(-1) ?? '';
 }
 
-/** Requests whose URL mentions a fragment. */
+/**
+ * Counts the requests whose URL contains a fragment.
+ *
+ * @param fragment The URL fragment.
+ * @returns The number of requests.
+ */
 function hits(fragment: string): number {
   return requested.filter((url) => url.includes(fragment)).length;
 }
 
-/** Lets the requests a synchronous call started land. */
+/** Waits until the requests that a synchronous call started have finished. */
 async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/** One entry of one loaded directory, by the path it names. */
+/**
+ * Finds one entry of one loaded directory, by the path it names.
+ *
+ * @param dirPath The path of the directory.
+ * @param entryPath The path of the entry.
+ * @returns The entry, or undefined when the directory is not loaded or does not list it.
+ */
 function entryIn(dirPath: string, entryPath: string) {
   return useReview.getState().dirs[dirPath]?.entries.find((e) => e.path === entryPath);
 }
@@ -137,7 +162,7 @@ function entryIn(dirPath: string, entryPath: string) {
 test('the root of the tree loads and lands in the store', async () => {
   await loadTree();
   assert.equal(useReview.getState().dirs['']?.entries.length, 2);
-  // The facts come with it, so the header paints from the same request.
+  // The facts come with the root, so the header shows data from the same request.
   assert.equal(useReview.getState().facts?.hasGit, true);
   assert.equal(useReview.getState().error, null);
   assert.equal(useReview.getState().loadingTree, false);
@@ -256,7 +281,7 @@ test('a refresh refetches the tree and the open file', async () => {
   await loadFile('a.ts');
   const before = { tree: hits('/review/dir'), file: hits('/review/file') };
 
-  // What returning to the tab does.
+  // Returning to the tab calls refresh.
   await refresh();
 
   assert.equal(hits('/review/dir'), before.tree + 1);
@@ -291,7 +316,7 @@ test('a refresh while a write is in flight is skipped', async () => {
   useReview.setState({ saving: true });
   const before = requested.length;
   await refresh();
-  // Refetching here would fight the optimistic annotation list.
+  // A refetch would overwrite the optimistic annotation list.
   assert.equal(requested.length, before);
   useReview.setState({ saving: false });
 });
@@ -301,7 +326,7 @@ test('a refresh while a composer is open is skipped', async () => {
   useReview.setState({ composing: 4 });
   const before = requested.length;
   await refresh();
-  // Refetching would drop what is being typed.
+  // A refetch would drop the text that the reader types.
   assert.equal(requested.length, before);
   useReview.setState({ composing: null });
 });
@@ -311,7 +336,7 @@ test('a refresh while the pane holds unsaved edits is skipped', async () => {
   setDirty(true);
   const before = requested.length;
   await refresh();
-  // Refetching would drop the unsaved edits.
+  // A refetch would drop the unsaved edits.
   assert.equal(requested.length, before);
   setDirty(false);
 });
@@ -323,8 +348,6 @@ test('nothing is fetched before a box is set', async () => {
   await refresh();
   assert.deepEqual(requested, []);
 });
-
-// --- comments ---------------------------------------------------------------
 
 test('a comment shows before the server confirms it', async () => {
   await loadTree();
@@ -397,8 +420,8 @@ test('a comment deeper in the tree lights the folders above it', async () => {
   };
   await saveComment('src/deep.ts', 1, 'x');
 
-  // The count sits in the directory that lists the file. The folder above it
-  // says its subtree holds a comment.
+  // The directory that lists the file holds the count. The folder above it
+  // marks that its subtree holds a comment.
   assert.equal(entryIn('src', 'src/deep.ts')?.comments, 1);
   assert.equal(entryIn('', 'src')?.commented, true);
 });
@@ -442,8 +465,6 @@ test('a new review clears the comments and reloads the tree', async () => {
   );
 });
 
-// --- the base revision ------------------------------------------------------
-
 test('setting a base refetches the tree and the open file', async () => {
   await loadTree();
   await loadFile('a.ts');
@@ -481,8 +502,6 @@ test('an unknown revision reports itself and changes nothing', async () => {
   assert.equal(useReview.getState().saving, false);
 });
 
-// --- editing ----------------------------------------------------------------
-
 test('a save sends the hash the file was read at, and repaints from the answer', async () => {
   await loadTree();
   await loadFile('a.ts');
@@ -496,7 +515,6 @@ test('a save sends the hash the file was read at, and repaints from the answer',
     content: 'one\nTWO\n',
     hash: 'h1',
   });
-  // The save answer repaints the pane.
   assert.equal(useReview.getState().file?.content, 'one\nTWO\n');
   assert.equal(useReview.getState().file?.status, 'modified');
   // The tree reloads, because an edit changes the file's status.
@@ -537,7 +555,7 @@ test('saving anyway reads what is on disk first, then writes over it', async () 
 
   await saveFile('a.ts', 'mine\n', null);
 
-  // Two calls: a read for the current hash, and the write against it.
+  // Two calls, first a read for the current hash, then the write against it.
   assert.equal(hits('/review/file'), before + 2);
   assert.deepEqual(JSON.parse(lastBody()) as Record<string, unknown>, {
     path: 'a.ts',

@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 
-/** A labelled value with a copy button, optionally masked until revealed. */
+/**
+ * A labelled value with a copy button, optionally masked until revealed.
+ *
+ * @param label The label above the value.
+ * @param value The value to show and copy.
+ * @param masked Hides the value behind dots until the user reveals it.
+ */
 export function CopyField({
   label,
   value,

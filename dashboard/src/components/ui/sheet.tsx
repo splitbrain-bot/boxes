@@ -6,7 +6,12 @@ import { cn } from '@/lib/utils';
 
 /**
  * The sheet root. Opening it pushes a history entry at the same URL, so the
- * back button closes the sheet instead of leaving the screen under it.
+ * back button closes the sheet and the screen below it stays.
+ *
+ * @param open The open state, for a controlled sheet.
+ * @param defaultOpen The open state at mount, for an uncontrolled sheet.
+ * @param onOpenChange Called with the new open state.
+ * @param props The other props of the Radix dialog root.
  */
 function Sheet({
   open,
@@ -25,18 +30,39 @@ function Sheet({
   );
 }
 
+/**
+ * The control that opens a sheet.
+ *
+ * @param props The props of the Radix dialog trigger.
+ */
 function SheetTrigger({ ...props }: React.ComponentProps<typeof SheetPrimitive.Trigger>) {
   return <SheetPrimitive.Trigger data-slot="sheet-trigger" {...props} />;
 }
 
+/**
+ * A control that closes a sheet.
+ *
+ * @param props The props of the Radix dialog close.
+ */
 function SheetClose({ ...props }: React.ComponentProps<typeof SheetPrimitive.Close>) {
   return <SheetPrimitive.Close data-slot="sheet-close" {...props} />;
 }
 
+/**
+ * The portal that renders a sheet at the end of the document.
+ *
+ * @param props The props of the Radix dialog portal.
+ */
 function SheetPortal({ ...props }: React.ComponentProps<typeof SheetPrimitive.Portal>) {
   return <SheetPrimitive.Portal data-slot="sheet-portal" {...props} />;
 }
 
+/**
+ * The dimmed backdrop behind a sheet.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix dialog overlay.
+ */
 function SheetOverlay({
   className,
   ...props
@@ -53,6 +79,15 @@ function SheetOverlay({
   );
 }
 
+/**
+ * The panel of a sheet, which slides in from one edge of the screen.
+ *
+ * @param className Extra classes.
+ * @param children The content of the panel.
+ * @param side The edge of the screen that the panel slides in from.
+ * @param showCloseButton True to show the close button at the top right corner.
+ * @param props The other props of the Radix dialog content.
+ */
 function SheetContent({
   className,
   children,
@@ -60,7 +95,9 @@ function SheetContent({
   showCloseButton = true,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
+  /** The edge of the screen that the panel slides in from. */
   side?: 'top' | 'right' | 'bottom' | 'left';
+  /** True to show the close button at the top right corner. */
   showCloseButton?: boolean;
 }) {
   return (
@@ -94,6 +131,12 @@ function SheetContent({
   );
 }
 
+/**
+ * The header area of a sheet.
+ *
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function SheetHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
@@ -104,6 +147,12 @@ function SheetHeader({ className, ...props }: React.ComponentProps<'div'>) {
   );
 }
 
+/**
+ * The footer area of a sheet, at the end of the panel.
+ *
+ * @param className Extra classes.
+ * @param props The other div props.
+ */
 function SheetFooter({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
@@ -114,6 +163,12 @@ function SheetFooter({ className, ...props }: React.ComponentProps<'div'>) {
   );
 }
 
+/**
+ * The title of a sheet.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix dialog title.
+ */
 function SheetTitle({ className, ...props }: React.ComponentProps<typeof SheetPrimitive.Title>) {
   return (
     <SheetPrimitive.Title
@@ -124,6 +179,12 @@ function SheetTitle({ className, ...props }: React.ComponentProps<typeof SheetPr
   );
 }
 
+/**
+ * The muted description of a sheet, below its title.
+ *
+ * @param className Extra classes.
+ * @param props The other props of the Radix dialog description.
+ */
 function SheetDescription({
   className,
   ...props

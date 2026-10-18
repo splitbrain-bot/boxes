@@ -73,29 +73,37 @@ import {
   type ReactNode,
 } from "react";
 
+/** A group of message parts, such as a tool group or a reasoning group. */
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 
 /**
  * Optional component overrides for the thread. `AssistantMessage` and
- * `Welcome` replace whole sections; the remaining slots override how the
- * assistant message renders tool calls and part groups. Tool UIs registered
- * by name (toolkit `render`, `useAssistantDataUI`) take precedence over
- * `ToolFallback`.
+ * `Welcome` replace whole sections. The other slots change how the assistant
+ * message renders tool calls and part groups. A tool UI that is registered by
+ * name wins over `ToolFallback`.
  */
 export type ThreadComponents = {
+  /** Replaces the whole assistant message. */
   AssistantMessage?: ComponentType | undefined;
+  /** Replaces the welcome section of an empty thread. */
   Welcome?: ComponentType | undefined;
+  /** Renders a tool call that has no registered tool UI. */
   ToolFallback?: ToolCallMessagePartComponent | undefined;
+  /** Renders a group of tool calls. */
   ToolGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
     | undefined;
+  /** Renders a group of reasoning parts. */
   ReasoningGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
     | undefined;
 };
 
+/** The props of {@link Thread}. */
 export type ThreadProps = {
+  /** The component overrides. */
   components?: ThreadComponents | undefined;
+  /** True to focus the composer on mount. */
   autoFocus?: boolean | undefined;
   /**
    * Boxes edit: content shown directly above the composer, such as the work
@@ -109,24 +117,40 @@ export type ThreadProps = {
   aboveMessages?: ReactNode | undefined;
 };
 
+/** The overrides when the caller gives none. */
 const EMPTY_COMPONENTS: ThreadComponents = {};
 
+/** The component overrides of the thread, for the components below it. */
 const ThreadComponentsContext =
   createContext<ThreadComponents>(EMPTY_COMPONENTS);
 
-// Startup exposes a loading placeholder thread; treat it as a new chat so
-// the composer mounts centered. Loads after startup keep the docked layout.
+/**
+ * Checks if the thread shows as a new chat, with the composer in the centre.
+ *
+ * At startup the runtime shows a loading placeholder thread, which counts as a
+ * new chat. A load after startup keeps the docked layout.
+ *
+ * @param s The assistant state.
+ * @returns True when the thread has no messages and is not loading after startup.
+ */
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 &&
   (!s.thread.isLoading || s.threads.isLoading);
 
-// A switched thread that is still fetching its history: skeleton, not welcome.
+/**
+ * Checks if a switched thread still fetches its history. The thread then shows
+ * a skeleton and no welcome.
+ *
+ * @param s The assistant state.
+ * @returns True while the history of a switched thread loads.
+ */
 const isHistoryLoadingView = (s: AssistantState) =>
   s.thread.messages.length === 0 &&
   s.thread.isLoading &&
   !s.thread.isDisabled &&
   !s.threads.isLoading;
 
+/** Pulsing placeholder messages while the history of a thread loads. */
 const ThreadHistorySkeleton: FC = () => (
   <div
     data-slot="aui_thread-history-skeleton"
@@ -148,7 +172,14 @@ const ThreadHistorySkeleton: FC = () => (
   </div>
 );
 
-/** The chat thread: the transcript and the composer. */
+/**
+ * The chat thread, with the transcript and the composer.
+ *
+ * @param components The component overrides.
+ * @param autoFocus True to focus the composer on mount.
+ * @param aboveComposer Boxes edit: content shown directly above the composer.
+ * @param aboveMessages Boxes edit: content shown above the first message.
+ */
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
@@ -169,11 +200,22 @@ export const Thread: FC<ThreadProps> = ({
   );
 };
 
-/** The thread's scrolling viewport, its messages and the composer footer. */
+/**
+ * The scrolling viewport of the thread, its messages and the composer footer.
+ *
+ * @param isEmpty True while the thread shows as a new chat.
+ * @param autoFocus True to focus the composer on mount.
+ * @param aboveComposer Content shown directly above the composer.
+ * @param aboveMessages Content shown above the first message.
+ */
 const ThreadRoot: FC<{
+  /** True while the thread shows as a new chat. */
   isEmpty: boolean;
+  /** True to focus the composer on mount. */
   autoFocus: boolean;
+  /** Content shown directly above the composer. */
   aboveComposer?: ReactNode | undefined;
+  /** Content shown above the first message. */
   aboveMessages?: ReactNode | undefined;
 }> = ({ isEmpty, autoFocus, aboveComposer, aboveMessages }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
@@ -192,12 +234,13 @@ const ThreadRoot: FC<{
       }}
     >
       {/* Boxes edit: autoScroll with turnAnchor. A turn anchors its user
-          message to the top. Everything else that grows the thread follows
-          the bottom, such as a !bang command's output, which sets no anchor.
+          message to the top. Other content that grows the thread without an
+          anchor follows the bottom.
 
           Boxes edit: @container here as well, because a full-bleed block must
-          fit this element's width. The root's width includes this element's
-          vertical scrollbar, so a bleed measured against it overflows. */}
+          fit the width of this element. The width of the root includes the
+          vertical scrollbar of this element, so a bleed measured against the
+          root overflows. */}
       <ThreadPrimitive.Viewport
         ref={viewport}
         autoScroll
@@ -232,8 +275,8 @@ const ThreadRoot: FC<{
             className={cn(
               "aui-thread-viewport-footer bg-background flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
               /* Boxes edit: z-10, so the footer covers a hovered message.
-                 globals.css raises a message that ends in rows on hover, and
-                 without a z-index the footer paints under it. */
+                 The stylesheet raises a message that ends in rows on hover,
+                 and without a z-index the footer paints under it. */
               !isEmpty &&
                 "sticky bottom-0 z-10 mt-auto rounded-t-(--composer-radius)",
             )}
@@ -258,9 +301,12 @@ const ThreadRoot: FC<{
  * waits on the user.
  *
  * The adapter blocks on a permission request until it is answered, so a
- * question folded away would stall the turn. Only the interrupt reason opens
- * the group. The other requires-action reason is a call waiting on its own
+ * folded question would stall the turn. Only the interrupt reason opens
+ * the group. The other requires-action reason is a call that waits for its own
  * result, which needs nothing from the user.
+ *
+ * @param group The group part, with its status and the indices of its calls.
+ * @param children The tool calls.
  */
 const DefaultToolGroup: FC<PropsWithChildren<{ group: ThreadGroupPart }>> = ({
   group,
@@ -291,11 +337,11 @@ const DATA_PARTS = {
 };
 
 /**
- * Boxes edit: tells whether a message holds only background-task notifications.
+ * Boxes edit: checks if a message holds only background-task notifications.
  *
- * The harness wakes the agent in the user's role when a task reports in, so
- * such a message arrives as a user message. The thread draws it as a quiet row
- * instead of a user bubble.
+ * The harness wakes the agent with a user-role message when a task reports in,
+ * so such a message arrives as a user message. The thread draws it as a small,
+ * muted row and not as a user bubble.
  *
  * @param s The assistant state of the message.
  * @returns True when every part of the message is a task notification.
@@ -320,6 +366,7 @@ const ThreadMessage: FC = () => {
   return <AssistantMessageComponent />;
 };
 
+/** The round button that scrolls the thread to its end. It hides at the end. */
 const ThreadScrollToBottom: FC = () => {
   return (
     <ThreadPrimitive.ScrollToBottom asChild>
@@ -334,6 +381,7 @@ const ThreadScrollToBottom: FC = () => {
   );
 };
 
+/** The greeting of an empty thread. */
 const ThreadWelcome: FC = () => {
   return (
     <div className="aui-thread-welcome-root mb-6 flex flex-col items-center px-4 text-center">
@@ -344,6 +392,7 @@ const ThreadWelcome: FC = () => {
   );
 };
 
+/** The suggested first prompts of an empty thread. */
 const ThreadSuggestions: FC = () => {
   return (
     <div className="aui-thread-welcome-suggestions flex w-full flex-wrap items-center justify-center gap-2 px-4">
@@ -354,6 +403,7 @@ const ThreadSuggestions: FC = () => {
   );
 };
 
+/** One suggested first prompt. A click sends it. */
 const ThreadSuggestionItem: FC = () => {
   return (
     <div className="aui-thread-welcome-suggestion-display fade-in slide-in-from-bottom-2 animate-in fill-mode-both duration-200">
@@ -370,8 +420,15 @@ const ThreadSuggestionItem: FC = () => {
   );
 };
 
-/** The message composer, with attachments and the slash-command list. */
-const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
+/**
+ * The message composer, with attachments and the slash-command list.
+ *
+ * @param autoFocus True to focus the input on mount.
+ */
+const Composer: FC<{
+  /** True to focus the input on mount. */
+  autoFocus: boolean;
+}> = ({ autoFocus }) => {
   // Boxes edit: ArrowUp on an empty draft walks back through sent messages,
   // and ArrowDown returns to the draft.
   const history = unstable_useComposerInputHistory();
@@ -386,8 +443,8 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
   });
 
   return (
-    // Boxes edit: the trigger root wraps the composer, so the input's keyboard
-    // handling drives the slash-command list. The list sits inside the
+    // Boxes edit: the trigger root wraps the composer, so the keyboard handling
+    // of the input drives the slash-command list. The list sits inside the
     // relatively positioned root it opens above.
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
       <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
@@ -420,11 +477,12 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
   );
 };
 
+/** The buttons below the composer input: attach, dictate, and send or stop. */
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
-      {/* Boxes edit: a file picked here is uploaded into the box's workspace,
-          so it can be of any type. */}
+      {/* Boxes edit: a file picked here is uploaded into the workspace of the
+          box, so it can be of any type. */}
       <ComposerAddAttachment />
       <div className="flex items-center gap-1.5">
         <AuiIf condition={(s) => s.thread.capabilities.dictation}>
@@ -492,6 +550,7 @@ const ComposerAction: FC = () => {
   );
 };
 
+/** The error of a failed assistant message. */
 const MessageError: FC = () => {
   return (
     <MessagePrimitive.Error>
@@ -511,8 +570,9 @@ const AssistantMessage: FC = () => {
   } = useContext(ThreadComponentsContext);
 
   const ACTION_BAR_PT = "pt-1.5";
-  // Reserve the action bar's height under the message, then cancel the
-  // reservation in flow so the next message sits where it would anyway.
+  // Reserves the height of the action bar below the message. The negative
+  // margin of the root cancels the reservation in the flow, so the next message
+  // keeps its place.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
 
   return (
@@ -521,7 +581,7 @@ const AssistantMessage: FC = () => {
       data-role="assistant"
       /* Boxes edit: no content-visibility utilities here, unlike the user
          message. Their paint containment would clip a table or code block
-         that bleeds out of the reading column, so globals.css applies them
+         that bleeds out of the reading column, so the stylesheet applies them
          only to messages without such a block. */
       className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
     >
@@ -584,9 +644,9 @@ const AssistantMessage: FC = () => {
                   </div>
                 );
               case "indicator":
-                /* Boxes edit: the shared spinner. It is often the only thing
-                   on screen while a turn thinks, and a pulsing dot looks like
-                   a page that stopped repainting. */
+                /* Boxes edit: uses the spinner of the dashboard. It is often the
+                   only thing on screen while a turn thinks, and a pulsing dot
+                   looks like a page that stopped repainting. */
                 return (
                   <span
                     data-slot="aui_assistant-message-indicator"
@@ -662,8 +722,10 @@ const AssistantActionBar: FC = () => {
 
 /**
  * Boxes edit: an attached file as a link to the endpoint that serves it from
- * the box's workspace. The browser shows some types, such as PDF, and
- * downloads the rest.
+ * the workspace of the box. The browser shows some types, such as PDF, and
+ * downloads the rest. A file without an endpoint URL shows without a link.
+ *
+ * @param part The file part.
  */
 const UserFilePart: FileMessagePartComponent = (part) => {
   const href = part.data.startsWith('/api/') ? part.data : null;
@@ -687,6 +749,11 @@ const UserFilePart: FileMessagePartComponent = (part) => {
   );
 };
 
+/**
+ * An image attached to a user message.
+ *
+ * @param part The image part.
+ */
 const UserImagePart: ImageMessagePartComponent = (part) => (
   <div data-slot="aui_user-message-image" className="py-1">
     <Image {...part} />
@@ -727,8 +794,8 @@ const UserMessage: FC = () => {
 };
 
 /**
- * Boxes edit: a message of background-task notifications, drawn as a quiet
- * full-width row. It has no bubble, branch picker or actions, because nobody
+ * Boxes edit: a message of background-task notifications, drawn as a small,
+ * muted row at full width. It has no bubble, branch picker or actions, because nobody
  * wrote it.
  */
 const TaskNotificationMessage: FC = () => {
@@ -746,9 +813,9 @@ const TaskNotificationMessage: FC = () => {
 /**
  * The composer for editing a sent message.
  *
- * Boxes edit: nothing opens it, because ACP cannot branch a conversation and
- * the user action bar with its Edit button is gone. It stays, so a registry
- * upgrade shows up as a diff.
+ * Boxes edit: nothing opens it, because ACP cannot branch a conversation, and
+ * a user message has no action bar with an Edit button. The component stays,
+ * so the diff against a new registry version stays small.
  */
 const EditComposer: FC = () => {
   return (
@@ -782,6 +849,13 @@ const EditComposer: FC = () => {
   );
 };
 
+/**
+ * The previous and next buttons between the branches of a message. It hides
+ * for a message with one branch.
+ *
+ * @param className Extra classes.
+ * @param rest The other props of the branch picker root.
+ */
 const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
   className,
   ...rest

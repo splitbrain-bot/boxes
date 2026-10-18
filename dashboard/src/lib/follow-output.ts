@@ -1,13 +1,13 @@
+/**
+ * State functions that decide whether a scroller follows its own output, from
+ * its positions and the gestures on it.
+ */
+
 import { AT_BOTTOM } from './scroll-away.ts';
 
 /**
- * Decides whether a scroller follows its own output, from its positions and
- * the gestures on it.
- */
-
-/**
- * How long after a gesture, in milliseconds, a scroll still counts as the
- * reader's.
+ * The time after a gesture, in milliseconds, in which a scroll still counts as
+ * the reader's.
  *
  * The browser animates a wheel notch or a flick over several frames. The
  * window covers that animation but not a later scroll the browser makes by
@@ -16,20 +16,20 @@ import { AT_BOTTOM } from './scroll-away.ts';
 const REACH = 400;
 
 /**
- * How recently, in milliseconds, a scroller must have moved with its output
- * to count as following it.
+ * The time, in milliseconds, within which a scroller must have moved with its
+ * output to count as following it.
  *
  * A thread at the bottom with no new output is being read, not followed.
  */
 const ACTIVE = 1000;
 
-/** Whether a scroller follows its output, and when it was last touched and moved. */
+/** The follow state of a scroller, with the times of the last gesture and the last follow move. */
 export interface FollowState {
-  /** Whether the scroller is keeping itself against the bottom. */
+  /** True while the scroller keeps itself against the bottom. */
   following: boolean;
-  /** When a hand was last on the scroller. */
+  /** The time of the last gesture on the scroller. */
   gesture: number;
-  /** When it last moved to stay with its output. */
+  /** The time when the scroller last moved to stay with its output. */
   followed: number;
 }
 
@@ -37,26 +37,37 @@ export interface FollowState {
  * The state of a thread that has just mounted: following, and not touched.
  *
  * Both clocks start at -Infinity, not 0. `performance.now()` counts from page
- * load, so a 0 would read as a recent gesture on a young page.
+ * load, so a 0 would look like a recent gesture on a page that has just loaded.
+ *
+ * @returns The start state.
  */
 export function followStart(): FollowState {
   return { following: true, gesture: -Infinity, followed: -Infinity };
 }
 
-/** The state after a gesture: a wheel, a touch or a press on the scrollbar. */
+/**
+ * Computes the state after a gesture, e.g., a wheel, a touch or a press on the scrollbar.
+ *
+ * @param state The current state.
+ * @param now The time of the gesture.
+ * @returns The new state.
+ */
 export function followTouched(state: FollowState, now: number): FollowState {
   return { ...state, gesture: now };
 }
 
 /**
- * The state after one scroll event.
+ * Computes the state after one scroll event.
  *
  * Following stops only for a scroll away from the bottom soon after a
  * gesture. The position alone cannot tell a reader scrolling up from the
  * browser adjusting for a block that collapsed above. A scroll to the bottom
  * always follows again.
  *
- * @param behind How many pixels of content are below the fold.
+ * @param state The current state.
+ * @param behind The number of pixels of content below the fold.
+ * @param now The time of the scroll event.
+ * @returns The new state.
  */
 export function followScrolled(
   state: FollowState,
@@ -68,11 +79,16 @@ export function followScrolled(
 }
 
 /**
- * The state after the thread grew, and whether to scroll to the bottom.
+ * Computes the state after the thread grew, and whether to scroll to the bottom.
  *
- * @param reserving Whether the turn anchor's reserve under the answer still
- *   has height. While it has, the anchor owns the position. Once it is empty,
- *   the answer is taller than the screen and this takes over.
+ * @param state The current state.
+ * @param behind The number of pixels of content below the fold.
+ * @param reserving True while the reserve of the turn anchor under the
+ *   answer still has height. While it has height, the anchor controls the scroll
+ *   position. When the reserve is empty, the answer is taller than the screen,
+ *   and this function controls the position.
+ * @param now The time of the change.
+ * @returns The new state, and true in `catchUp` when the scroller must move to the bottom.
  */
 export function followGrew(
   state: FollowState,
@@ -83,8 +99,13 @@ export function followGrew(
 }
 
 /**
- * Whether the scroller follows its output right now: it keeps to the bottom,
- * and it moved to stay there within the last {@link ACTIVE} milliseconds.
+ * Checks if the scroller follows its output now. The scroller must keep to the
+ * bottom, and it must have moved to stay there within the last {@link ACTIVE}
+ * milliseconds.
+ *
+ * @param state The current state.
+ * @param now The current time.
+ * @returns True while the scroller follows its output.
  */
 export function isFollowing(state: FollowState, now: number): boolean {
   return state.following && now - state.followed < ACTIVE;

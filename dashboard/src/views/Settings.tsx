@@ -23,7 +23,7 @@ import type {
 import { api } from '../api.ts';
 import { useBoxes } from '../stores/boxes.ts';
 
-/** One credential this page can manage, and what a person is told about it. */
+/** One credential that this page manages, and the text that the page shows about it. */
 interface CredentialKind {
   /** The credential's id. */
   id: CredentialId;
@@ -34,24 +34,24 @@ interface CredentialKind {
    * this page and the dialogs name an agent the same way.
    */
   harnesses: HarnessId[];
-  /** What stops working without it. */
+  /** The description on the card. */
   blurb: string;
   /**
-   * What the secret looks like, so a wrong paste is obvious before saving.
-   * Null for a credential that can only be obtained by logging in, which
-   * then gets no paste form.
+   * The format of the secret, so a wrong paste is obvious before saving. Null
+   * for a credential that only a login can obtain. Such a credential gets no
+   * paste form.
    */
   hint: string | null;
   /**
-   * What a pasted secret is stored as; a login decides its own.
+   * The method to store a pasted secret with. A login decides its own method.
    *
    * @param secret The pasted secret.
    * @returns The method to store it with.
    */
   method: (secret: string) => CredentialMethod;
   /**
-   * Whether the card offers an account login beside the paste form. The
-   * orchestrator then runs the harness's own CLI to get the credential.
+   * True when the card offers an account login beside the paste form. The
+   * orchestrator then runs the matching CLI to get the credential.
    */
   canLogin: boolean;
 }
@@ -60,7 +60,7 @@ interface CredentialKind {
  * The credentials the settings page offers.
  *
  * The orchestrator's harness registry decides which credential each agent
- * needs. The health probe says whether a harness can run on it.
+ * needs. The health probe reports whether a harness can run on it.
  */
 const KINDS: CredentialKind[] = [
   {
@@ -86,7 +86,7 @@ const KINDS: CredentialKind[] = [
   {
     id: 'github',
     label: 'GitHub',
-    // No harness runs on it. Every box uses it for git.
+    // No harness runs on it. Git in every box uses it.
     harnesses: [],
     blurb: 'A personal access token to push and interact with GitHub.',
     hint: 'ghp_…, a classic personal access token',
@@ -118,13 +118,13 @@ const KINDS: CredentialKind[] = [
 ];
 
 /**
- * Page with the deployment's credentials and the git identity of its boxes.
+ * Page with the credentials of the deployment, the API keys and the git identity of the boxes.
  *
  * A stored secret never comes back to the page. Only the egress proxy gets
  * the real value, and a box holds a placeholder.
  */
 export function Settings() {
-  /** Leaves for the box list. */
+  /** Goes back to the box list. */
   const up = useUp('/');
   const { harnesses } = useBoxes();
 
@@ -135,13 +135,14 @@ export function Settings() {
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<CredentialKind | null>(null);
   /**
-   * The login being followed, or null.
+   * The login that the page follows, or null.
    *
    * The page follows one login at a time. The API allows one per credential.
-   * Starting another login cancels this one.
+   * Starting another login cancels the current one.
    */
   const [login, setLogin] = useState<{ id: CredentialId; loginId: string } | null>(null);
 
+  /** Reads the credentials, the API keys and the settings. */
   const load = useCallback(async (): Promise<void> => {
     try {
       const [stored, keys, current] = await Promise.all([
@@ -189,7 +190,7 @@ export function Settings() {
   /**
    * Runs one mutation, then reloads the page data.
    *
-   * @returns Whether the mutation succeeded.
+   * @returns True when the mutation succeeded.
    */
   const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
@@ -279,7 +280,20 @@ export function Settings() {
   );
 }
 
-/** One credential: what is stored, the form that replaces it, and its login. */
+/**
+ * Card for one credential, with the stored state, the form that replaces it, and its login.
+ *
+ * @param kind The credential and the text about it.
+ * @param stored The stored credential, or null.
+ * @param stalled The harnesses that cannot run on it now, empty when all can.
+ * @param busy True while a change runs, which disables the buttons.
+ * @param loginId The login that the page follows under this card, or null.
+ * @param onSave Stores a pasted secret. Resolves to true when that succeeded.
+ * @param onLogin Starts a login.
+ * @param onLoginDone Called when the login stored a credential.
+ * @param onLoginClose Closes the login.
+ * @param onRemove Asks to remove the stored credential.
+ */
 function CredentialCard({
   kind,
   stored,
@@ -294,10 +308,8 @@ function CredentialCard({
 }: {
   kind: CredentialKind;
   stored: CredentialSummary | null;
-  /** The harnesses that cannot run on it right now, empty when all can. */
   stalled: HarnessHealth[];
   busy: boolean;
-  /** The login being followed under this card, or null. */
   loginId: string | null;
   onSave: (secret: string) => Promise<boolean>;
   onLogin: () => void;
@@ -307,6 +319,7 @@ function CredentialCard({
 }) {
   const [secret, setSecret] = useState('');
 
+  /** Saves the typed secret. */
   const save = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     if (busy || secret.trim() === '') return;
@@ -366,7 +379,7 @@ function CredentialCard({
             </Button>
           </>
         ) : null}
-        {/* A subscription has no secret to paste, so a login sits beside the form. */}
+        {/* A subscription has no secret to paste, so the card offers a login beside the form. */}
         {kind.canLogin && loginId === null ? (
           <Button
             type="button"
@@ -431,7 +444,7 @@ function describe(stored: CredentialSummary | null, stalled: HarnessHealth[]): s
 }
 
 /**
- * Names a stored credential: the account of a login, or the last four
+ * Names a stored credential, with the account of a login or the last four
  * characters of a pasted secret.
  *
  * @param stored The stored credential.
@@ -445,6 +458,11 @@ function account(stored: CredentialSummary): string {
 /**
  * Card with the API keys a user added for other services, and the form that
  * adds one or changes one.
+ *
+ * @param stored The stored API keys.
+ * @param busy True while a change runs, which disables the buttons.
+ * @param onSave Stores a key. An empty secret keeps the stored key. Resolves to true when that succeeded.
+ * @param onRemove Removes a key. Resolves to true when that succeeded.
  */
 function ApiKeys({
   stored,
@@ -465,6 +483,7 @@ function ApiKeys({
   const existing = stored.some((key) => key.name === name.trim());
   const ready = name.trim() !== '' && hosts.trim() !== '' && (existing || secret.trim() !== '');
 
+  /** Saves the key in the form, and clears the form on success. */
   const save = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     if (busy || !ready) return;
@@ -578,7 +597,13 @@ function ApiKeys({
   );
 }
 
-/** Card that edits the name and email every box commits as. */
+/**
+ * Card that edits the git author name and email for commits in every box.
+ *
+ * @param settings The deployment settings.
+ * @param busy True while a change runs, which disables the button.
+ * @param onSave Writes the changed settings. Resolves to true when that succeeded.
+ */
 function GitIdentity({
   settings,
   busy,

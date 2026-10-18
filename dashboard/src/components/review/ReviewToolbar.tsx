@@ -12,12 +12,26 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 /**
- * The toolbar over the code pane: prev/next navigation over a file's changes
- * and comments, a link that opens the file in a new tab, and the way in and
- * out of edit mode.
+ * The toolbar over the code pane.
  *
- * The edit controls live here because the toolbar stays pinned while the
+ * The edit controls are here, because the toolbar stays pinned while the
  * keyboard is up.
+ *
+ * @param changeCount The number of changes in the file.
+ * @param commentCount The number of comments in the file.
+ * @param steppable True when the pane has rows to step to. A file shown as one block has none.
+ * @param wrap True when long lines wrap.
+ * @param editable True when this file can be edited.
+ * @param editing True while the pane is in edit mode.
+ * @param dirty True when there are unsaved changes.
+ * @param busy True while a write is in flight.
+ * @param openHref The URL that serves the bytes of the file, or null for a file with none.
+ * @param onWrap Called when the user toggles wrapping.
+ * @param onStepChange Called with -1 for the previous change or 1 for the next.
+ * @param onStepComment Called with -1 for the previous comment or 1 for the next.
+ * @param onEdit Called when the user switches edit mode on or off.
+ * @param onSave Called when the user saves the file.
+ * @param onRevert Called when the user discards the unsaved changes.
  */
 export function ReviewToolbar({
   changeCount,
@@ -40,25 +54,25 @@ export function ReviewToolbar({
   changeCount: number;
   /** The number of comments in the file. */
   commentCount: number;
-  /** Whether the pane has rows to step to. A file shown as one block has none. */
+  /** True when the pane has rows to step to. A file shown as one block has none. */
   steppable: boolean;
-  /** Whether long lines wrap. */
+  /** True when long lines wrap. */
   wrap: boolean;
-  /** Whether this file can be edited at all. */
+  /** True when this file can be edited. */
   editable: boolean;
-  /** Whether the pane is being edited rather than read. */
+  /** True while the pane is in edit mode. */
   editing: boolean;
-  /** Whether there is anything to save. */
+  /** True when there are unsaved changes. */
   dirty: boolean;
-  /** Whether a write is in flight. */
+  /** True while a write is in flight. */
   busy: boolean;
-  /** The URL that serves the file's bytes, or null for a file with none. */
+  /** The URL that serves the bytes of the file, or null for a file with none. */
   openHref: string | null;
   /** Called when the user toggles wrapping. */
   onWrap: () => void;
-  /** Called with −1 for the previous change or 1 for the next. */
+  /** Called with -1 for the previous change or 1 for the next. */
   onStepChange: (direction: -1 | 1) => void;
-  /** Called with −1 for the previous comment or 1 for the next. */
+  /** Called with -1 for the previous comment or 1 for the next. */
   onStepComment: (direction: -1 | 1) => void;
   /** Called when the user switches edit mode on or off. */
   onEdit: () => void;
@@ -114,8 +128,8 @@ export function ReviewToolbar({
           >
             <Undo2 />
           </Button>
-          {/* The only filled control, because unsaved work is the one thing lost
-              by walking away. */}
+          {/* The only filled control, because unsaved changes are lost when the
+              reader leaves. */}
           <Button type="button" size="sm" disabled={!dirty || busy} onClick={onSave}>
             Save
           </Button>
@@ -154,7 +168,15 @@ export function ReviewToolbar({
   );
 }
 
-/** One count with its pair of step buttons. */
+/**
+ * One count with its pair of step buttons.
+ *
+ * @param icon The icon in front of the count.
+ * @param label The singular noun for the counted things, used in the button labels.
+ * @param count The number of counted things.
+ * @param steppable True when there is a row to step to.
+ * @param onStep Called with -1 for the previous one or 1 for the next.
+ */
 function Group({
   icon,
   label,
@@ -164,13 +186,13 @@ function Group({
 }: {
   /** The icon in front of the count. */
   icon: React.ReactNode;
-  /** The singular noun for what is counted, used in the button labels. */
+  /** The singular noun for the counted things, used in the button labels. */
   label: string;
-  /** How many there are. */
+  /** The number of counted things. */
   count: number;
-  /** Whether there is a row to step to. */
+  /** True when there is a row to step to. */
   steppable: boolean;
-  /** Called with −1 for the previous one or 1 for the next. */
+  /** Called with -1 for the previous one or 1 for the next. */
   onStep: (direction: -1 | 1) => void;
 }) {
   const nothingToStepTo = count === 0 || !steppable;

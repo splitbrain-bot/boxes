@@ -1,17 +1,22 @@
+/** Browser tests for how the thread view behaves in use. */
+
 import { afterAll, afterEach, expect, test } from 'vitest';
 import type { ThreadUpdate } from '../src/stores/thread/acp-types.ts';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 import { type GatewayScript, reply } from './stub-gateway.ts';
 
-/** Browser tests for how the thread view behaves in use. */
-
 /** The box every test here drives. */
 const BOX = DEFAULT_BOX;
 
+/** The orchestrator of the running test. */
 let stub: TestOrchestrator;
 
-/** Starts a deployment whose agent behaves as the script says. */
+/**
+ * Starts a deployment whose agent behaves as the script says.
+ *
+ * @param script The fields of the gateway script that replace the defaults.
+ */
 async function start(script?: Partial<GatewayScript>): Promise<void> {
   stub = await startOrchestrator([{}], script);
 }
@@ -243,8 +248,8 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
         .poll(() => page.getByText('and that is the answer').count(), { timeout: 10_000 })
         .toBe(index + 1);
       // Reasoning collapses over 200ms after the turn moves on. A closed panel
-      // keeps its text until its animation has ended, so the wait is for the
-      // panels to have let go of it.
+      // keeps its text until its animation has ended, so the test waits until
+      // the panels drop it.
       await expect
         .poll(() =>
           page.evaluate(
@@ -269,8 +274,7 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
         return rows.slice(1).map((r, i) => Math.round(r.top - rows[i]!.bottom));
       });
       expect(gaps.length).toBeGreaterThanOrEqual(5);
-      // A row is 24px tall. Anything over half that between two of them and
-      // the run has stopped reading as one thing.
+      // A row is 24px tall. A gap over half that height breaks the run.
       for (const gap of gaps) expect(gap).toBeLessThanOrEqual(12);
 
       // The prose the turn ends with is not dragged into the run with them.
@@ -300,8 +304,8 @@ test('a run of reasoning and tool rows stays a list, and prose after it still br
 /*
  * The same run, cut in half by the agent saying something.
  *
- * A tool call carries no message id, so it joins the trailing message: the one
- * the agent has just spoken in. The test reads the turn as an ordered column of
+ * A tool call carries no message id, so it joins the trailing message, which
+ * is the message the agent has just spoken in. The test reads the turn as an ordered column of
  * rows and paragraphs and checks each seam.
  */
 test('a row run stays a list across a message that speaks, and the prose in it still breathes', async () => {
@@ -336,8 +340,8 @@ test('a row run stays a list across a message that speaks, and the prose in it s
         updates: [
           think('s1', 'Thinking about the first step.'),
           call(1),
-          // Prose, and then the calls it announced — one message, and the
-          // one this test is about.
+          // Prose and then the calls it announced, in one message. The test
+          // is about the message s2.
           speak('s2', 'The first run passed. Checking the stub:'),
           call(2),
           think('s3', 'Which is a race rather than slowness.'),
@@ -362,9 +366,9 @@ test('a row run stays a list across a message that speaks, and the prose in it s
       .poll(() => page.getByText('and that is the answer').isVisible(), { timeout: 10_000 })
       .toBe(true);
     // Reasoning collapses over 200ms after the turn moves on. A closed panel
-    // keeps its text until its animation has ended, and that text is markdown
-    // the count below would take for prose, so the wait is for the panels to
-    // have let go of it.
+    // keeps its text until its animation has ended. The text is markdown that
+    // the count below would take for prose, so the test waits until the panels
+    // drop it.
     await expect
       .poll(() =>
         page.evaluate(
@@ -373,8 +377,8 @@ test('a row run stays a list across a message that speaks, and the prose in it s
       )
       .toBe(0);
 
-    // The turn as a column: every row and every paragraph in it, in the
-    // order they are read, with the space above each.
+    // The turn as a column. It holds every row and every paragraph in reading
+    // order, with the space above each.
     const column = await page.evaluate(() => {
       const turn = [...document.querySelectorAll('[data-role="user"]')]
         .pop()!
@@ -397,9 +401,9 @@ test('a row run stays a list across a message that speaks, and the prose in it s
       }));
     });
 
-    // The shape of the turn, so the numbers below are read off the seams
-    // they are meant to be: three row-to-row, one where a sentence hands
-    // over to the calls it announced, and two where a run ends in prose.
+    // The shape of the turn, so that the numbers below come from the correct
+    // seams. There are three row-to-row seams, one where a sentence leads into
+    // the calls it announced, and two where a run ends in prose.
     const seams = (from: string, to: string): number[] =>
       column.filter((step) => step.from === from && step.to === to).map((step) => step.gap);
     expect(column.length).toBe(6);
@@ -438,8 +442,8 @@ test('a tool call that never reported back is not offered as a decision', async 
             status: 'in_progress',
             rawInput: { command: 'npm test' },
           },
-          // The turn ends without a result for it, which is what a cancelled
-          // or crashed call looks like from here.
+          // The turn ends without a result for the call. A cancelled or
+          // crashed call looks the same to the dashboard.
           {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'that is all' },
@@ -477,9 +481,9 @@ test('a tool call that never reported back is not offered as a decision', async 
   }
 });
 
-// Leaving a thread mid-turn and coming back. The orchestrator is the ACP
-// client of record, so the turn is still running; the view is a fresh store
-// with nothing in flight, and only the gateway can tell it otherwise.
+// Leaving a thread during a turn and coming back. The orchestrator stays the
+// ACP client, so the turn is still running. The view gets a new store with
+// nothing in flight, and only the gateway can report the running turn.
 test('a turn still running is still running after a detour away and back', async () => {
   await start({
     prompts: [{ match: () => true, updates: reply('working on it'), hold: true }],
@@ -540,15 +544,15 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
     const table = wide.page.locator('.aui-md-table-wrap');
     await expect.poll(() => table.isVisible(), { timeout: 10_000 }).toBe(true);
 
-    // Wider than the column the prose above it is set in, and no wider than
-    // the thread: the point is to use the window, not to overflow it.
+    // Wider than the column of the prose above it, and no wider than the
+    // thread. The table uses the window and does not overflow it.
     const width = (locator: typeof table): Promise<number> =>
       locator.evaluate((el) => el.clientWidth);
     const column = wide.page.locator('[data-slot="aui_assistant-message-content"]').first();
     expect(await width(table)).toBeGreaterThan(await width(column));
 
-    // And the thread itself did not gain a horizontal scrollbar, which is
-    // what a bleed measured against the window rather than the scroller does.
+    // And the thread itself did not gain a horizontal scrollbar. A bleed
+    // measured against the window instead of the scroller causes one.
     const viewport = wide.page.locator('[data-slot="aui_thread-viewport"]');
     const overflow = await viewport.evaluate((el) => el.scrollWidth - el.clientWidth);
     expect(overflow).toBeLessThanOrEqual(1);
@@ -568,8 +572,9 @@ test('a wide table leaves the reading column, and scrolls when even that is too 
     const input = phone.page.getByLabel('Message input');
     await input.fill('show me the table');
     await input.press('Control+Enter');
-    // Two tables: the thread replays the desktop exchange, then answers this
-    // prompt. The wait is for both, so the second cannot arrive mid-measurement.
+    // Two tables, because the thread replays the desktop exchange and then
+    // answers this prompt. The test waits for both, so the second cannot
+    // arrive during the measurement.
     const tables = phone.page.locator('.aui-md-table-wrap');
     await expect.poll(() => tables.count(), { timeout: 10_000 }).toBe(2);
     const table = tables.last();
@@ -657,7 +662,7 @@ test('the mode switcher lists the advertised modes and sets one', async () => {
     await page.getByLabel('Agent settings').click();
     const modes = page.getByRole('combobox', { name: 'Agent mode' });
     await expect.poll(() => modes.isVisible()).toBe(true);
-    // Nothing hardcoded: whatever the adapter advertises is what appears.
+    // Nothing is hardcoded. The list shows what the adapter advertises.
     expect(await modes.locator('option').allInnerTexts()).toEqual([
       'Default',
       'Accept edits',
@@ -722,7 +727,7 @@ test('the model selector lists the advertised models and sets one', async () => 
     await page.getByLabel('Agent settings').click();
     const models = page.getByRole('combobox', { name: 'Model' });
     await expect.poll(() => models.isVisible()).toBe(true);
-    // Nothing hardcoded: whatever the adapter advertises is what appears.
+    // Nothing is hardcoded. The list shows what the adapter advertises.
     expect(await models.locator('option').allInnerTexts()).toEqual(['Opus', 'Sonnet', 'Haiku']);
     expect(await models.inputValue()).toBe('opus');
 
@@ -806,8 +811,8 @@ test('a thread asked which way to go says that instead', async () => {
       {
         match: () => true,
         toolCall: { toolCallId: 'p1', title: 'Leave plan mode', kind: 'switch_mode' },
-        // Three ways to say yes, each a different thing to do next: a
-        // question, not a gate.
+        // Three ways to say yes, each with a different next step, so the
+        // request is a question and not a gate.
         options: [
           { optionId: 'auto', name: 'Yes, and use auto mode', kind: 'allow_always' },
           { optionId: 'acceptEdits', name: 'Yes, and auto-accept edits', kind: 'allow_always' },
@@ -839,8 +844,8 @@ test('a thread asked which way to go says that instead', async () => {
 
 test("the adapter's other settings are reachable, and setting one is sent", async () => {
   await start({
-    // This adapter says what mode it is in twice — as the protocol's modes,
-    // and again as a config option. Only one of them may reach the overlay.
+    // This adapter reports its mode twice, as the protocol's modes and again
+    // as a config option. Only one of them may reach the overlay.
     modes: {
       currentModeId: 'auto',
       availableModes: [
@@ -894,7 +899,7 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
   try {
     const settings = page.getByLabel('Agent settings');
     await expect.poll(() => settings.isVisible()).toBe(true);
-    // Closed, the header is a name and its icons: no select is in the row.
+    // While the overlay is closed, the header row shows a name and icons and no select.
     expect(await page.getByRole('combobox').count()).toBe(0);
     await settings.click();
 
@@ -906,7 +911,7 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
 
     await effort.selectOption('high');
     await expect.poll(() => effort.inputValue()).toBe('high');
-    // The adapter heard about it, which is the half a select cannot show.
+    // The adapter got the change, which the select itself cannot show.
     await expect
       .poll(() => stub.gateway.script.configOptions.find((o) => o.id === 'effort')?.currentValue)
       .toBe('high');
@@ -924,7 +929,7 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
   }
 });
 
-// The per-harness warning: one line for each agent that cannot run a turn.
+// The warning per harness shows one line for each agent that cannot run a turn.
 test('a harness with no credential is warned about in the list and the thread', async () => {
   await start();
   stub.state.claudeCredential = null;
@@ -952,8 +957,8 @@ test('a harness whose credential has expired is named, with the reason', async (
 
   const { page, close } = await openPage(stub.url, '/');
   try {
-    // Named rather than only missing: an expired credential is a different
-    // thing to do something about from one that was never entered.
+    // Named and not only missing, because the fix for an expired credential
+    // differs from the fix for a credential that nobody entered.
     await expect
       .poll(() => page.getByText(/Claude Code's credential has expired/).isVisible())
       .toBe(true);
@@ -974,7 +979,6 @@ test('a deployment whose harnesses can all run is not warned about', async () =>
   }
 });
 
-// Permissions.
 test('a permission request renders its options and the choice answers the agent', async () => {
   await start({
     permissions: [
@@ -1006,7 +1010,7 @@ test('a permission request renders its options and the choice answers the agent'
     await input.fill('edit the file');
     await input.press('Control+Enter');
 
-    // The question opens itself: a prompt nobody can see blocks the turn.
+    // The question opens by itself, because a prompt that nobody sees blocks the turn.
     const approval = page.locator('[data-slot="tool-fallback-approval"]');
     await expect.poll(() => approval.isVisible(), { timeout: 10_000 }).toBe(true);
     // And the call it is about has not run yet, whatever the collapsed header
@@ -1060,8 +1064,8 @@ test('a permission request queued while nobody watched is delivered on attach', 
   }
 });
 
-// A slash command is completed in the composer, not run from the list: the
-// agent runs it, and it often takes arguments the user still has to type.
+// A slash command is completed in the composer and not run from the list. The
+// agent runs it, and it often takes arguments that the user still types.
 test('typing a slash lists the adapter commands and completes the one picked', async () => {
   await start();
 

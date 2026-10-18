@@ -7,12 +7,12 @@ import { formatUsage } from '@/lib/task-notifications';
 import { cn } from '@/lib/utils';
 import type { TaskNotification } from '../../../shared/task-notifications.ts';
 
-/** How long the body takes to fold, in milliseconds, as the tool rows do. */
+/** The fold duration of the body in milliseconds, the same as for the tool rows. */
 const ANIMATION_DURATION = 200;
 /** The same duration as utility classes, for the animation. */
 const DURATION = 'duration-200 [--tw-duration:200ms]';
 
-/** The icon and colour for each status the harness reports. */
+/** The icon and colour for each status that has its own look. */
 const LOOK: Record<string, { Icon: typeof CheckIcon; tone: string }> = {
   completed: { Icon: CheckIcon, tone: 'text-ok' },
   failed: { Icon: XIcon, tone: 'text-danger' },
@@ -21,14 +21,16 @@ const LOOK: Record<string, { Icon: typeof CheckIcon; tone: string }> = {
 };
 
 /**
- * The look for a task without a known status: a running task, such as a
- * monitor's event, or a status from a newer harness.
+ * The look for a status without an entry in {@link LOOK}, and for a running
+ * task, such as the event of a monitor, which has no status.
  */
 const RUNNING = { Icon: ActivityIcon, tone: 'text-muted-foreground' };
 
 /**
- * A background task's report, drawn in place of the XML block it arrived as.
- * It is as quiet as the tool rows. The icon shows how the task ended.
+ * The report of a background task, drawn in place of the XML block that it arrived as.
+ * It uses the same small, muted style as the tool rows. The icon shows the status of the task.
+ *
+ * @param data The parsed task report.
  */
 export const TaskNotificationPart: DataMessagePartComponent<TaskNotification> = ({ data }) => {
   const { Icon, tone } = (data.status ? LOOK[data.status] : undefined) ?? RUNNING;
@@ -53,10 +55,14 @@ export const TaskNotificationPart: DataMessagePartComponent<TaskNotification> = 
 };
 
 /**
- * The summary, with the task's own text folded under it.
+ * The summary, with the text of the task folded below it.
  *
- * A running task starts open, because its body is the event worth reading. A
- * finished task starts closed, because its body can be pages long.
+ * A running task starts open, because its body holds the event. A finished
+ * task starts closed, because its body can be pages long.
+ *
+ * @param summary The one-line summary.
+ * @param body The text of the task report.
+ * @param finished True when the task reported a status.
  */
 function TaskBody({
   summary,
@@ -65,9 +71,9 @@ function TaskBody({
 }: {
   /** The one-line summary. */
   summary: string;
-  /** What the task said. */
+  /** The text of the task report. */
   body: string;
-  /** Whether the task reported a status. */
+  /** True when the task reported a status. */
   finished: boolean;
 }) {
   const [open, setOpen] = useState(!finished);

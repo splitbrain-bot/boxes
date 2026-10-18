@@ -10,6 +10,12 @@ import { INITIAL_SNAPSHOT, type ThreadSnapshot, ThreadStore } from './thread-sto
  * replaces the store. Leaving the thread closes the WebSocket, and coming
  * back replays. The agent's turn continues either way, because the
  * orchestrator is the ACP client of record.
+ *
+ * @param boxId The id of the box.
+ * @param threadId The id of the thread.
+ * @param token The box's WebSocket token, or null while it is not known. The
+ *   hook connects only with a token.
+ * @returns The store, or null before it exists, and its current snapshot.
  */
 export function useThread(
   boxId: string,
@@ -44,8 +50,16 @@ export function useThread(
   return { store, state };
 }
 
-/** A subscribe function for the time before the store exists. */
+/**
+ * Subscribes to nothing, for the time before the store exists.
+ *
+ * @returns A function that removes nothing.
+ */
 const NOOP_SUBSCRIBE = (): (() => void) => () => {};
 
-/** The state a view shows before the store exists: the store's first snapshot. */
+/**
+ * Gives the state that a view shows before the store exists, which is the first snapshot of the store.
+ *
+ * @returns The initial snapshot.
+ */
 const getInitial = (): ThreadSnapshot => INITIAL_SNAPSHOT;

@@ -43,7 +43,7 @@ import {
 } from '../stores/review.ts';
 
 /**
- * The prompt "Hand to agent" stages in the thread's composer.
+ * The prompt that the "Hand to agent" action stages in the composer of the thread.
  *
  * The workspace holds one REVIEW.md at its root, so the prompt stays the same
  * for any number of repositories.
@@ -51,9 +51,9 @@ import {
 const HANDOFF_PROMPT = 'Read REVIEW.md and address the comments in it.';
 
 /**
- * Page that reviews a box's code, at `/boxes/:id/review`.
+ * Page for the code review of a box, at `/boxes/:id/review`.
  *
- * The open file is in the search string, so a file is linkable. On a phone the
+ * The search string holds the open file, so each file has a link. On a phone the
  * stack is boxes, thread, file list, file. From `md` up the tree and the file
  * share one view, so the stack is one step shorter.
  */
@@ -69,59 +69,59 @@ export function BoxReview() {
   const { box } = useBox(id);
 
   /**
-   * Whether long lines wrap. On by default, because a phone is narrower than
+   * True when long lines wrap. On by default, because a phone is narrower than
    * most source files. A wrapped line is still one row with one number.
    */
   const [wrap, setWrap] = useState(true);
   const [hunk, setHunk] = useState<ReviewDiffHunk | null>(null);
-  /** The line the prev/next toolbar last asked for, or null. */
+  /** The line that the previous and next buttons of the toolbar last requested, or null. */
   const [scrollTo, setScrollTo] = useState<ScrollTarget | null>(null);
   const [confirmNew, setConfirmNew] = useState(false);
-  /** The comment a tap on a bin is asking to remove, or null. */
+  /** The line of the comment that a tap on a bin wants to remove, or null. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
   /** The edit-mode buffer and its syntax tokens. */
   const edit = useCodeEdit(file);
   /**
-   * True from a save refused because the file changed on disk until the
-   * reviewer picks a version. The buffer stays meanwhile.
+   * True after the server refused a save because the file changed on disk,
+   * until the reviewer picks a version. The buffer stays meanwhile.
    */
   const [conflict, setConflict] = useState(false);
   /**
-   * The exit waiting for the reviewer to agree to lose unsaved edits, or null.
+   * The exit that waits until the reviewer agrees to lose unsaved edits, or null.
    */
   const [leaving, setLeaving] = useState<{ go: () => void } | null>(null);
-  /** The agreed exit, waiting for the dialog's history entry to go. */
+  /** The agreed exit, which waits until the history entry of the dialog is gone. */
   const agreed = useRef<(() => void) | null>(null);
-  /** The pane's scroller, for holding the reader's line across a mode switch. */
+  /** The scroller of the pane, to keep the line of the reader during a mode switch. */
   const paneRef = useRef<HTMLDivElement>(null);
-  /** An anchor taken before a switch, to be put back after it. */
+  /** The anchor from before a switch, to restore after it. */
   const held = useRef<ScrollAnchor | null>(null);
   /**
    * The thread this review was opened from, or null. A box can hold several
    * threads on one checkout, and leaving goes back to this one.
    *
-   * Read once, because opening a file navigates within this route and carries
+   * The view reads it once, because opening a file navigates within this route and carries
    * no state. A review opened from the box list, or reloaded, has no origin.
    */
   const [origin] = useState<string | null>(
     () => (location.state as { threadId?: string } | null)?.threadId ?? null,
   );
   const name = box?.name ?? id;
-  /** The parent route: the origin thread, or the box list without one. */
+  /** The parent route, which is the origin thread, or the box list when there is no origin. */
   const threadPath = origin ? `/boxes/${id}/threads/${origin}` : '/';
   const up = useUp(threadPath);
   const navigate = useNavigate();
   /**
-   * Whether the tree and the pane are side by side. It decides what back steps
+   * True when the tree and the pane are side by side. It decides what back steps
    * out to and which composer is mounted.
    *
-   * A query in script, because a Sheet renders into a portal that a
+   * The view uses a media query in script, because a Sheet renders into a portal that a
    * `md:hidden` wrapper cannot reach.
    */
   const wide = useMediaQuery('(min-width: 768px)');
 
-  // The store is a singleton, so re-entering the same box paints from what it
-  // holds and updates when the fetch lands. Nothing polls the workspace.
+  // The store is a singleton, so re-entering the same box shows the data that
+  // the store holds, and updates when the fetch finishes. Nothing polls the workspace.
   useEffect(() => {
     openReview(id);
     void loadTree();
@@ -140,7 +140,7 @@ export function BoxReview() {
    * edits.
    *
    * The mode toggle, another file, the step back to the list and leaving the
-   * review all go through this.
+   * review all use this function.
    */
   const guard = useCallback(
     (go: () => void) => {
@@ -153,8 +153,8 @@ export function BoxReview() {
   /**
    * Runs the agreed exit once the dialog's history entry is gone.
    *
-   * A navigation made while that entry is on top would act on the dialog's
-   * entry instead of the file's.
+   * A navigation while the dialog entry is on top would act on the dialog
+   * entry instead of the file entry.
    */
   useEffect(() => {
     const go = agreed.current;
@@ -167,9 +167,9 @@ export function BoxReview() {
   /**
    * Opens a file.
    *
-   * Below md this pushes an entry, because the file replaces the tree on
-   * screen. From md up it replaces the entry, so back leaves the review, as
-   * the header's button does.
+   * Below md, the function pushes an entry, because the file replaces the tree
+   * on screen. From md up, it replaces the entry, so back leaves the review, as
+   * the button in the header does.
    */
   const openPath = useCallback(
     (next: string) => {
@@ -226,7 +226,7 @@ export function BoxReview() {
       const element = paneRef.current;
       held.current = element ? anchorAt(rowOffsets(element), element.scrollTop) : null;
       if (next) {
-        // A composer standing open over the file belongs to the other mode.
+        // An open composer belongs to the other mode.
         compose(null);
         edit.start();
       } else {
@@ -239,12 +239,12 @@ export function BoxReview() {
 
   const editing = edit.text !== null;
   /**
-   * Whether the file is past the line limit. The pane then shows one plain
+   * True when the file is past the line limit. The pane then shows one plain
    * block without rows to step to, comment on or edit.
    */
   const tooLong = file !== null && !withinLineLimit(file.content);
   /**
-   * Whether this file can be edited. A save of a truncated file would delete
+   * True when the reviewer can edit the file. A save of a truncated file would delete
    * everything past where the read stopped.
    */
   const editable = file !== null && !file.deleted && !file.binary && !file.truncated && !tooLong;
@@ -342,7 +342,7 @@ export function BoxReview() {
   /**
    * Renders the comment card and the inline composer under a line.
    *
-   * The pane calls this for every rendered line. It returns null for a line
+   * The pane calls it for every rendered line. It returns null for a line
    * without either.
    */
   const underLine = useCallback(
@@ -441,7 +441,7 @@ export function BoxReview() {
               <a
                 href={up.href}
                 onClick={(event) => {
-                  // Stops the link before the step out when there are unsaved edits.
+                  // Stops the link and asks first when there are unsaved edits.
                   if (edit.dirty && plainClick(event)) {
                     event.preventDefault();
                     setLeaving({ go: up.go });
@@ -490,7 +490,7 @@ export function BoxReview() {
               variant="outline"
               size="sm"
               className="shrink-0"
-              // Guarded, because this leaves the review like any other exit.
+              // Uses guard, because the handoff leaves the review like any other exit.
               onClick={() => guard(handoff)}
               title="Open the thread with a prompt to address these comments"
             >
@@ -639,7 +639,7 @@ export function BoxReview() {
               )}
             </>
           ) : (
-            // Below md the tree fills the screen, so this shows from md up only.
+            // Below md the tree fills the screen, so the placeholder shows only from md up.
             <div className="hidden min-h-0 flex-1 md:flex">
               <Empty>
                 {loadingFile ? 'Loading…' : 'Pick a file from the tree to start reading.'}
@@ -651,7 +651,7 @@ export function BoxReview() {
 
       <HunkSheet hunk={hunk} onClose={() => setHunk(null)} />
 
-      {/* Below md, writing a comment happens here rather than inline. */}
+      {/* Below md, the reviewer writes a comment in the sheet and not inline. */}
       <ComposerSheet
         line={!wide && file && !tooLong ? composing : null}
         initial={composing === null ? '' : (annotations.get(composing)?.comment ?? '')}
@@ -687,7 +687,7 @@ export function BoxReview() {
           busy={saving}
           onCancel={() => setLeaving(null)}
           onConfirm={() => {
-            // Leaves edit mode now. The exit waits for the dialog's history entry to go.
+            // Leaves edit mode now. The exit waits until the history entry of the dialog is gone.
             agreed.current = leaving.go;
             edit.stop();
             setConflict(false);
@@ -715,7 +715,7 @@ export function BoxReview() {
 }
 
 /**
- * Whether a click is a plain left click. A modified click opens a tab or a
+ * Checks if a click is a plain left click. A modified click opens a tab or a
  * window and leaves the buffer here untouched.
  *
  * @param event The click.
@@ -732,12 +732,22 @@ function plainClick(event: React.MouseEvent): boolean {
   );
 }
 
-/** The URL that serves one workspace file's bytes, typed by its name. */
+/**
+ * Builds the URL that serves the bytes of one workspace file, with a content type from its name.
+ *
+ * @param id The id of the box.
+ * @param path The workspace path of the file.
+ * @returns The URL path.
+ */
 function rawHref(id: string, path: string): string {
   return `/api/boxes/${encodeURIComponent(id)}/review/raw?path=${encodeURIComponent(path)}`;
 }
 
-/** Centred message for a pane without content. */
+/**
+ * Centred message for a pane without content.
+ *
+ * @param children The message.
+ */
 function Empty({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-10 text-center text-sm text-muted-foreground">
@@ -762,7 +772,7 @@ function whichRepo(repo: string | null, repos: ReviewRepo[]): string {
 }
 
 /**
- * Formats in how many repositories the base resolved, for example " (2 of 3)".
+ * Formats the number of repositories that the base resolved in, e.g., " (2 of 3)".
  *
  * @param repos Every repository of the workspace.
  * @returns The note, or an empty string for one repository or when the base

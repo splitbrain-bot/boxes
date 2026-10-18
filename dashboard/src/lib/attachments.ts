@@ -1,6 +1,6 @@
 /**
- * The attachment envelope: the block of prompt text that lists the files the
- * user attached.
+ * Helpers for the attachment envelope, the block of prompt text that lists the
+ * files that the user attached.
  *
  * The files are uploaded into the box's workspace, and the agent reads them
  * from there. The envelope is plain text, because text comes back from any
@@ -20,7 +20,7 @@ const PREAMBLE =
 
 /** One attachment, as the envelope carries it. */
 export interface AttachmentEntry {
-  /** Workspace-relative and slash-separated: what a tool call is given. */
+  /** The path relative to the workspace, with slashes, in the form that a tool call takes. */
   path: string;
   /** The file's name, which is the last segment of the path. */
   name: string;
@@ -30,14 +30,24 @@ export interface AttachmentEntry {
   size: string;
 }
 
-/** A byte count in B, KB or MB, with one decimal above bytes. */
+/**
+ * Formats a byte count in B, KB or MB, with one decimal above bytes.
+ *
+ * @param bytes The byte count.
+ * @returns The formatted size, e.g., "2.0 KB".
+ */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** The envelope for a set of attachments, as one block of prompt text. */
+/**
+ * Builds the envelope for a set of attachments, as one block of prompt text.
+ *
+ * @param entries The attachments.
+ * @returns The envelope.
+ */
 export function buildEnvelope(entries: readonly AttachmentEntry[]): string {
   const lines = entries.map((e) => `- ${e.path} (${e.mimeType}, ${e.size})`);
   return [OPEN, PREAMBLE, ...lines, CLOSE].join('\n');
@@ -46,12 +56,12 @@ export function buildEnvelope(entries: readonly AttachmentEntry[]): string {
 /**
  * One line of the list: path, MIME type and size.
  *
- * The upload removes spaces and brackets from names, so a pattern can match
+ * The upload replaces spaces and brackets in names, so a pattern can match
  * the line.
  */
 const LINE = /^- (\S+) \(([^,()]+), ([^,()]+?)\)$/;
 
-/** What was around an envelope, and what was in it. */
+/** The entries of an envelope and the text around it. */
 export interface ParsedEnvelope {
   /** Text before the envelope. */
   before: string;
@@ -65,8 +75,10 @@ export interface ParsedEnvelope {
  * Reads an envelope out of a block of message text. Returns null when there
  * is none, when it lists no files, or when a line of it does not parse.
  *
- * The caller then shows the text as it is, which is better than dropping an
- * attachment.
+ * The caller then shows the text unchanged, so no attachment is lost.
+ *
+ * @param text The message text.
+ * @returns The entries and the text around the envelope, or null.
  */
 export function parseEnvelope(text: string): ParsedEnvelope | null {
   const open = text.indexOf(OPEN);
@@ -97,14 +109,12 @@ export function parseEnvelope(text: string): ParsedEnvelope | null {
   };
 }
 
-// --- showing one back -------------------------------------------------------
-
 /**
- * Image types the attachment endpoint serves inline, so an `<img>` can show
- * them.
+ * Image types that the attachment endpoint serves inline, so an `<img>` can
+ * show them.
  *
- * Every type here has to be one the endpoint serves inline. An `<img>` on a
- * file served as a download shows a broken picture.
+ * An `<img>` on a file that the endpoint serves as a download shows a broken
+ * picture.
  */
 const THUMBNAIL_TYPES = new Set([
   'image/png',
@@ -115,16 +125,23 @@ const THUMBNAIL_TYPES = new Set([
   'image/svg+xml',
 ]);
 
-/** Whether an attachment of this type can be shown rather than named. */
+/**
+ * Checks if the dashboard can show an attachment of this type as a picture instead of a name.
+ *
+ * @param mimeType The MIME type of the attachment, in any case.
+ * @returns True for an image type that the endpoint serves inline.
+ */
 export function isThumbnailable(mimeType: string): boolean {
   return THUMBNAIL_TYPES.has(mimeType.toLowerCase());
 }
 
 /**
- * The URL the browser fetches one stored attachment from.
+ * The URL of one stored attachment.
  *
+ * @param boxId The id of the box.
  * @param path The workspace-relative path from the envelope. Only its last
  *   segment goes into the URL.
+ * @returns The URL path of the attachment.
  */
 export function attachmentUrl(boxId: string, path: string): string {
   const name = path.split('/').pop() ?? path;

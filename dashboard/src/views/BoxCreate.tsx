@@ -23,14 +23,14 @@ const NO_SET = 'none';
 /** Form that creates a box and then opens its first thread. */
 export function BoxCreate() {
   const navigate = useNavigate();
-  /** Leaves for the box list on Cancel. */
+  /** Goes back to the box list on Cancel. */
   const up = useUp('/');
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /**
    * The sets a box may name, without the global set, which every box gets.
-   * Null while loading. The picker is hidden while this is null or empty.
+   * Null while loading. The form hides the picker while the list is null or empty.
    */
   const [agentSets, setAgentSets] = useState<AgentSetSummary[] | null>(null);
   const [agentSet, setAgentSet] = useState(NO_SET);
@@ -48,6 +48,7 @@ export function BoxCreate() {
     })();
   }, []);
 
+  /** Creates the box with its first thread, and opens the thread. */
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     if (busy) return;
@@ -59,7 +60,7 @@ export function BoxCreate() {
         agentSet: agentSet === NO_SET ? null : agentSet,
         ...(thread.value ? { thread: thread.value } : {}),
       });
-      // Stored only after the create succeeded, so it records what a thread started as.
+      // Stores the choice only after the create succeeded, so it records the settings a thread started with.
       thread.remember();
       await refresh();
       // Replaces the form's entry, so back does not return to a form that
@@ -125,8 +126,8 @@ export function BoxCreate() {
         <Button type="button" variant="outline" onClick={up.go} disabled={busy}>
           Cancel
         </Button>
-        {/* Held until the harness list has loaded or failed. An earlier create
-            would start the first thread on the orchestrator's default agent. */}
+        {/* Disabled until the harness list has loaded or failed. An earlier create
+            would start the first thread with the default agent of the orchestrator. */}
         <Button type="submit" disabled={busy || !name.trim() || !thread.ready}>
           {busy ? 'Creating…' : 'Create'}
         </Button>

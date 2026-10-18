@@ -8,6 +8,7 @@ import {
   parseEnvelope,
 } from './attachments.ts';
 
+/** An image entry, as the envelope carries it. */
 const ENTRY = {
   path: '.boxes/attachments/shot.png',
   name: 'shot.png',

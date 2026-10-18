@@ -2,6 +2,13 @@ import type * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
+/**
+ * A text input in the style of the dashboard.
+ *
+ * @param className Extra classes.
+ * @param type The input type.
+ * @param props The other input props.
+ */
 function Input({ className, type, ...props }: React.ComponentProps<'input'>) {
   return (
     <input

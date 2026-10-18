@@ -23,7 +23,7 @@ import type { HarnessId } from '../../../shared/types.ts';
 import type { ConnectionState } from '../stores/thread/acp-client.ts';
 import type { ThreadConfigOption, ThreadModeState } from '../stores/thread/acp-types.ts';
 
-/** What the connection dot says, and the colour it says it in. */
+/** The label and the colour of the connection dot for each connection state. */
 const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
   connecting: { label: 'connecting', dot: 'bg-warn animate-pulse' },
   ready: { label: 'connected', dot: 'bg-ok' },
@@ -31,7 +31,27 @@ const CONNECTION: Record<ConnectionState, { label: string; dot: string }> = {
   closed: { label: 'disconnected', dot: 'bg-idle' },
 };
 
-/** The header of the thread page. */
+/**
+ * The header of the thread page.
+ *
+ * @param boxId The box id, for the review and terminal links.
+ * @param threadId The thread id, which the review link carries so that the review leads back here.
+ * @param up The parent route and the step-out handlers.
+ * @param name The name of the box.
+ * @param threadLabel The name of the thread, or null while the thread is unknown.
+ * @param harness The harness of the thread, or null while the thread is unknown.
+ * @param harnessLabel The name of the harness for the reader, or null.
+ * @param connection The connection state, which the dot shows.
+ * @param modes The modes of the adapter, or null when it offers none.
+ * @param configOptions The config options of the adapter.
+ * @param done True when the reader has marked this thread as done.
+ * @param canFork True when the adapter of the thread advertised the fork capability.
+ * @param forking True while a fork is in flight.
+ * @param onFork Forks the thread.
+ * @param onSetDone Sets the mark, or takes it off. Absent while there is no thread to mark.
+ * @param onSetMode Sets the mode of the thread.
+ * @param onSetConfigOption Sets one config option of the thread.
+ */
 export function ThreadHeader({
   boxId,
   threadId,
@@ -53,38 +73,38 @@ export function ThreadHeader({
 }: {
   /** The box id, for the review and terminal links. */
   boxId: string;
-  /** The thread id, which the review link carries so it leads back here. */
+  /** The thread id, which the review link carries so that the review leads back here. */
   threadId: string | null;
   /** The parent route and the step-out handlers. */
   up: Up;
-  /** The box's name. */
+  /** The name of the box. */
   name: string;
-  /** Which conversation of the box this is, or null while it is unknown. */
+  /** The name of the thread, or null while the thread is unknown. */
   threadLabel: string | null;
   /**
-   * The thread's harness, or null while the thread is unknown. It decides the
+   * The harness of the thread, or null while the thread is unknown. It decides the
    * caveat on a mode.
    */
   harness: HarnessId | null;
-  /** The harness's name for the reader, or null. */
+  /** The name of the harness for the reader, or null. */
   harnessLabel: string | null;
   /** The connection state, which the dot shows. */
   connection: ConnectionState;
-  /** The adapter's modes, or null when it offers none. */
+  /** The modes of the adapter, or null when it offers none. */
   modes: ThreadModeState | null;
-  /** The adapter's config options. */
+  /** The config options of the adapter. */
   configOptions: readonly ThreadConfigOption[];
-  /** Whether the reader has marked this conversation finished with. */
+  /** True when the reader has marked this thread as done. */
   done: boolean;
-  /** Whether the thread's adapter advertised the fork capability. */
+  /** True when the adapter of the thread advertised the fork capability. */
   canFork: boolean;
-  /** Whether a fork is in flight. A double tap then cannot fork twice. */
+  /** True while a fork is in flight. A double tap then cannot fork twice. */
   forking: boolean;
   /** Forks the thread. */
   onFork: () => void;
   /** Sets the mark, or takes it off. Absent while there is no thread to mark. */
   onSetDone?: (done: boolean) => void;
-  /** Sets the thread's mode. */
+  /** Sets the mode of the thread. */
   onSetMode: (modeId: string) => void;
   /** Sets one config option of the thread. */
   onSetConfigOption: (configId: string, value: string) => void;
@@ -99,7 +119,7 @@ export function ThreadHeader({
     (option) => option !== model && option.category !== 'mode' && isSelectable(option),
   );
 
-  // All settings sit behind one button, because they do not fit a phone's header.
+  // All settings sit behind one button, because they do not fit the header on a phone.
   const hasModes = Boolean(modes && modes.availableModes.length > 1);
   const hasModel = Boolean(model && isSelectable(model));
   const settings = hasModes || hasModel || rest.length > 0;
@@ -115,8 +135,8 @@ export function ThreadHeader({
       {/* A minimum width, so the icon buttons cannot squeeze out the name. */}
       <div className="flex min-w-16 flex-1 flex-col">
         <span className="flex items-baseline gap-1.5 text-sm">
-          {/* The box's name keeps up to two thirds of the line. The thread's
-              name truncates first. */}
+          {/* The name of the box keeps up to two thirds of the line. The name
+              of the thread truncates first. */}
           <span className="max-w-2/3 shrink-0 truncate font-medium">{name}</span>
           {threadLabel ? (
             <span className="min-w-0 truncate text-xs text-muted-foreground">{threadLabel}</span>
@@ -148,7 +168,6 @@ export function ThreadHeader({
           </PopoverTrigger>
           <PopoverContent align="end" className="w-72">
             <div className="flex flex-col gap-3">
-              {/* The mode comes first, because it changes most often mid-thread. */}
               {modes && hasModes ? (
                 <Setting name="Agent mode" description={currentModeDescription(modes, harness)}>
                   <ModeSelect
@@ -200,7 +219,7 @@ export function ThreadHeader({
         </Button>
       ) : null}
 
-      {/* The fork runs beside this thread. */}
+      {/* The fork is a new thread beside this thread. */}
       {canFork ? (
         <Button
           variant="ghost"
@@ -218,7 +237,7 @@ export function ThreadHeader({
       <Button asChild variant="ghost" size="icon-sm" className="shrink-0">
         <Link
           to={`/boxes/${boxId}/review`}
-          // The review's back link and handoff return to this thread.
+          // The back link and the handoff of the review return to this thread.
           state={{ threadId }}
           aria-label="Review this box's code"
           title="Review this box's code"

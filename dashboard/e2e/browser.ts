@@ -12,19 +12,18 @@ import {
 /** The Chromium the whole e2e run shares, launched on first use. */
 let browser: Browser | null = null;
 
-/** The Chromium binary CHROMIUM_PATH names. It overrides every other choice. */
+/** The Chromium binary that CHROMIUM_PATH names. It overrides every other choice. */
 const NAMED_CHROMIUM = process.env.CHROMIUM_PATH;
 
-/** The Chromium binary the box image ships. Launching it needs no download. */
+/** The Chromium binary in the box image. Launching it needs no download. */
 const IMAGE_CHROMIUM = '/usr/local/bin/chromium';
 
 /**
  * Playwright default flags removed from every launch.
  *
- * `--disable-dev-shm-usage` moves Chromium's shared memory to TMPDIR. In a box
- * TMPDIR lies on the home directory, which is on disk. The orchestrator gives
- * a box container a 512 MB `/dev/shm` instead. Playwright adds the flag by
- * itself, so leaving it out of `args` does not remove it.
+ * `--disable-dev-shm-usage` moves the shared memory of Chromium to TMPDIR. In a box container, TMPDIR is in the home
+ * directory, which is on disk. The orchestrator gives a box container a 512 MB `/dev/shm`. Playwright adds the flag
+ * itself, so only `ignoreDefaultArgs` removes it.
  */
 const IGNORED_DEFAULT_ARGS = ['--disable-dev-shm-usage'];
 
@@ -35,20 +34,25 @@ const IGNORED_DEFAULT_ARGS = ['--disable-dev-shm-usage'];
  * name. Next comes the build this Playwright pins, if it is installed. Last
  * comes the box image's Chromium.
  *
- * Every choice is a full Chromium, never the default headless shell. The
- * headless shell reports `Notification.permission` as `denied` for good, and
- * the push toggle then reads the browser as one that can never subscribe.
+ * Every choice is a full Chromium. The default headless shell always reports `Notification.permission` as `denied`,
+ * so the push toggle shows the "blocked" note and not the button.
+ *
+ * @returns The launch options that select the Chromium binary.
  */
 function chromiumToLaunch(): LaunchOptions {
   if (NAMED_CHROMIUM) return { executablePath: NAMED_CHROMIUM };
-  // Returns the path whether or not the browser is installed.
+  // executablePath() returns a path also when the browser is not installed.
   if (existsSync(chromium.executablePath())) return { channel: 'chromium' };
   if (existsSync(IMAGE_CHROMIUM)) return { executablePath: IMAGE_CHROMIUM };
   // Lets Playwright fail with its own error, which names the install command.
   return { channel: 'chromium' };
 }
 
-/** Launches Chromium once and reuses it for the whole run. */
+/**
+ * Launches Chromium once and reuses it for the whole run.
+ *
+ * @returns The shared browser.
+ */
 export async function getBrowser(): Promise<Browser> {
   if (!browser) {
     browser = await chromium.launch({
@@ -65,6 +69,8 @@ export async function getBrowser(): Promise<Browser> {
  * Chrome offers to install an app only outside incognito, and every context
  * from `newContext()` is incognito. The caller gets the context rather than a
  * page, so it can set cookies before the first navigation.
+ *
+ * @returns The persistent context, and a function that closes it and deletes the profile directory.
  */
 export async function launchProfile(): Promise<{
   context: BrowserContext;
@@ -92,7 +98,7 @@ export async function closeBrowser(): Promise<void> {
   browser = null;
 }
 
-/** Where screenshots land. People review them by eye; no test compares them. */
+/** The directory for the screenshots. People examine them. */
 const SHOT_DIR = resolve(import.meta.dirname, 'screenshots');
 
 /**
@@ -106,7 +112,15 @@ export const VIEWPORTS = {
   desktop: { width: 1280, height: 900 },
 } as const;
 
-/** Opens a page in the given colour scheme and viewport, and collects its errors. */
+/**
+ * Opens a page in the given colour scheme and viewport, and collects its errors.
+ *
+ * @param base The origin of the dashboard server.
+ * @param path The path to open, with a leading slash.
+ * @param scheme The colour scheme of the context.
+ * @param viewport The key of the viewport in {@link VIEWPORTS}.
+ * @returns The page, the console and page errors it collects, and a function that closes its context.
+ */
 export async function openPage(
   base: string,
   path: string,
@@ -132,10 +146,13 @@ export async function openPage(
 }
 
 /**
- * Saves a screenshot under e2e/screenshots and returns its path.
+ * Saves a screenshot under e2e/screenshots.
  *
- * `area` is the full page by default. Use `viewport` for a sheet or dialog
- * that is fixed to the viewport, because a full-page capture misplaces it.
+ * @param page The page to capture.
+ * @param name The file name without the `.png` extension.
+ * @param area The full page, or only the viewport. Use `viewport` for a sheet or dialog that is fixed to the viewport,
+ *   because a full-page capture misplaces it.
+ * @returns The path of the screenshot.
  */
 export async function shoot(
   page: Page,

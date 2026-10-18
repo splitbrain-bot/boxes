@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { anchorAt, type RowOffset, scrollForAnchor } from './anchor.ts';
 
-/** Rows of equal height, with extra room after the lines named. */
+/**
+ * Builds rows of equal height, with extra height after the given lines.
+ *
+ * @param count The number of rows.
+ * @param height The height of each row.
+ * @param cards The extra height after a line, by line number.
+ * @returns The rows, from line 1.
+ */
 function rows(count: number, height: number, cards: Record<number, number> = {}): RowOffset[] {
   const out: RowOffset[] = [];
   let top = 0;
