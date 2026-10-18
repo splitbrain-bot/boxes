@@ -200,10 +200,11 @@ export interface BoxReading {
 const NOTHING: BoxReading = { busy: false, work: [] };
 
 /**
- * The `ps` that took the reading, which appears in its own output. It is not
- * work and must not be killed.
+ * The `ps` that took the reading, which appears in its own output, alone or
+ * under the `timeout` command that the runtime wraps it in. It is not work and
+ * must not be killed.
  */
-const READING_ITSELF = /^(?:\S*\/)?ps(?:\s|$)/;
+const READING_ITSELF = /^(?:\S*\/)?(?:timeout\s+(?:-\S+\s+)*\S+\s+(?:\S*\/)?)?ps(?:\s|$)/;
 
 /**
  * The file service, which the orchestrator starts in the box. Its script runs

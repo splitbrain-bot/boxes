@@ -326,6 +326,17 @@ test('the ps that took the reading is not work the reading found', () => {
   // A stop reads the box through its own `ps`, which appears in its output.
   const reading = readBox(table(...HELD, [4242, 0, 'ps -eo pid,ppid,etimes,args']), BOTH);
   assert.equal(reading.busy, false);
+  // The runtime runs it under `timeout`, which appears as well.
+  const wrapped = table(
+    ...HELD,
+    [4241, 0, 'timeout --kill-after=5s 60s ps -eo pid,ppid,etimes,args'],
+    [4242, 4241, 'ps -eo pid,ppid,etimes,args'],
+  );
+  assert.equal(readBox(wrapped, BOTH).busy, false);
+  assert.deepEqual(workPids(wrapped, BOTH), []);
+  // Other commands under `timeout` are still work.
+  const other = table(...HELD, [4243, 0, 'timeout 60s npm test']);
+  assert.equal(readBox(other, BOTH).busy, true);
 });
 
 test('the file service is not work, and a stop never reaches it', () => {
