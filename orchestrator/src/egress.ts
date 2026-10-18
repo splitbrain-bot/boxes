@@ -186,8 +186,6 @@ async function controlCall(
 export class EgressManager {
   /** The loaded material, or null before prepare(). */
   private material: EgressMaterial | null = null;
-  /** The last composed policy, or null before prepare(). */
-  private composed: EgressPolicy | null = null;
   /** The health that the last push reported, or null before the first push. */
   private health: EgressHealth | null = null;
 
@@ -208,15 +206,9 @@ export class EgressManager {
     private readonly db: Db,
   ) {}
 
-  /** Loads the material and composes the policy, without talking to the proxy. */
+  /** Loads the material, without talking to the proxy. */
   async prepare(): Promise<void> {
     this.material = await resolveEgressMaterial(this.db);
-    this.composed = composePolicy(
-      this.cfg,
-      this.material,
-      this.credentials.list(),
-      this.apiKeys.list(),
-    );
   }
 
   /**
@@ -226,21 +218,19 @@ export class EgressManager {
    * @throws Error Before prepare().
    */
   caCertificate(): string {
-    return this.prepared().material.ca.cert;
+    return this.prepared().ca.cert;
   }
 
   /**
-   * Returns the prepared state. It throws before prepare(), so no box is built
+   * Returns the prepared material. It throws before prepare(), so no box is built
    * without the CA.
    *
-   * @returns The material and the last composed policy.
+   * @returns The material.
    * @throws Error Before prepare().
    */
-  private prepared(): { material: EgressMaterial; composed: EgressPolicy } {
-    if (!this.material || !this.composed) {
-      throw new Error('the egress policy has not been prepared yet');
-    }
-    return { material: this.material, composed: this.composed };
+  private prepared(): EgressMaterial {
+    if (!this.material) throw new Error('the egress policy has not been prepared yet');
+    return this.material;
   }
 
   /**
@@ -290,14 +280,13 @@ export class EgressManager {
    */
   async sync(): Promise<void> {
     if (!this.material) await this.prepare();
-    const material = this.prepared().material;
+    const material = this.prepared();
     const composed = composePolicy(
       this.cfg,
       material,
       this.credentials.list(),
       this.apiKeys.list(),
     );
-    this.composed = composed;
 
     try {
       const status = await pushPolicy(this.cfg, material, composed);

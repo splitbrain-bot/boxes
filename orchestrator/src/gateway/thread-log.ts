@@ -2,7 +2,7 @@ import { UPDATE_KIND } from '../../../shared/acp.ts';
 import type { ThreadConfigOption, ThreadModeState } from '../../../shared/types.ts';
 
 /**
- * The size limit of one thread's log, counted as the summed JSON length of the logged updates.
+ * The size limit of one thread's log, in bytes of the JSON of the logged updates as UTF-8.
  *
  * Past this the log drops the oldest messages. A thread opens at its bottom, so only old scrollback is lost.
  */
@@ -68,7 +68,7 @@ export class ThreadLog {
    */
   append(params: unknown): void {
     this.noteOptions(params);
-    const size = JSON.stringify(params).length;
+    const size = Buffer.byteLength(JSON.stringify(params));
     this.entries.push({ params, size });
     this.bytes += size;
     while (this.bytes > this.cap && this.entries.length > 1) this.evictOldest();

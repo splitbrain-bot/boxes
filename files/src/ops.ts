@@ -310,10 +310,13 @@ export function openRaw(root: string, relPath: string): RawFile {
   } catch (err) {
     throw asFileError(err, relPath);
   }
-  const stats = fstatSync(fd);
-  if (!stats.isFile()) {
+  let stats: Stats;
+  try {
+    stats = fstatSync(fd);
+    if (!stats.isFile()) throw new FileError(404, `not a file: ${relPath}`);
+  } catch (err) {
     closeSync(fd);
-    throw new FileError(404, `not a file: ${relPath}`);
+    throw asFileError(err, relPath);
   }
   return { size: stats.size, stream: createReadStream('', { fd }) };
 }

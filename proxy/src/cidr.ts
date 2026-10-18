@@ -167,8 +167,8 @@ export function isBlockedAddress(address: string): boolean {
   }
 
   const [g0 = 0] = groups;
-  // ::1/128 loopback and :: unspecified
-  if (groups.every((g, i) => (i === 7 ? g === 1 || g === 0 : g === 0))) return true;
+  // :: unspecified. The embedded v4 check above already blocks ::1 as 0.0.0.1.
+  if (groups.every((g) => g === 0)) return true;
   // fc00::/7 unique local
   if ((g0 & 0xfe00) === 0xfc00) return true;
   // fe80::/10 link-local

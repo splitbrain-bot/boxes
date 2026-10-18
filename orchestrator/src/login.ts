@@ -287,7 +287,9 @@ export class LoginManager {
       timer: null,
     };
     flow.timer = setTimeout(() => {
-      this.fail(flow, 'the login was not finished in ten minutes');
+      const minutes = this.timeoutMs / 60_000;
+      const limit = minutes >= 1 ? `${Math.round(minutes)} minutes` : `${this.timeoutMs} ms`;
+      this.fail(flow, `the login was not finished in ${limit}`);
     }, this.timeoutMs);
     flow.timer.unref?.();
     this.flows.set(credentialId, flow);
