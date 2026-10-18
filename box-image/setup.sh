@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Box setup. The orchestrator runs it as the agent after each start of the
-# box, before the box is ready. It seeds a new home, prepares the home for
-# the tools of the base image, then runs the steps that an image adds in
-# setup.d.
+# Setup of the home of a box. The orchestrator runs it as the agent after each
+# start of the box, before the box is ready.
 #
 # A step that breaks the box fails it, and the orchestrator marks the box as
 # an error with this output. A step that breaks one tool only warns. The
 # setup runs every step, so the output names every failure.
 set -uo pipefail
 
-# Writes one line to stderr, which the orchestrator reads.
+# Writes the arguments as one line with the prefix [setup] to stderr, which the
+# orchestrator reads.
 log() { printf '[setup] %s\n' "$*" >&2; }
 
 failed=0
 
-# Records a failure, which the exit code reports at the end.
+# Logs the arguments as an error and records a failure, which the exit status
+# of the script reports at the end.
 fail() {
   log "ERROR: $*"
   failed=1
@@ -38,9 +38,9 @@ if [ ! -e "$marker" ]; then
 fi
 
 # --- scratch space ----------------------------------------------------------
-# TMPDIR lies on the persistent home, so it is emptied at every start. It is
-# created for a home seeded from an older image. Only the contents go, so a
-# wrong TMPDIR cannot delete a directory that matters.
+# TMPDIR lies on the persistent home, so the setup empties it at every start.
+# The seed does not hold TMPDIR, so the setup creates it. Only the contents
+# go, so a wrong TMPDIR cannot delete a directory that matters.
 if [ -n "${TMPDIR:-}" ]; then
   if mkdir -p "$TMPDIR"; then
     find "$TMPDIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
@@ -69,7 +69,7 @@ fi
 
 # --- directories an agent needs to find already there ------------------------
 # npm install -g needs its prefix to exist, and Codex fails on a missing
-# CODEX_HOME. A home seeded from an older image may lack either.
+# CODEX_HOME. The seed holds neither directory.
 if ! mkdir -p /home/agent/.local/bin; then
   fail "could not create /home/agent/.local/bin; installing tools would fail"
 fi

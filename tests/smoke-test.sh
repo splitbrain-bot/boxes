@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Security smoke test.
 #
-# Run on the Docker host after `docker compose up -d`. Creates throwaway
+# Run on the Docker host after docker compose up -d. Creates throwaway
 # boxes through the API, checks the isolation properties from inside one of
 # their containers, then cleans up.
 #
@@ -34,15 +34,17 @@ if [ -n "${API_USER:-}" ]; then CURL_AUTH=(-u "${API_USER}:${API_PASS:-}"); fi
 
 pass=0; fail=0; noted=0
 
-# Prints the arguments in colour.
+# green, red and grey print their arguments as one line in that colour on stdout.
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
 
-# Sends one API request with the optional basic auth.
+# Sends one API request with the optional basic auth. The arguments go to curl.
+# Prints the response body on stdout and exits with the status of curl.
 api() { curl -sS "${CURL_AUTH[@]}" "$@"; }
 
-# Asserts a command run inside the box container FAILS.
+# Asserts that a command in the box container fails. $1 is the description,
+# and the other arguments are the command. Prints the result and counts it.
 must_fail() {
   local desc="$1"; shift
   if docker exec -u agent "$CONTAINER" "$@" >/dev/null 2>&1; then
@@ -52,8 +54,9 @@ must_fail() {
   fi
 }
 
-# Asserts a command run inside the box container SUCCEEDS. On failure, the
-# last line of the command's output shows the cause.
+# Asserts that a command in the box container succeeds. $1 is the description,
+# and the other arguments are the command. Prints the result and counts it. On
+# failure, it also prints the last line of the output of the command.
 must_pass() {
   local desc="$1"; shift
   local out
@@ -65,8 +68,9 @@ must_pass() {
   fi
 }
 
-# Logs whether a command in the box succeeds, for an accepted property. Never
-# fails.
+# Logs if a command in the box container succeeds, for an accepted property.
+# $1 is the description, and the other arguments are the command. Counts a
+# note, and never counts a failure.
 note() {
   local desc="$1"; shift
   if docker exec -u agent "$CONTAINER" "$@" >/dev/null 2>&1; then
@@ -77,8 +81,10 @@ note() {
   noted=$((noted+1))
 }
 
-# Asserts that a string appears nowhere in a box's environment, workspace or
-# home. The needle is the real credential, so it is never printed.
+# Asserts that a string is not in the environment of any process in the box
+# container, and not in a file in /workspace or /home/agent. $1 is the
+# description, and $2 is the string. An empty string skips the check. The
+# string is the real credential, so the function never prints it.
 absent_from_box() {
   local desc="$1" needle="$2"
   if [ -z "$needle" ]; then return; fi
@@ -97,7 +103,9 @@ absent_from_box() {
   fi
 }
 
-# Runs a command in the box and asserts its output matches a pattern.
+# Runs a command in the box container and asserts that its output matches a
+# pattern. $1 is the description, $2 is the extended regular expression, and
+# the other arguments are the command. Prints the result and counts it.
 must_output() {
   local desc="$1" pattern="$2"; shift 2
   local out
@@ -110,7 +118,7 @@ must_output() {
   fi
 }
 
-# Deletes the boxes this run created.
+# Deletes the boxes that BOX_ID and SIBLING_ID name. Takes no arguments.
 cleanup() {
   if [ -n "${BOX_ID:-}" ]; then
     grey "cleaning up box $BOX_ID"
@@ -127,9 +135,11 @@ REAL_GH="${PROFILE_DEFAULT_GH_TOKEN:-}"
 REAL_CLAUDE="${PROFILE_DEFAULT_CLAUDE_CODE_OAUTH_TOKEN:-}"
 REAL_OPENAI="${PROFILE_DEFAULT_OPENAI_API_KEY:-}"
 
-# Stores one credential in the deployment, and exits if the deployment
-# refuses it. $3 is how the settings page would record the secret: api_key
-# for a pasted API key, token for a pasted token.
+# Stores one credential in the deployment. $1 is the credential id, and $2 is
+# the secret. An empty secret skips the credential. $3 is the method that the
+# settings page records for the secret, api_key for a pasted API key and token
+# for a pasted token. Exits the script with status 1 if the deployment refuses
+# the credential.
 seed_credential() {
   local id="$1" secret="$2" method="${3:-token}"
   [ -z "$secret" ] && return 0
@@ -170,7 +180,8 @@ grey "box=$BOX_ID sibling=$SIBLING_ID sibling_ip=${SIBLING_IP:-unknown}"
 
 echo
 echo "== both harnesses in one box =="
-# The box starts with a Claude thread. This adds a Codex thread beside it.
+# The create request above names no harness, so the orchestrator gave each box
+# a first thread on the default harness, Claude. The script adds a Codex thread.
 if [ -z "$REAL_OPENAI" ]; then
   grey "skipped: no OpenAI key was passed, so a Codex thread could not run a turn"
   noted=$((noted+1))
@@ -189,7 +200,8 @@ else
   else
     red   "FAIL (harnesses in the box):   wanted claude,codex, got ${HARNESSES:-none}"; fail=$((fail+1))
   fi
-  # /healthz reports Codex runnable once the key has reached the proxy.
+  # /healthz reports Codex runnable when the stored OpenAI credential has the
+  # status ok and the orchestrator can deliver it to a box.
   if api "$API_BASE/healthz" | jq -e '.harnesses[] | select(.id=="codex") | .runnable' >/dev/null; then
     green "ok   (Codex is runnable):        /healthz says the key works"; pass=$((pass+1))
   else
@@ -199,7 +211,7 @@ fi
 
 echo
 echo "== MUST FAIL: direct (proxy-bypassing) egress =="
-# The box network is internal: no NAT, no default route.
+# The box network is internal, so it has no NAT and no default route.
 must_fail "curl --noproxy '*' https://api.github.com" \
   curl --noproxy '*' -fsS -m 3 https://api.github.com
 must_fail "nc -w3 1.1.1.1 443" \
@@ -213,7 +225,7 @@ must_fail "curl http://10.0.0.1" \
   curl -fsS -m 3 http://10.0.0.1
 must_fail "curl http://169.254.169.254 (cloud metadata)" \
   curl -fsS -m 3 http://169.254.169.254/latest/meta-data/
-# DNS-rebind shape: a public hostname whose A record is private.
+# localtest.me is a public hostname with the A record 127.0.0.1.
 must_fail "curl http://localtest.me (hostname -> private IP)" \
   curl -fsS -m 3 http://localtest.me
 must_fail "curl http://[::ffff:192.168.1.1] (v4-mapped bypass)" \
@@ -260,7 +272,7 @@ if [ -n "${SMOKE_BOT_FORK:-}" ]; then
     git ls-remote "$SMOKE_BOT_FORK"
 fi
 if [ "${SMOKE_CLAUDE:-0}" = "1" ]; then
-  # Costs a real inference call, so opt-in.
+  # The call costs a real inference, so it runs only on request.
   must_pass "claude -p 'reply ok' (subscription auth)" \
     claude -p 'reply ok'
 fi
@@ -268,10 +280,10 @@ fi
 if [ -n "${SMOKE_UPSTREAM_REPO:-}" ]; then
   echo
   echo "== MUST FAIL: pushing to an upstream default branch =="
-  # The bot is read-only on upstreams and works on forks, so a push straight at
-  # the upstream must be refused. The clone lands in the tmpfs, leaving the
-  # agent's workspace untouched, and is scored on its own, because only a
-  # successful clone can test the push.
+  # The bot has read access to upstreams and works on forks, so the upstream
+  # must refuse a push. The clone goes to the tmpfs, and the workspace of the
+  # agent stays unchanged. A failed clone counts as a failure, because the push
+  # test needs a clone.
   if docker exec -u agent "$CONTAINER" sh -c \
        'rm -rf /tmp/upstream && git clone --depth 1 "$0" /tmp/upstream' \
        "$SMOKE_UPSTREAM_REPO" >/dev/null 2>&1; then
@@ -287,9 +299,9 @@ fi
 
 echo
 echo "== pids limit containment =="
-# PidsLimit must contain a fork bomb without affecting the host or the sibling
-# box. The bomb runs under bash, because dash rejects its function syntax. Its
-# children stay in the exec's process group, so one kill ends the bomb.
+# PidsLimit must contain a fork bomb, so the sibling box continues to work. The
+# children of the bomb stay in the process group of the exec, so one kill ends
+# the bomb.
 docker exec -u agent "$CONTAINER" bash -c \
   'bomb() { bomb | bomb & }; bomb & sleep 5; kill -9 0' >/dev/null 2>&1
 if docker exec -u agent "$SIBLING_CONTAINER" true >/dev/null 2>&1; then
@@ -312,8 +324,8 @@ fi
 
 echo
 echo "== workspace storage: a directory on the data volume, bound in =="
-# The agent must own its workspace, one box must not see another's, and
-# other containers must not read the parent directory.
+# The agent must be able to write to its workspace, and one box must not see
+# the workspace of another. The parent directory must have mode 0700.
 must_pass "the agent can write to its bound workspace" \
   sh -c 'echo ok > /workspace/.smoke-ws && rm /workspace/.smoke-ws'
 
@@ -328,8 +340,8 @@ case "$WS_SOURCE" in
     fail=$((fail+1)) ;;
 esac
 
-# The orchestrator reads the agent's file without an exec, which lets it
-# review a stopped box.
+# A file that the agent writes appears in the data volume of the orchestrator
+# container.
 docker exec -u agent "$CONTAINER" sh -c 'echo from-the-agent > /workspace/.smoke-seen' \
   >/dev/null 2>&1
 if docker exec boxes-orchestrator \
@@ -341,7 +353,8 @@ else
 fi
 docker exec -u agent "$CONTAINER" rm -f /workspace/.smoke-seen >/dev/null 2>&1
 
-# 0700 on the parent, so mounting the data volume elsewhere shows nothing.
+# Mode 0700 on the parent, so on the data volume only the owner can read across
+# boxes.
 WS_MODE=$(docker exec boxes-orchestrator stat -c '%a' /data/workspaces 2>/dev/null)
 if [ "$WS_MODE" = "700" ]; then
   green "ok   workspaces/ on the data volume is 0700"; pass=$((pass+1))
@@ -364,8 +377,9 @@ fi
 
 echo
 echo "== documented-but-accepted residual surface =="
-# Docker's internal network filters forwarded traffic only, so the host stays
-# addressable at its per-bridge IP. This is accepted, so it is only logged.
+# A container on a Docker internal network can still reach the gateway address
+# of the network, which is an address of the host. The risk is accepted, so the
+# script only logs the result.
 HOST_BRIDGE_IP=$(docker network inspect "bn-$BOX_ID" \
   -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null)
 if [ -n "$HOST_BRIDGE_IP" ]; then
@@ -385,7 +399,7 @@ else
     # The placeholder authenticates as the bot only if the proxy swapped it.
     must_output "curl api.github.com/user with the placeholder is the bot" '"login"' \
       sh -c 'curl -fsS -m 15 -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user'
-    # An invented token must be refused by the proxy, not forwarded to GitHub.
+    # The proxy must refuse an invented token and must not send it to GitHub.
     must_output "an invented GitHub token is refused by the proxy" 'egress denied' \
       sh -c 'curl -sS -m 15 -H "Authorization: Bearer ghp_notTheDeploymentsToken" https://api.github.com/user'
   fi
@@ -404,8 +418,7 @@ else
       sh -c 'curl -sS -m 15 -v https://auth.openai.com/ 2>&1 | grep -i "issuer:" | grep -v "Boxes egress proxy CA"'
   fi
 
-  # Interception is bounded: the deployment CA appears for a translated host
-  # and nowhere else.
+  # The deployment CA appears for a translated host and for no other host.
   must_output "an injection host presents the deployment CA" 'Boxes egress proxy CA' \
     sh -c 'curl -sS -m 15 -v https://api.github.com/ 2>&1 | grep -i "issuer:"'
   must_output "a passthrough host presents its own certificate chain" 'issuer:' \
@@ -435,10 +448,11 @@ else
     curl -sS -m 15 -o /dev/null https://api.github.com
   if [ -n "$REAL_OPENAI" ]; then
     # No -f: an unauthenticated call to OpenAI is a 401, which is the host
-    # answering. What is under test is that the CONNECT is not refused here.
+    # answering. The check fails only when the proxy refuses the CONNECT.
     must_pass "the OpenAI key host is implied by the allowlist" \
       curl -sS -m 15 -o /dev/null https://api.openai.com/v1/models
-    # alsoAllow: Codex logs in here, so a narrow list keeps it reachable.
+    # Codex logs in at this host. The alsoAllow list of the OpenAI credential
+    # keeps it reachable with a narrow allowlist.
     must_pass "Codex's login host comes with the OpenAI credential" \
       curl -sS -m 15 -o /dev/null https://auth.openai.com/
   fi

@@ -1,8 +1,6 @@
-# CI workflow: checks the formatting and lints, runs the test suites, builds
-# the four Boxes images, runs the runtime conformance suite on Docker and on
-# kind and the security smoke test against them, and publishes them to GHCR on
-# every push to main. A pull request builds and tests the images without
-# pushing them.
+# The CI workflow, which tests the code, builds and tests the four Boxes images,
+# and publishes them to GHCR on a push to main or a manual run. A pull request
+# builds and tests the images without pushing them.
 #
 #   ghcr.io/<owner>/boxes/orchestrator   API, dashboard, gateway, Docker client
 #   ghcr.io/<owner>/boxes/egress-proxy   the only way out of a box network
@@ -10,11 +8,10 @@
 #   ghcr.io/<owner>/boxes/box            the base with the tools for projects
 #
 # The build cache of main is in ghcr.io/<owner>/boxes/cache, one tag per image.
-# Each push to main deletes its old, untagged versions.
 #
-# Every image gets latest and an immutable sha-<short> tag. The test job gates
-# the build and the smoke test gates the publishing, because something else
-# deploys latest unattended.
+# Every image gets an immutable sha-<short> tag, and the default branch also
+# gets latest. The lint and test jobs gate the build, and the smoke test gates
+# the publishing, because a watchtower deploys latest unattended.
 
 name: Build and publish images
 
@@ -24,7 +21,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Of two quick pushes, only the second one's images are worth building.
+# A new run on the same ref cancels the run before it.
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: true
@@ -71,11 +68,12 @@ jobs:
         with:
           node-version: 26
           cache: npm
-          # Every lock file, because the dashboard job also installs the
-          # orchestrator's dependencies.
+          # Every lock file, because the orchestrator and dashboard jobs also
+          # install the dependencies of other packages.
           cache-dependency-path: '*/package-lock.json'
 
-      # ci, so the suites run the lock file versions the Dockerfiles build.
+      # npm ci, so the suites run the lock file versions that the Dockerfiles
+      # build.
       - name: Install dependencies
         working-directory: ${{ matrix.package }}
         run: npm ci
@@ -99,10 +97,9 @@ jobs:
       # Chromium.
       #
       # --with-deps runs apt-get update. The runner image lists Google's
-      # Chrome repository, which Chromium's libraries do not come from. That
-      # repository has served an index with a wrong hash, and one bad index
-      # fails the whole update, so the step removes it first. The glob covers
-      # both the .list and the .sources file.
+      # Chrome repository, which Chromium's libraries do not come from. One bad
+      # index of a repository fails the whole update, so the step removes that
+      # repository first. The glob covers both the .list and the .sources file.
       - name: Install Chromium
         if: matrix.package == 'dashboard'
         working-directory: dashboard
@@ -126,8 +123,9 @@ jobs:
     name: images
     needs: [test, lint]
     runs-on: ubuntu-latest
-    # A push to main writes the build cache and the images to GHCR. The token
-    # of a pull request from a fork can only read.
+    # A push to main writes the build cache to GHCR, and a push or a manual
+    # run writes the images. The token of a pull request from a fork can only
+    # read.
     permissions:
       contents: read
       packages: write
@@ -143,9 +141,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Derived from the repository, so a fork publishes to its own
-      # namespace. GHCR needs lowercase names, and github.repository is
-      # lowercase. The tags are computed on a pull request too, so it tests
-      # everything but the upload.
+      # namespace. GHCR needs lowercase names, so the owner and the name of the
+      # repository must be lowercase. The tags are computed on a pull request
+      # too, so it tests everything but the upload.
       - id: orchestrator-meta
         uses: docker/metadata-action@v6
         with:
@@ -442,8 +440,7 @@ jobs:
           delete-only-untagged-versions: 'true'
           min-versions-to-keep: 3
 
-  # Tells the deployment's watchtower to pull at once, instead of at its next
-  # poll.
+  # Tells the watchtower of the deployment to pull the new images at once.
   watchtower:
     name: watchtower
     needs: images
@@ -474,5 +471,5 @@ jobs:
           answer=$(curl --fail --silent --show-error --max-time 300 \
             -X POST "$url" \
             -H "Authorization: Bearer ${WATCHTOWER_TOKEN:-}")
-          # The only record of the deployment moving.
+          # The answer is the only record of the deployment.
           printf 'Watchtower answered: %s\n' "$answer"

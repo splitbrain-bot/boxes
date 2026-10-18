@@ -1,6 +1,6 @@
-# Boxes on Kubernetes: the orchestrator, the egress proxy and their
-# policies, in one namespace. The orchestrator makes the pods, claims and
-# policies of the boxes in the same namespace.
+# The Kubernetes deployment of Boxes, with the orchestrator, the egress proxy
+# and their policies in one namespace. The orchestrator makes the pods, claims
+# and policies of the boxes in the same namespace.
 #
 #   kubectl apply -k k8s/
 #

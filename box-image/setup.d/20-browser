@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Setup step of the full image for the browsers. boxes-setup runs it as the
-# agent after its own steps. A failure here breaks only the browsers, so each
-# one only warns.
+# agent after its own steps. A failure here breaks only the browsers, so the
+# step writes a warning for it.
 set -uo pipefail
 
-# Writes one line to stderr, which the orchestrator reads.
+# Writes the arguments as one line with the prefix [setup] to stderr, which the
+# orchestrator reads.
 log() { printf '[setup] %s\n' "$*" >&2; }
 
 # The CA of the egress proxy, which the orchestrator writes before the setup.
@@ -29,12 +30,14 @@ fi
 
 # --- the browser CLI ---------------------------------------------------------
 
-# Links the image's browser builds into the writable PLAYWRIGHT_BROWSERS_PATH
-# and drops links that no longer resolve.
+# Links the image's browser builds from BOXES_IMAGE_BROWSERS into the writable
+# PLAYWRIGHT_BROWSERS_PATH, and removes links that no longer resolve. Takes no
+# arguments and always returns 0.
 #
-# A project can then download its own revision beside the links. This runs at
-# every start, because a newer image may carry other revisions. Only links
-# are swept, because a real directory is a browser a project downloaded.
+# A project can then download its own revision beside the links. The step runs
+# at every start, because a newer image can carry other revisions. The function
+# removes only links, because a real directory is a browser a project
+# downloaded.
 link_image_browsers() {
   browsers="${PLAYWRIGHT_BROWSERS_PATH:-}"
   image="${BOXES_IMAGE_BROWSERS:-}"
@@ -72,9 +75,9 @@ link_image_browsers() {
 }
 link_image_browsers
 
-# The CLI's global config: the image's base config plus the egress proxy,
-# which is known only at runtime. Written at every start, so a newer image's
-# base reaches an existing home.
+# The global config of the CLI is the base config of the image plus the egress
+# proxy, which is known only at runtime. The step writes it at every start, so
+# the base of a newer image reaches an existing home.
 cli_base=/usr/local/share/boxes/playwright-cli.config.json
 cli_config=/home/agent/.playwright/cli.config.json
 if [ -r "$cli_base" ] && mkdir -p /home/agent/.playwright; then

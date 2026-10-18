@@ -25,20 +25,20 @@ services:
       - path: ${BOXES_ENV:-.env}
         required: false
     volumes:
-      # Root-equivalent access, mitigated by the fixed HostConfig template, by
-      # never passing user strings to a shell, and by the auth in front.
+      # The socket gives access equal to root on the host. The fixed HostConfig
+      # template, no user strings in a shell, and the authentication of the
+      # reverse proxy in front limit the risk.
       - /var/run/docker.sock:/var/run/docker.sock
       # The orchestrator keeps its database, its generated keys and every
       # box's files here. /data is the default of DATA_DIR. To mount the
       # volume elsewhere, set DATA_DIR to match.
       - boxes-data:/data
-    # A ceiling, not a budget. The orchestrator buffers a whole attachment
+    # The memory limit is a ceiling. The orchestrator buffers a whole attachment
     # upload (MAX_ATTACHMENT_MB) and a whole WebSocket frame (16 MiB) in
     # memory per request, and holds the ACP connections of every running box.
-    # A gigabyte is several times a small deployment's steady state.
     #
-    # The process limit covers node's own threads and the git processes the
-    # review runs.
+    # The process limit covers the threads of node and the git processes that
+    # fetch the skill repositories.
     mem_limit: 1g
     pids_limit: 512
     ports:
@@ -61,6 +61,8 @@ services:
     # variable too, or boxes get no egress at all.
     container_name: boxes-egress-proxy
     restart: unless-stopped
+    # read_only works because the proxy keeps its policy, its credentials and
+    # its CA in memory.
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -69,13 +71,10 @@ services:
     # The default network carries external egress and the control channel
     # the orchestrator pushes the egress policy over. The orchestrator also
     # connects the proxy to each box's internal network at runtime.
-    #
-    # read_only works because the proxy keeps its policy, its credentials and
-    # its CA in memory.
     networks:
       - default
-    # The proxy holds no database and no box state, only the in-flight
-    # requests of every box. It buffers each one to swap a credential in.
+    # The proxy holds no database and no box state. It buffers each request to
+    # a credential host in memory, to swap the credential in.
     mem_limit: 512m
     pids_limit: 256
 
