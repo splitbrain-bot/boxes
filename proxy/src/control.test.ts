@@ -1,3 +1,5 @@
+/** Tests for the control channel and for the policy push queue of the entry point. */
+
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -6,9 +8,7 @@ import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
 import { createControlServer } from './control.ts';
 import { policyHash } from './policy.ts';
 
-/** Tests for the control channel and for how the entry point applies pushes. */
-
-/** A stand-in CA; the control channel never reads it. */
+/** A stand-in CA, which parsePolicy needs for a policy with credentials. */
 const CA = { key: 'KEY', cert: 'CERT' };
 
 /** Status of a proxy that has applied nothing. */
@@ -29,7 +29,12 @@ afterEach(() => {
   servers = [];
 });
 
-/** A control server listening on loopback, with the policies it accepted. */
+/**
+ * Starts a control server on loopback.
+ *
+ * @param reject When set, every push fails with this message.
+ * @returns The port, the accepted policies and the claim state.
+ */
 async function start(
   reject?: string,
 ): Promise<{ port: number; applied: EgressPolicy[]; claimed: () => boolean }> {
@@ -51,7 +56,16 @@ async function start(
   return { port, applied, claimed: control.claimed };
 }
 
-/** One control-channel call. */
+/**
+ * Sends one request to the control channel and reads the answer.
+ *
+ * @param port The port of the control server.
+ * @param method The HTTP method.
+ * @param path The request path.
+ * @param token The bearer token, or null to send no Authorization header.
+ * @param body The request body, sent as JSON when set.
+ * @returns The status code and the body of the answer.
+ */
 function call(
   port: number,
   method: string,
@@ -156,8 +170,10 @@ describe('the control channel', () => {
 });
 
 /**
- * A listener that binds nothing, so importing the proxy's entry point starts
- * no server and takes no port.
+ * Makes a fake listener that binds nothing, so importing the entry point of the
+ * proxy starts no server and takes no port.
+ *
+ * @returns The fake server.
  */
 function fakeServer(): http.Server {
   const server = new EventEmitter() as unknown as http.Server;
@@ -170,8 +186,9 @@ function fakeServer(): http.Server {
 }
 
 /**
- * How the proxy's entry point handles two pushes at once. The listeners and
- * the interception engine are mocked, so only its policy handling runs.
+ * Tests for two overlapping pushes into the entry point. The listeners, the
+ * control server and the interception engine are mocked, so only the policy
+ * handling runs.
  */
 describe('overlapping policy pushes', () => {
   it('leave the policy of the push that succeeded', async () => {
@@ -185,8 +202,8 @@ describe('overlapping policy pushes', () => {
       createForwardServer: () => fakeServer(),
     }));
     vi.doMock('./inject.ts', () => ({
-      // The first call refuses, which is what makes the first push roll back,
-      // and the delay is what makes the two pushes overlap.
+      // The first call fails, so the first push rolls back. The delay makes the
+      // two pushes overlap.
       Interceptor: class {
         constructor(opts: { policy: () => EgressPolicy }) {
           livePolicy = opts.policy;

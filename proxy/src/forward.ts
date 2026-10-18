@@ -1,3 +1,5 @@
+/** The forward proxy server, which vets every destination before it connects. */
+
 import dns from 'node:dns';
 import http from 'node:http';
 import net from 'node:net';
@@ -5,21 +7,19 @@ import type { EgressPolicy } from '../../shared/types.ts';
 import { allAddressesAllowed, isBlockedAddress } from './cidr.ts';
 import { hostAllowed, isInjectionHost } from './policy.ts';
 
-/** The forward proxy server, which vets every destination before it connects. */
-
 /** Destination ports an agent may reach. */
 export const ALLOWED_PORTS = new Set([80, 443]);
 
-/** How long a CONNECT may take to establish, in milliseconds. */
+/** Time limit to open the upstream connection of a CONNECT, in milliseconds. */
 const CONNECT_TIMEOUT_MS = 15_000;
 
-/** How long an established connection may sit idle, in milliseconds. */
+/** Time limit for an idle upstream connection, in milliseconds. */
 const IDLE_TIMEOUT_MS = 120_000;
 
-/** How long the TLS engine has to accept a replayed CONNECT, in milliseconds. */
+/** Time limit for the TLS engine to answer a replayed CONNECT, in milliseconds. */
 const INTERCEPT_HANDSHAKE_MS = 10_000;
 
-/** Why a request was denied, as a fixed set the proxy counts and reports. */
+/** Categories of denial reasons. The proxy counts and reports each category. */
 export type DenialCategory =
   | 'port'
   | 'allowlist'
@@ -29,13 +29,13 @@ export type DenialCategory =
   | 'plaintext-credential-host'
   | 'no-policy';
 
-/** The reason given for reaching a credential host in the clear. */
+/** Denial reason for a request to a credential host without TLS. */
 export const PLAINTEXT_CREDENTIAL_REASON = 'a credential host may only be reached over https';
 
-/** The reason given while the proxy is still waiting for its first policy. */
+/** Denial reason while the proxy waits for its first policy. */
 const NO_POLICY_REASON = 'the proxy has no policy yet';
 
-/** Where a request wants to go. */
+/** Destination of a request. */
 export interface Target {
   /** Hostname or IP literal, without brackets. */
   host: string;
@@ -43,9 +43,15 @@ export interface Target {
   port: number;
 }
 
-/** Splits an authority into host and port, or null if it is malformed. */
+/**
+ * Splits an authority into host and port.
+ *
+ * @param authority The authority, as in example.com:443 or [::1]:443.
+ * @param defaultPort The port to use when the authority names none.
+ * @returns The host and port, or null when the authority is malformed.
+ */
 export function parseHostPort(authority: string, defaultPort: number): Target | null {
-  // IPv6 literals arrive bracketed: [::1]:443
+  // Bracketed IPv6 literal, as in [::1]:443
   if (authority.startsWith('[')) {
     const end = authority.indexOf(']');
     if (end === -1) return null;
@@ -66,14 +72,20 @@ export function parseHostPort(authority: string, defaultPort: number): Target | 
 
 /** The outcome of vetting a target. */
 export type Verdict =
+  /** The target passed. address is the IP address to connect to, and family is its IP version. */
   | { ok: true; address: string; family: number }
+  /** The target failed. category is the counted category, and reason says why. */
   | { ok: false; category: DenialCategory; reason: string };
 
 /**
- * Vets a target and returns the single address to pin the connection to. An IP
- * literal is checked as it stands. A hostname is resolved, and every answer
- * has to pass. The allowlist is checked before DNS, so a denied host is never
- * looked up.
+ * Vets a target and finds the single address to pin the connection to. An IP
+ * literal is checked as it is. A hostname is resolved, and every answer must
+ * pass. The allowlist check comes before DNS, so a denied host is never looked
+ * up.
+ *
+ * @param target The destination of the request.
+ * @param policy The policy to check against.
+ * @returns The verdict, with the first resolved address when the target passes.
  */
 export async function vetTarget(target: Target, policy: EgressPolicy): Promise<Verdict> {
   if (!ALLOWED_PORTS.has(target.port)) {
@@ -83,7 +95,6 @@ export async function vetTarget(target: Target, policy: EgressPolicy): Promise<V
     return { ok: false, category: 'allowlist', reason: 'host is not on the egress allowlist' };
   }
 
-  // An IP literal skips DNS but goes through the identical CIDR check.
   const literalFamily = net.isIP(target.host);
   if (literalFamily !== 0) {
     if (isBlockedAddress(target.host)) {
@@ -110,7 +121,7 @@ export async function vetTarget(target: Target, policy: EgressPolicy): Promise<V
   const chosen = answers[0];
   if (!chosen) return { ok: false, category: 'dns', reason: 'no addresses resolved' };
   if (!allAddressesAllowed(answers.map((a) => a.address))) {
-    // Rejecting when any answer is private closes DNS rebinding: a hostname
+    // One blocked answer rejects the hostname, against DNS rebinding. A hostname
     // must not pass with a public record and connect with a private one.
     return {
       ok: false,
@@ -121,31 +132,32 @@ export async function vetTarget(target: Target, policy: EgressPolicy): Promise<V
   return { ok: true, address: chosen.address, family: chosen.family };
 }
 
-/** What a forwarding server needs from the process around it. */
+/** Callbacks of a forward proxy server. */
 export interface ForwardOptions {
-  /** The live policy, read per request so a push takes effect at once. */
+  /** Returns the live policy. The server reads it for each request, so a push takes effect at once. */
   policy: () => EgressPolicy;
-  /**
-   * Loopback port of the TLS engine, or null when this server never
-   * intercepts. The upstream tunnel passes null, which is what keeps the
-   * engine's own connections from looping back into it.
-   */
+  /** Returns the loopback port of the TLS engine, or null for no interception. */
   interceptPort: () => number | null;
-  /** Whether a policy has been pushed. Nothing is forwarded before it has. */
+  /** Returns true after the first policy push. The server forwards nothing before it. */
   applied: () => boolean;
-  /** Records a denial, by category. */
+  /** Counts one denial under its category. */
   denied: (category: DenialCategory) => void;
-  /** Structured logging. */
+  /** Writes one structured log line. */
   log: (msg: string, fields?: Record<string, unknown>) => void;
 }
 
-/** Answers a forwarded request with a 403 and the reason. */
+/**
+ * Answers a forwarded request with a 403 and the reason.
+ *
+ * @param res The response to the client.
+ * @param reason The denial reason.
+ */
 function deny(res: http.ServerResponse, reason: string): void {
   res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end(`egress denied: ${reason}\n`);
 }
 
-/** Headers that describe one hop rather than the request, and so stop here. */
+/** Hop-by-hop headers, which end at this proxy. */
 const HOP_BY_HOP_HEADERS = [
   'connection',
   'keep-alive',
@@ -162,6 +174,9 @@ const HOP_BY_HOP_HEADERS = [
  * Copies the headers that may go on to the origin. The Connection header names
  * further headers that end at this hop, and every name is compared in lower
  * case.
+ *
+ * @param headers The headers of the client request.
+ * @returns The headers without the hop-by-hop headers.
  */
 export function forwardableHeaders(headers: http.IncomingHttpHeaders): http.IncomingHttpHeaders {
   const drop = new Set(HOP_BY_HOP_HEADERS);
@@ -181,13 +196,16 @@ export function forwardableHeaders(headers: http.IncomingHttpHeaders): http.Inco
 }
 
 /**
- * Builds a forward proxy: absolute-URI HTTP on port 80, CONNECT for
- * everything else. The server is returned before it listens.
+ * Builds a forward proxy for plain HTTP requests with an absolute URI and for
+ * CONNECT tunnels. The caller starts it listening.
+ *
+ * @param opts The callbacks of the server.
+ * @returns The server, not yet listening.
  */
 export function createForwardServer(opts: ForwardOptions): http.Server {
   const server = http.createServer();
 
-  // --- absolute-URI plain HTTP (port 80) ------------------------------------
+  // Plain HTTP with an absolute URI.
 
   server.on('request', (req, res) => {
     if (!opts.applied()) {
@@ -214,7 +232,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       return;
     }
     if (url.protocol !== 'http:') {
-      // https must arrive as CONNECT: plaintext forwarding never terminates TLS.
+      // This path sends plain HTTP to the origin, so https must arrive as CONNECT.
       deny(res, 'only http:// may be forwarded; use CONNECT for https');
       return;
     }
@@ -236,7 +254,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
     const policy = opts.policy();
     if (opts.interceptPort() !== null && isInjectionHost(target.host, policy)) {
       // In the clear, a credential host would get the placeholder, or the real
-      // secret as plaintext. These hosts serve https anyway.
+      // secret as plaintext.
       opts.denied('plaintext-credential-host');
       opts.log('denied http request', {
         host: target.host,
@@ -257,7 +275,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
         deny(res, verdict.reason);
         return;
       }
-      // The client may be gone by the time the vetting lands.
+      // The client can disconnect before the vetting ends.
       if (res.destroyed) return;
 
       const headers = forwardableHeaders(req.headers);
@@ -292,7 +310,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
     });
   });
 
-  // --- CONNECT tunnel (port 443) --------------------------------------------
+  // CONNECT tunnels.
 
   server.on('connect', (req, clientSocket: net.Socket, head: Buffer) => {
     const refuse = (code: number, reason: string): void => {
@@ -334,8 +352,8 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       const enginePort = opts.interceptPort();
       if (enginePort !== null && isInjectionHost(target.host, policy)) {
         if (target.port !== 443) {
-          // A tunnel to another port does not carry https, so the engine would
-          // swap the real credential into plaintext.
+          // The proxy takes only port 443 as https. On another port, the engine
+          // could swap the real credential into plaintext.
           opts.denied('plaintext-credential-host');
           opts.log('denied CONNECT', {
             host: target.host,
@@ -389,9 +407,14 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
 /**
  * Hands an intercepted CONNECT to the TLS engine on loopback.
  *
- * The CONNECT is replayed rather than the socket spliced, so the engine
- * learns the destination and picks the certificate for the host the client
- * asked for.
+ * The function replays the CONNECT to the engine, so the engine learns the
+ * destination and picks the certificate for the host that the client asked for.
+ *
+ * @param target The vetted destination.
+ * @param enginePort The loopback port of the engine.
+ * @param clientSocket The socket of the client.
+ * @param head The bytes that the client sent after its CONNECT.
+ * @param opts The callbacks of the server.
  */
 function connectToEngine(
   target: Target,

@@ -1,3 +1,9 @@
+/**
+ * Tests for the real interception engine, reached over TLS as a client in a box
+ * reaches it. The engine forwards to a stand-in tunnel and origin, so no test
+ * needs the network.
+ */
+
 import { createHash } from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
@@ -9,13 +15,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { EgressPolicy } from '../../shared/types.ts';
 import { Interceptor } from './inject.ts';
 
-/**
- * Tests for the real interception engine, reached over TLS as a box reaches
- * it. The engine forwards to a stand-in tunnel and origin, so no test needs
- * the network.
- */
-
-/** What the box holds. */
+/** The placeholder that stands for the credential in a box. */
 const PLACEHOLDER = 'ghp_PLACEHOLDERPLACEHOLDER';
 
 /** The real credential. */
@@ -24,31 +24,28 @@ const SECRET = 'ghp_therealsecretvalue';
 /** The deployment CA. The stand-in origin serves it as its own certificate. */
 let ca: { key: string; cert: string };
 
-/** Records what actually arrived upstream. */
+/** Requests that arrived at the stand-in origin. */
 let received: Array<{ url: string; headers: http.IncomingHttpHeaders }> = [];
 
-/** A TLS origin standing in for the host being protected. */
+/** A TLS server that stands in for the credential host. */
 let origin: https.Server;
 
 /** Port the stand-in origin listens on. */
 let originPort = 0;
 
-/**
- * A stand-in for the upstream tunnel: it forwards to the origin instead of
- * vetting and resolving, so no test here touches DNS or the network.
- */
+/** A stand-in for the upstream tunnel. It forwards every CONNECT to the stand-in origin. */
 let tunnel: http.Server;
 
 /** Port the stand-in tunnel listens on. */
 let tunnelPort = 0;
 
-/** The engine under test. */
+/** The controller of the engine under test. */
 let interceptor: Interceptor;
 
-/** The policy the engine reads; each test sets it. */
+/** The policy that the engine reads. Each test sets it. */
 let policy: EgressPolicy;
 
-/** How many times the engine has reported that it started. */
+/** Count of the log lines in which the engine reports that it started. */
 let starts = 0;
 
 /** The unwrapped TLS client, for the connections these tests make themselves. */
@@ -56,11 +53,18 @@ const connectTls = tls.connect;
 
 /** An answer read back from the engine. */
 interface Answer {
+  /** HTTP status code. */
   status: number;
+  /** Response body, or the status message of a refused upgrade. */
   body: string;
 }
 
-/** Starts a server on loopback and resolves with its port. */
+/**
+ * Starts a server on loopback.
+ *
+ * @param server The server to start.
+ * @returns The port that the server listens on.
+ */
 const listen = (server: http.Server | https.Server): Promise<number> =>
   new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve((server.address() as net.AddressInfo).port));
@@ -69,10 +73,11 @@ const listen = (server: http.Server | https.Server): Promise<number> =>
 /**
  * Lets the engine reach the stand-in origin over TLS.
  *
- * The engine checks the origin's certificate against the system trust store,
- * and a test cannot add a CA there. The wrapper skips the check for a
- * connection that names no CA, which is the engine's. The tests' own
- * connections use the unwrapped client.
+ * The engine checks the certificate of the origin against the system trust
+ * store, and the test process cannot add a CA to that store at run time. The
+ * wrapper skips the check for a connection that names no CA, as the
+ * connections of the engine do. The connections of the tests use the
+ * unwrapped client.
  */
 function trustTheStandInOrigin(): void {
   const relaxed = (options: tls.ConnectionOptions, onSecure?: () => void): tls.TLSSocket =>
@@ -139,7 +144,12 @@ afterAll(async () => {
   tls.connect = connectTls;
 });
 
-/** The policy under test, with one credential on one host. */
+/**
+ * Makes a policy with one credential for api.github.com.
+ *
+ * @param over The fields to replace.
+ * @returns The policy.
+ */
 function githubPolicy(over: Partial<EgressPolicy> = {}): EgressPolicy {
   return {
     allowedHosts: [],
@@ -157,7 +167,14 @@ function githubPolicy(over: Partial<EgressPolicy> = {}): EgressPolicy {
   };
 }
 
-/** Opens a tunnel through the engine to one host, as a box's client does. */
+/**
+ * Opens a tunnel through the engine to one host, as a client in a box does.
+ *
+ * @param port The port of the engine.
+ * @param authority The host and port to send in the CONNECT.
+ * @param host The address of the engine to connect to.
+ * @returns The socket, once the engine has answered the CONNECT.
+ */
 function tunnelThroughEngine(
   port: number,
   authority: string,
@@ -172,7 +189,16 @@ function tunnelThroughEngine(
   });
 }
 
-/** Sends a request through the engine over TLS and reads the answer. */
+/**
+ * Sends a GET request through the engine over TLS and reads the answer.
+ *
+ * @param port The port of the engine.
+ * @param headers The request headers.
+ * @param host The hostname of the origin.
+ * @param path The request path.
+ * @param engineHost The address of the engine to connect to.
+ * @returns The status and the body of the answer.
+ */
 async function throughEngine(
   port: number,
   headers: http.OutgoingHttpHeaders,
@@ -184,7 +210,7 @@ async function throughEngine(
   return new Promise((resolve, reject) => {
     const req = https.request(
       {
-        // With no agent, the request goes down this connection and closes it.
+        // With createConnection and no http.Agent, the request uses this socket and closes it.
         createConnection: () => connectTls({ socket, servername: host, ca: ca.cert }),
         host,
         path,
@@ -203,10 +229,14 @@ async function throughEngine(
 }
 
 /**
- * Asks the engine to upgrade a connection, and answers with 101 when it was
- * forwarded and upgraded, or with the status it refused with. A rejection
- * arrives as a response rather than as an upgrade, so the status line is the
- * whole of what this needs.
+ * Asks the engine to upgrade a connection to a websocket.
+ *
+ * @param port The port of the engine.
+ * @param extraHeaders More request headers.
+ * @param host The hostname of the origin.
+ * @param path The request path.
+ * @returns Status 101 when the engine forwarded the upgrade. Otherwise the
+ *   status of the refusal, with its status message as the body.
  */
 async function upgradeThroughEngine(
   port: number,
@@ -242,7 +272,14 @@ async function upgradeThroughEngine(
   });
 }
 
-/** Sends a plain proxy request straight at the engine and reads the answer. */
+/**
+ * Sends a plain proxy request straight at the engine and reads the answer.
+ *
+ * @param port The port of the engine.
+ * @param headers The request headers.
+ * @param url The absolute request URI.
+ * @returns The status and the body of the answer.
+ */
 function plainThroughEngine(
   port: number,
   headers: http.OutgoingHttpHeaders,
@@ -268,7 +305,12 @@ function plainThroughEngine(
   });
 }
 
-/** Whether anything still answers on a loopback port. */
+/**
+ * Checks if a server still answers on a loopback port.
+ *
+ * @param port The port to try.
+ * @returns True when a connection opens.
+ */
 function listening(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = net.connect({ host: '127.0.0.1', port }, () => {
@@ -333,9 +375,9 @@ describe('the interception engine', () => {
     });
 
     expect(res.status).toBe(403);
-    // On the status line, which is what a rejected upgrade carries.
+    // A rejected upgrade carries the reason in its status line.
     expect(res.body).toContain('refused by the egress policy');
-    // Nothing reached the far end: the placeholder did not leave the box.
+    // Nothing reached the origin, so the placeholder did not leave the proxy.
     expect(received).toHaveLength(0);
   }, 30_000);
 
@@ -391,11 +433,11 @@ describe('the interception engine', () => {
   }, 30_000);
 
   it('refuses a caller that did not come through the front door', async () => {
-    // A box can reach the engine's port on a non-loopback interface.
+    // An agent in a box can reach the engine port on an interface that is not loopback.
     const outward = Object.values(networkInterfaces())
       .flat()
       .find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
-    if (!outward) return; // nothing but loopback here; nothing to prove
+    if (!outward) return; // Only loopback exists, so there is nothing to check.
 
     policy = githubPolicy();
     await interceptor.apply();
@@ -423,7 +465,6 @@ describe('the interception engine', () => {
 
     expect(res.status).toBe(403);
     expect(res.body).toMatch(/foreign credential/);
-    // The point of denying here: nothing reached the host.
     expect(received).toHaveLength(0);
   }, 30_000);
 
@@ -447,7 +488,7 @@ describe('the interception engine', () => {
 
     expect(res.status).toBe(403);
     expect(res.body).toMatch(/a credential host may only be reached over https/);
-    // Neither the placeholder nor the secret may travel as plaintext.
+    // The placeholder and the secret must not travel as plaintext.
     expect(received).toHaveLength(0);
   }, 30_000);
 
@@ -470,7 +511,7 @@ describe('the interception engine', () => {
     policy = githubPolicy();
     await interceptor.apply();
 
-    // The shape of a real box: CONNECT, then TLS under the deployment CA.
+    // A client in a box sends CONNECT and then starts TLS under the deployment CA.
     const socket = await tunnelThroughEngine(interceptor.port()!, 'api.github.com:443');
     const secure = connectTls({ socket, servername: 'api.github.com', ca: ca.cert });
     await new Promise<void>((resolve, reject) => {
@@ -509,7 +550,7 @@ describe('the interception engine', () => {
     const before = interceptor.port();
     expect(before).toBeGreaterThan(0);
 
-    // A changed CA is what makes an apply replace the running server.
+    // A changed CA makes apply replace the running server.
     const other = await generateCACertificate({ subject: { commonName: 'Boxes other CA' } });
     policy = githubPolicy({ ca: other });
     starts = 0;
@@ -518,8 +559,8 @@ describe('the interception engine', () => {
     await Promise.all([interceptor.apply(), interceptor.apply()]);
     clearInterval(sampler);
 
-    // Two servers would mean one nobody can stop, and a gap would mean the
-    // front door tunnelling a credential host past the engine.
+    // A second server would leak, because nothing could stop it. A port gap
+    // would let the front door tunnel a credential host past the engine.
     expect(starts).toBe(1);
     expect(seen.length).toBeGreaterThan(0);
     expect(seen).not.toContain(null);

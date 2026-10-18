@@ -1,3 +1,11 @@
+/**
+ * Entry point of the egress proxy.
+ *
+ * Box networks are internal. The orchestrator attaches the proxy to each box
+ * network, and the proxy is the only way out of it. The proxy keeps all state
+ * in memory and writes no secret to disk.
+ */
+
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import net from 'node:net';
@@ -8,27 +16,32 @@ import { Interceptor } from './inject.ts';
 import { EMPTY_POLICY, injectionPatterns, policyHash } from './policy.ts';
 
 /**
- * Entry point of the egress proxy, the only way out of every box network.
+ * Writes one JSON line to stderr.
  *
- * Box networks are internal, so this process, attached to each of them, is
- * the only thing an agent can reach. It keeps its whole state in memory and
- * holds no secret at rest.
+ * @param msg The message.
+ * @param fields More fields for the line.
  */
-
-/** Writes one JSON line to stderr. */
 function log(msg: string, fields: Record<string, unknown> = {}): void {
   process.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), msg, ...fields })}\n`);
 }
 
-/** Reports a setting the proxy cannot start with, and stops. */
+/**
+ * Reports a setting that the proxy cannot start with, and stops the process.
+ *
+ * @param message The description of the bad setting.
+ */
 function fatalConfig(message: string): never {
   log('fatal config error', { error: message });
   process.exit(1);
 }
 
 /**
- * Reads a port from the environment. Anything that is not a port number stops
- * the proxy, because a silently wrong port binds somewhere nobody is looking.
+ * Reads a port from the environment. A value that is not a port number stops
+ * the proxy, because a wrong port would bind where nobody expects it.
+ *
+ * @param name The name of the environment variable.
+ * @param fallback The port to use when the variable is unset or blank.
+ * @returns The port.
  */
 function portFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -46,39 +59,42 @@ const PORT = portFromEnv('PORT', 3128);
 /** Port the control channel listens on, facing the orchestrator. */
 const CONTROL_PORT = portFromEnv('CONTROL_PORT', 3129);
 
-/**
- * Address the control channel binds to. Left unset it is derived from the
- * default route, which is the compose network and not any box's.
- */
+/** Address the control channel binds to. When unset, resolveControlAddress finds it. */
 const CONTROL_BIND = process.env.CONTROL_BIND?.trim() ?? '';
 if (CONTROL_BIND !== '' && net.isIP(CONTROL_BIND) === 0) {
   fatalConfig(`CONTROL_BIND must be an IP address, not ${CONTROL_BIND}`);
 }
 
-// --- state --------------------------------------------------------------------
-
 /** The live policy. Empty until the orchestrator pushes one. */
 let policy: EgressPolicy = EMPTY_POLICY;
 
-/** False until a policy has been pushed, however empty that policy is. */
+/** True after the first policy push, also when that policy is empty. */
 let applied = false;
 
 /**
  * Denials since boot, by category, reported on the control channel. The
- * categories are a fixed set, so a box cannot grow this map or put a
+ * categories are a fixed set, so an agent cannot grow this map or put a
  * hostname of its choice into the status.
  */
 const denials = new Map<DenialCategory, number>();
 
-/** When this process started, for the uptime it reports. */
+/** Start time of this process in milliseconds since the epoch, for the uptime in the status. */
 const bootedAt = Date.now();
 
-/** Counts one denial under its category. */
+/**
+ * Counts one denial under its category.
+ *
+ * @param category The category of the denial.
+ */
 function denied(category: DenialCategory): void {
   denials.set(category, (denials.get(category) ?? 0) + 1);
 }
 
-/** What the proxy reports on the control channel. */
+/**
+ * Builds the status that the proxy reports on the control channel.
+ *
+ * @returns The current status.
+ */
 function status(): EgressStatus {
   return {
     applied,
@@ -90,12 +106,10 @@ function status(): EgressStatus {
   };
 }
 
-// --- the three listeners -----------------------------------------------------
-
 /**
  * The upstream tunnel, on loopback. The engine sends every connection through
- * it, so decrypted traffic gets the same checks. It never intercepts, so the
- * engine's connections do not loop back into the engine.
+ * it, so decrypted traffic gets the same checks. Its intercept port is always
+ * null, so the connections of the engine do not loop back into the engine.
  */
 const upstream = createForwardServer({
   policy: () => policy,
@@ -108,11 +122,7 @@ const upstream = createForwardServer({
 /** Port the upstream tunnel listens on, known once it is bound. */
 let upstreamPort = 0;
 
-/**
- * The interception engine. It terminates TLS for the hosts that have a
- * credential, under the deployment CA, and swaps the box's placeholder for
- * the real credential.
- */
+/** The controller of the TLS interception engine for the credential hosts. */
 const interceptor = new Interceptor({
   policy: () => policy,
   upstreamProxyUrl: () => `http://127.0.0.1:${upstreamPort}`,
@@ -121,8 +131,8 @@ const interceptor = new Interceptor({
 });
 
 /**
- * The front door, facing the boxes. It vets every destination, then either
- * tunnels it opaquely or hands it to the interception engine.
+ * The front door, facing the boxes. It forwards vetted requests and tunnels,
+ * and hands a CONNECT to a credential host to the interception engine.
  */
 const front = createForwardServer({
   policy: () => policy,
@@ -132,14 +142,17 @@ const front = createForwardServer({
   log,
 });
 
-/** The push in flight, so no two of them are swapping the policy at once. */
+/** The last queued policy push. queuePush chains each new push to it. */
 let pushes: Promise<void> = Promise.resolve();
 
 /**
- * Runs one policy push once the push before it has finished, or failed.
+ * Runs one policy push after the previous push has finished or failed.
  *
- * A push that the engine refuses puts the previous policy back. Without the
- * queue, that rollback could discard a policy another push had just applied.
+ * A push that the engine refuses restores the previous policy. The queue keeps
+ * the rollback from discarding a policy that another push applied.
+ *
+ * @param work The push to run.
+ * @returns The result of the push.
  */
 function queuePush(work: () => Promise<void>): Promise<void> {
   const next = pushes.then(work, work);
@@ -160,8 +173,8 @@ const control = createControlServer({
       try {
         await interceptor.apply();
       } catch (err) {
-        // A policy the engine cannot run is rolled back whole, so no
-        // credential is left configured that nothing can swap in.
+        // Restore the previous policy, so that no credential stays configured
+        // without an engine to swap it in.
         policy = previous;
         await interceptor.apply().catch(() => undefined);
         throw new Error(`could not apply policy: ${(err as Error).message}`);
@@ -178,9 +191,14 @@ const control = createControlServer({
   log,
 });
 
-// --- boot --------------------------------------------------------------------
-
-/** Starts a server listening and resolves with the port it is bound to. */
+/**
+ * Starts a server listening.
+ *
+ * @param server The server to start.
+ * @param port The port, or 0 for a free port.
+ * @param host The address to bind to.
+ * @returns The port that the server is bound to.
+ */
 function listen(server: Server, port: number, host: string): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -201,9 +219,9 @@ async function main(): Promise<void> {
 
   const bind = CONTROL_BIND || (await resolveControlAddress());
   if (bind === null) {
-    // Binding wide would publish a secret-bearing endpoint to every box
-    // network. Loopback keeps it unreachable, and the orchestrator's failed
-    // pushes show up in /healthz.
+    // A bind to all interfaces would open the channel that carries the secrets
+    // to every box network. On loopback, the pushes of the orchestrator fail,
+    // and the orchestrator shows the error in /healthz.
     log('WARNING: could not resolve the control interface; binding to loopback only');
   }
   await listen(control.server, CONTROL_PORT, bind ?? '127.0.0.1');

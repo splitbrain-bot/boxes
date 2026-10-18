@@ -94,7 +94,7 @@ test('fails closed on unparseable input', () => {
 });
 
 test('a multi-answer record is rejected if ANY address is private', () => {
-  // The DNS-rebinding shape: one public answer, one private.
+  // DNS rebinding gives one public answer and one private answer.
   assert.equal(allAddressesAllowed(['8.8.8.8', '192.168.1.1']), false);
   assert.equal(allAddressesAllowed(['192.168.1.1', '8.8.8.8']), false);
   assert.equal(allAddressesAllowed(['8.8.8.8', '1.1.1.1']), true);

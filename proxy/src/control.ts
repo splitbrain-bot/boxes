@@ -1,3 +1,5 @@
+/** The control channel, through which the orchestrator pushes the policy to the proxy and reads its status. */
+
 import { timingSafeEqual } from 'node:crypto';
 import dgram from 'node:dgram';
 import http from 'node:http';
@@ -5,25 +7,29 @@ import os from 'node:os';
 import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
 import { parsePolicy } from './policy.ts';
 
-/** The control channel, over which the orchestrator pushes the policy to the proxy. */
-
-/** Largest policy body accepted, in bytes. */
+/** Largest policy body accepted, in characters of the decoded UTF-8 text. */
 const MAX_BODY = 1 << 20;
 
-/** How long one control request may take to arrive, in milliseconds. */
+/** Time limit for one control request to arrive, in milliseconds. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
-/** What the control server does with what it receives. */
+/** Callbacks of the control server. */
 export interface ControlOptions {
-  /** Applies a pushed policy. Rejecting it answers the push with a 400. */
+  /** Applies a pushed policy. A rejected promise makes the server answer the push with a 400. */
   apply: (policy: EgressPolicy) => Promise<void>;
-  /** The current status to report back. */
+  /** Returns the current status. */
   status: () => EgressStatus;
-  /** Structured logging. */
+  /** Writes one structured log line. */
   log: (msg: string, fields?: Record<string, unknown>) => void;
 }
 
-/** Constant-time comparison of two tokens of any length. */
+/**
+ * Compares two tokens in constant time.
+ *
+ * @param a The first token.
+ * @param b The second token.
+ * @returns True when the tokens are equal. Tokens of different lengths do not match.
+ */
 function tokensMatch(a: string, b: string): boolean {
   const left = Buffer.from(a, 'utf8');
   const right = Buffer.from(b, 'utf8');
@@ -32,14 +38,14 @@ function tokensMatch(a: string, b: string): boolean {
 }
 
 /**
- * The address to bind the control channel to: this container's own address on
- * the network that carries the default route.
+ * Finds the address for the control channel. It is the address of this
+ * container on the network with the default route.
  *
- * Box networks are internal and have no default route, so this is the compose
- * network, where the orchestrator is. Connecting a UDP socket does the route
- * lookup and sends nothing.
+ * Box networks are internal and have no default route, so the default route
+ * goes through the compose network of the orchestrator. A connected UDP socket
+ * does the route lookup and sends no data.
  *
- * Null when the lookup fails or gives an address this container does not hold.
+ * @returns The address, or null when the lookup fails or gives an address that this container does not hold.
  */
 export async function resolveControlAddress(): Promise<string | null> {
   const address = await new Promise<string | null>((resolve) => {
@@ -69,32 +75,34 @@ export async function resolveControlAddress(): Promise<string | null> {
   });
 
   if (address === null || address === '0.0.0.0') return null;
-  // Only bind to an address this container holds.
   const held = Object.values(os.networkInterfaces())
     .flatMap((entries) => entries ?? [])
     .some((entry) => entry.address === address);
   return held ? address : null;
 }
 
-/** A control server, and whether a push has claimed it. */
+/** A control server and its claim state. */
 export interface ControlServer {
   /** The HTTP server, not yet listening. */
   server: http.Server;
-  /** True once a push has claimed the channel. */
+  /** Returns true once a push has claimed the channel. */
   claimed: () => boolean;
 }
 
 /**
- * Builds the control server. The server is returned before it listens.
+ * Builds the control server. The caller starts it listening.
  *
- * Nobody configures the bearer token. The first policy push claims the channel
- * with its token, and every later call must present the same one. Only the
- * orchestrator can reach the interface to make that first push.
+ * The first policy push claims the channel with its bearer token, and every
+ * later request must send the same token. Only the orchestrator can reach the
+ * control address, so only the orchestrator can make the first push.
+ *
+ * @param opts The callbacks of the server.
+ * @returns The server and its claim state.
  */
 export function createControlServer(opts: ControlOptions): ControlServer {
   let token: string | null = null;
 
-  /** Answers with one JSON body and the length that goes with it. */
+  /** Sends one JSON response with its Content-Length. */
   const send = (res: http.ServerResponse, code: number, body: unknown): void => {
     const text = JSON.stringify(body);
     res.writeHead(code, {
@@ -106,7 +114,7 @@ export function createControlServer(opts: ControlOptions): ControlServer {
 
   /**
    * Checks the bearer token. On an unclaimed channel, a POST to /policy claims
-   * it with the token it presents, and every other request is refused.
+   * the channel with its token, and all other requests fail.
    */
   const authorize = (req: http.IncomingMessage): boolean => {
     const header = req.headers.authorization;
@@ -145,7 +153,7 @@ export function createControlServer(opts: ControlOptions): ControlServer {
       body += chunk;
       if (body.length > MAX_BODY) {
         oversized = true;
-        // The refusal has to reach the caller before the socket goes.
+        // The 413 must reach the caller before the socket closes.
         res.on('finish', () => req.destroy());
         send(res, 413, { error: 'policy too large' });
       }
@@ -166,7 +174,7 @@ export function createControlServer(opts: ControlOptions): ControlServer {
     });
   });
 
-  // A push that stalls halfway must not hold a connection open for good.
+  // A push that stops halfway must not keep a connection open forever.
   server.requestTimeout = REQUEST_TIMEOUT_MS;
 
   return { server, claimed: () => token !== null };
