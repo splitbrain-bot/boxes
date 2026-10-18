@@ -11,8 +11,8 @@
  *     <event>2200/30321 ok=2193 bad=7 — rate limited, pausing 61s</event>
  *     </task-notification>
  *
- * The block travels as message text, which the adapter's transcript keeps
- * unchanged, so one parser serves the live stream and the replay.
+ * The block is part of the message text, and the transcript of the adapter
+ * keeps it unchanged. So the same parser reads the live stream and the replay.
  */
 
 /** Opening tag of one notification block. */
@@ -21,46 +21,61 @@ const OPEN = '<task-notification>';
 /** Closing tag of one notification block. */
 const CLOSE = '</task-notification>';
 
-/** What a finished task cost, when the harness says. */
+/** The cost of a finished task, when the harness reports it. */
 export interface TaskUsage {
-  /** Tokens the task spent; the harness reports these for a subagent. */
+  /** The tokens that the task used. The harness reports them for a subagent. */
   tokens?: number;
-  /** Tool calls the task made. */
+  /** The number of tool calls that the task made. */
   toolUses?: number;
-  /** How long the task ran, in milliseconds. */
+  /** The run time of the task, in milliseconds. */
   durationMs?: number;
 }
 
 /** One background task reporting in. */
 export interface TaskNotification {
-  /** The harness's id for the task, which outlives any one notification. */
+  /** The id of the task from the harness. It is the same in all notifications of the task. */
   taskId: string;
   /**
-   * `completed`, `failed`, `killed` or `blocked`. Absent while the task is
-   * still running, as with a monitor's event.
+   * The status from the harness, such as `completed`, `failed`, `killed`, `blocked` or `stopped`. Absent while
+   * the task runs, as with the event of a monitor.
    */
   status?: string;
-  /** One line saying what happened. Always present. */
+  /** One line about what happened. */
   summary: string;
-  /** What the task said: a subagent's answer, or a monitor's event. */
+  /** The output of the task, such as the answer of a subagent or the event of a monitor. */
   body?: string;
-  /** What the task cost, when the harness reports it. */
+  /** The cost of the task, when the harness reports it. */
   usage?: TaskUsage;
 }
 
-/** A run of message text, as notifications and the prose around them. */
+/**
+ * One part of a message text. A `text` part holds the text around the notifications in `text`. A
+ * `notification` part holds one parsed block in `notification`.
+ */
 export type NotificationSegment =
   | { type: 'text'; text: string }
   | { type: 'notification'; notification: TaskNotification };
 
-/** The contents of one `<tag>`, trimmed, or undefined when there is none. */
+/**
+ * Reads the trimmed content of one `<tag>`.
+ *
+ * @param body The text to search.
+ * @param name The name of the tag.
+ * @returns The content, or undefined when the tag is missing or empty.
+ */
 function field(body: string, name: string): string | undefined {
   const match = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(body);
   const value = match?.[1]?.trim();
   return value ? value : undefined;
 }
 
-/** One `<tag>` holding a number, or undefined when it holds anything else. */
+/**
+ * Reads one `<tag>` that holds a number.
+ *
+ * @param body The text to search.
+ * @param name The name of the tag.
+ * @returns The number, or undefined when the tag is missing or holds no number.
+ */
 function count(body: string, name: string): number | undefined {
   const value = field(body, name);
   if (value === undefined) return undefined;
@@ -68,7 +83,12 @@ function count(body: string, name: string): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-/** The `<usage>` block, or undefined when it is absent or says nothing. */
+/**
+ * Reads the `<usage>` block.
+ *
+ * @param body The content of one notification block.
+ * @returns The usage, or undefined when the block is missing or has no known values.
+ */
 function usageOf(body: string): TaskUsage | undefined {
   const block = field(body, 'usage');
   if (!block) return undefined;
@@ -84,8 +104,10 @@ function usageOf(body: string): TaskUsage | undefined {
 }
 
 /**
- * One block's contents as a notification, or null when the block lacks the
- * task id or the summary.
+ * Reads the content of one block as a notification.
+ *
+ * @param body The content between the opening and the closing tag.
+ * @returns The notification, or null when the block has no task id or no summary.
  */
 function notificationOf(body: string): TaskNotification | null {
   const taskId = field(body, 'task-id');
@@ -107,18 +129,20 @@ function notificationOf(body: string): TaskNotification | null {
 }
 
 /**
- * A block of message text as the notifications in it and the prose around
- * them, or null when it holds none.
+ * Splits message text into the notifications in it and the text around them.
  *
- * A block that cannot be read stays in the text, and the blocks beside it are
- * still read. A notification inside a `<system-reminder>` wrapper is read too,
- * and the wrapper's lines stay as text around it.
+ * A block that cannot be read stays in the text, and the parser still reads
+ * the blocks next to it. The parser also reads a notification inside a
+ * `<system-reminder>` wrapper, and the lines of the wrapper stay as text.
+ *
+ * @param text The message text.
+ * @returns The segments in their order, or null when the text holds no notification.
  */
 export function parseTaskNotifications(text: string): NotificationSegment[] | null {
   if (!text.includes(OPEN)) return null;
 
   const segments: NotificationSegment[] = [];
-  // Start of the next text segment, and start of the next block search. They
+  // Start of the next text segment, and start of the next block search. The two
   // differ after an unreadable block, which then stays part of the text.
   let read = 0;
   let scan = 0;
@@ -127,9 +151,8 @@ export function parseTaskNotifications(text: string): NotificationSegment[] | nu
     const open = text.indexOf(OPEN, scan);
     if (open === -1) break;
     const close = text.indexOf(CLOSE, open);
-    // An unclosed opening tag is prose about the format rather than a block,
-    // and is left as text. The harness sends a notification as one content
-    // block, so a block cannot be cut in half here.
+    // An opening tag without a closing tag is text about the format, not a block.
+    // The harness sends a notification in one content block, so a block cannot be split here.
     if (close === -1) break;
     scan = close + CLOSE.length;
 

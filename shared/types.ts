@@ -7,46 +7,46 @@ export type BoxStatus = 'creating' | 'running' | 'stopped' | 'error' | 'deleted'
 
 /**
  * The state of a box as the runtime reports it right now, independent of the
- * stored status. `unknown` means the runtime did not answer.
+ * stored status. `unknown` means that the runtime gave no usable answer.
  */
 export type RuntimeState = 'running' | 'stopped' | 'unknown';
 
-/** An agent harness a box can run. */
+/** An agent harness that the orchestrator can run in a box. */
 export type HarnessId = 'claude' | 'codex';
 
 /** A credential the deployment holds, named by the service it authenticates to. */
 export type CredentialId = 'claude' | 'openai' | 'github' | 'gitlab' | 'devtunnels';
 
 /**
- * How a credential was obtained, which decides what the secret is: a token
- * pasted from `claude setup-token`, an API key, or the whole JSON document a
- * CLI wrote when somebody logged in.
+ * The way a credential was obtained. The method sets the content of the secret. A `token` is a token, such as one
+ * from `claude setup-token` or a pasted access token. An `api_key` is an API key. An `oauth` secret is a JSON
+ * document with the tokens of a login, such as the document that the Codex CLI wrote.
  */
 export type CredentialMethod = 'token' | 'api_key' | 'oauth';
 
-/** Whether a stored credential is believed to work. */
+/** The known health of a stored credential. */
 export type CredentialStatus = 'ok' | 'expired' | 'failing';
 
 /** One stored credential as the API reports it, without the secret. */
 export interface CredentialSummary {
-  /** Which credential this is. */
+  /** The id of the credential. */
   id: CredentialId;
-  /** How it was obtained. */
+  /** The way the credential was obtained. */
   method: CredentialMethod;
   /**
-   * What a person recognises the credential by: the account name a login
-   * reported, or the last four characters of a pasted secret.
+   * The name that a person knows the credential by. It is the account name that a login reports, or else the last
+   * four characters of the secret. Null for a secret of four characters or fewer.
    */
   account: string | null;
-  /** Whether it is believed to work. */
+  /** The known health of the credential. */
   status: CredentialStatus;
-  /** Why it last failed, or null. */
+  /** The reason for the last failure, or null. */
   lastError: string | null;
-  /** When the secret stops working, in epoch milliseconds, or null for a static one. */
+  /** The expiry time of the secret, in epoch milliseconds, or null for a static secret. */
   expiresAt: number | null;
-  /** When it was last refreshed, in epoch milliseconds, or null if it never has been. */
+  /** The time of the last refresh or login, in epoch milliseconds, or null when neither set it. */
   refreshedAt: number | null;
-  /** When it was last stored, in epoch milliseconds. */
+  /** The time the credential was last stored, in epoch milliseconds. */
   updatedAt: number;
 }
 
@@ -54,97 +54,94 @@ export interface CredentialSummary {
 export interface ApiKeySummary {
   /** The environment variable that holds the key's placeholder in each box. */
   name: string;
-  /** The hosts the egress proxy swaps the key in for. */
+  /** The hosts for which the egress proxy swaps in the key. */
   hosts: string[];
   /** The last four characters of the key, or null for a key too short to show any. */
   account: string | null;
-  /** When it was last stored, in epoch milliseconds. */
+  /** The time the key was last stored, in epoch milliseconds. */
   updatedAt: number;
 }
 
-/** What one harness needs before a thread on it can run, and whether it has it. */
+/** The credential state of one harness. */
 export interface HarnessHealth {
-  /** Which harness this is. */
+  /** The id of the harness. */
   id: HarnessId;
-  /** What the dashboard calls it. */
+  /** The name that the dashboard shows. */
   label: string;
-  /** Null when no credential is stored for this harness. */
+  /** The stored credential of the harness, or null when there is none. */
   credential: CredentialSummary | null;
-  /** True when a thread of this harness can run a turn right now. */
+  /** True when the stored credential of the harness has the status `ok` and the proxy can put it into a request. */
   runnable: boolean;
 }
 
 /**
- * The modes an adapter advertises for a thread, and the one it is in. The
- * shape is ACP's, as the `session/new`, `session/load` and `session/fork`
- * answers carry it.
+ * The modes that an adapter advertises for a thread, and the current mode. The
+ * shape is the one of ACP, as in the answers to `session/new`, `session/load`
+ * and `session/fork`.
  */
 export interface ThreadModeState {
   /** The mode the thread is in. */
   currentModeId: string;
-  /** Every mode the adapter offers. */
+  /** Every mode that the adapter offers, each with its id, an optional name and an optional description. */
   availableModes: Array<{ id: string; name?: string; description?: string | null }>;
 }
 
-/** One thread setting the adapter lets a client change, and its current value. */
+/** One thread setting that a client can change, and its current value. */
 export interface ThreadConfigOption {
-  /** The adapter's id for the option. */
+  /** The id of the option in the adapter. */
   id: string;
-  /** What the option is called. */
+  /** The name of the option. */
   name?: string;
-  /** What the adapter says the option does, where it says anything. */
+  /** The description of the option from the adapter, if it gives one. */
   description?: string | null;
   /**
-   * `select` carries an options list; another kind carries none. Absent means
-   * a select, which is what both adapters send for everything they offer.
+   * The kind of the option. A `select` has a list of options, and other kinds
+   * have none. Absent means a select.
    */
   type?: string;
   /**
-   * What the option is for. The gateway finds the model selector by it, and
-   * leaves the option that echoes the mode out of a thread's config map,
-   * because the mode travels through `session/set_mode` alone.
+   * The purpose of the option. The gateway uses it to find the model selector.
+   * The gateway also uses it to keep the mode option out of the config map of a
+   * thread, because only `session/set_mode` sets the mode.
    */
   category?: string | null;
   /** The value the option has now. */
   currentValue?: string;
-  /** The values a select offers. */
+  /** The values that a select offers, each with the value, an optional name and an optional description. */
   options?: Array<{ value: string; name?: string; description?: string | null }>;
 }
 
 /**
- * What one harness's adapter last advertised, cached against the harness.
+ * The modes and config options that the adapter of one harness last advertised, cached per harness.
  *
- * A dialog offers these before the thread exists, so it cannot ask the
- * adapter. The adapter corrects them on the thread's first answer.
+ * A dialog shows these values before the thread exists, so it cannot ask the adapter. Each answer to
+ * `session/new`, `session/fork` or `session/load` that holds a list updates that list.
  */
 export interface HarnessCatalog {
-  /** The modes of the last answer, or null when it carried none. */
+  /** The modes of the last answer that held modes, or null when no answer held them. */
   modes: ThreadModeState | null;
-  /** The config options of the last answer; empty when it carried none. */
+  /** The config options of the last answer that held them, or empty when no answer held them. */
   configOptions: ThreadConfigOption[];
-  /** When the answer arrived, in epoch milliseconds. */
+  /** The arrival time of the last answer, in epoch milliseconds. */
   seenAt: number;
 }
 
-/**
- * One harness as the dialogs see it: what the registry says, what its adapter
- * last advertised, and whether it can run right now.
- */
+/** One harness with the data that the form of a new box and the dialog of a new thread need. */
 export interface HarnessInfo extends HarnessHealth {
-  /** Mode a fresh thread of this harness is put in. */
+  /** The mode of a new thread of this harness. */
   defaultModeId: string;
-  /** Mode a fork of one starts in instead. */
+  /** The mode of a fork of a thread of this harness. */
   forkModeId: string;
-  /** Config option values a fresh thread starts with, by option id. */
+  /** The config option values of a new thread, by option id. */
   defaultConfig: Record<string, string>;
-  /** Null on a deployment that has never run this harness's adapter. */
+  /** The values that the adapter last advertised, or null when the deployment has never run the adapter. */
   catalog: HarnessCatalog | null;
 }
 
 /**
- * What a thread dialog last chose for one harness, so the next box starts on
- * the same settings from any device. The dashboard writes and reads it; the
- * orchestrator only stores it.
+ * The last choices for one harness in the form of a new box or in the dialog of a new thread. The next form or
+ * dialog starts with the same choices on any device. The dashboard reads and writes them, and the orchestrator
+ * stores them.
  */
 export interface ThreadDialogDefaults {
   /** The mode chosen last. */
@@ -154,98 +151,98 @@ export interface ThreadDialogDefaults {
 }
 
 /**
- * The deployment's plain settings: everything that is configuration rather
- * than a secret.
+ * The settings of the deployment that are not secrets.
  */
 export interface Settings {
-  /** The name every box commits as. */
+  /** The git author name for commits in every box. */
   gitName: string;
-  /** The email address every box commits as. */
+  /** The git author email address for commits in every box. */
   gitEmail: string;
-  /** What the thread dialogs last chose, by harness id. */
+  /** The last choices for a new box or a new thread, by harness id. */
   dialogs: Record<string, ThreadDialogDefaults>;
 }
 
 /** Body of a request to store a credential by pasting its secret. */
 export interface PutCredentialBody {
-  /** What kind of secret this is. */
+  /** The kind of the secret. */
   method: CredentialMethod;
   /** The pasted secret. */
   secret: string;
 }
 
 /**
- * Where a login stands, as the settings page polls it.
+ * The state of a login, which the settings page polls.
  *
- * A login runs the harness's own CLI in a throwaway container. Codex prints a
- * URL and a one-time code and then waits on its own. Claude prints a URL and
- * then waits for the person to paste back the code the login page gave them.
+ * For a harness login, the orchestrator runs the CLI of the harness in a temporary
+ * container. Codex prints a URL and a one-time code, and then waits. Claude
+ * prints a URL, and then waits for the code that the login page gives the user.
+ * For Dev Tunnels, the orchestrator runs the GitHub device flow itself.
  */
 export type LoginState =
-  /** The CLI has not shown a URL yet. */
+  /** The login has no URL yet. */
   | { state: 'starting' }
-  /** The CLI is waiting for a browser. `code` is Codex's one-time code, where there is one. */
+  /** The login waits for a browser. `code` is the one-time code of Codex or GitHub, if there is one. */
   | { state: 'awaiting_browser'; url: string; code: string | null }
   /**
-   * The CLI is blocked on a code the page has to paste back. `error` is what
-   * it said about the last code it refused, so a rejection is visible rather
-   * than looking like nothing happened; null until one is refused.
+   * The CLI waits for the code that the page sends back. `error` is the message
+   * of the CLI about the last code that it refused, or null before a refusal.
    */
   | { state: 'awaiting_code'; url: string; error: string | null }
   /** The credential is stored. */
   | { state: 'done' }
-  /** The login ended badly. `error` says why, in a sentence worth showing. */
+  /** The login failed. `error` gives the reason as a sentence for the user. */
   | { state: 'failed'; error: string };
 
-/** What starting a login answers with: the id every later call names. */
+/** The answer to a request that starts a login. */
 export interface StartLoginResponse {
-  /** The login's id. */
+  /** The id of the login. Each later call for the login uses it. */
   loginId: string;
 }
 
-/** Body of the paste-back: the code the login page gave the person. */
+/** Body of the request that sends back the code from the login page. */
 export interface LoginCodeBody {
   /** The code, as pasted. */
   code: string;
 }
 
 /**
- * One task a conversation has left running in its box, as its adapter
+ * One task that a conversation left running in its box, as the adapter
  * announced it.
  *
  * The adapter sends a spawn when the task starts and a state update when it
- * ends. A task whose end nobody hears is dropped when its adapter process
+ * ends. A task without an end update is dropped when its adapter process
  * exits.
  */
 export interface BackgroundProcess {
-  /** The adapter's asyncTaskId, which is what a stop names. */
+  /** The asyncTaskId of the adapter. A stop request uses it. */
   id: string;
-  /** What the adapter calls the task: the command for a shell, a description otherwise. */
+  /** The name of the task from the adapter: the command for a shell, or else a description. */
   command: string;
-  /** `shell`, `workflow`, `monitor` or `task` from Claude; `shell` from Codex. */
+  /**
+   * The kind from the adapter. Claude sends `shell`, `workflow`, `monitor`, `task` or another type name of the
+   * harness. Codex sends `shell`.
+   */
   kind: string;
   /** `canStop` from the spawn. */
   stoppable: boolean;
-  /** When the spawn arrived, in epoch milliseconds. */
+  /** The arrival time of the spawn, in epoch milliseconds. */
   startedAt: number;
 }
 
 /**
- * One process that a reading of a box's process table found running.
+ * One process that a read of the process table of a box found.
  *
- * It names no task and belongs to no conversation. It explains a busy box
- * whose task bars are empty.
+ * It has no task and no conversation. It shows why a box is busy when it has no tasks.
  */
 export interface BoxWork {
   /**
-   * The pid as the reading saw it, which tells two identical command lines
-   * apart. A stop does not signal this pid: it looks the pid up again inside
-   * the box.
+   * The pid at the time of the read. It tells two equal command lines apart.
+   * A stop looks up the pid again in the box and does not signal this pid.
    */
   pid: number;
-  /** The whole command line, which is how a process is recognised. */
+  /** The full command line, which identifies the process. */
   command: string;
-  /** How long it has been running, in whole seconds. */
+  /** The run time of the process, in whole seconds. */
   elapsedSeconds: number;
 }
 
@@ -254,90 +251,89 @@ export interface ThreadSummary {
   /** The thread's id. */
   id: string;
   /**
-   * Which agent runs this conversation. It is set per thread, so two agents
+   * The harness of the thread. Each thread has its own harness, so two agents
    * can work on one checkout.
    */
   harness: HarnessId;
   /**
-   * The mode the thread is meant to be in, or null for its harness's default.
-   * What the adapter is in right now arrives over ACP; this is what a respawn
-   * puts it back into.
+   * The stored mode of the thread, or null for the default of its harness. The
+   * current mode of the adapter comes over ACP. A respawn sets the adapter back
+   * to this mode.
    */
   modeId: string | null;
   /**
-   * Everything else the thread is configured with, by the adapter's own id for
-   * each option: the model, an effort level, whatever else it offers. The
-   * option that echoes the mode is never in here.
+   * The other config option values of the thread, such as the model or the
+   * effort level, by the option id of the adapter. The mode option is not in
+   * this map.
    */
   config: Record<string, string>;
   /**
-   * True when this thread's adapter advertised `sessionCapabilities.fork` in
-   * its `initialize` answer. False while the adapter has not been reached.
+   * True when the adapter of the thread advertised `sessionCapabilities.fork` in
+   * its `initialize` answer. False before the first connection to the adapter.
    */
   canFork: boolean;
   /**
-   * The adapter's own id for the thread, or null while the adapter has
-   * forgotten it. A thread minted and never prompted does not survive the
-   * adapter restarting.
+   * The id of the thread in the adapter, or null before the adapter creates the thread. The orchestrator also sets
+   * it to null when a load finds that the adapter no longer holds the thread. A thread that never got a prompt has
+   * no transcript, so a stop of the container removes it.
    */
   acpSessionId: string | null;
   /**
-   * What the thread is called: the agent's own title, or the first line of a
-   * prompt sent on it while it has none. Null until it has been prompted.
+   * The title of the thread: the title from the agent, or else the first line
+   * of a prompt on the thread. Null before the first prompt, and after the agent clears its title.
    */
   title: string | null;
-  /** The thread's number within its box, never reused. It names an untitled thread. */
+  /** The number of the thread in its box, never used again. It names a thread without a title. */
   ordinal: number;
   /**
-   * True while a prompt this gateway forwarded is still open on this thread.
+   * True while a prompt that the gateway forwarded is open on this thread.
    *
-   * An open turn is not the agent working: a turn that spawned a background
-   * subagent stays open after the agent has gone quiet. `speaking` says
-   * whether the agent is working.
+   * A turn that started a background subagent can stay open after the agent
+   * stops its output. Use `speaking` to see if the agent works.
    */
   turnActive: boolean;
   /**
-   * Whether this conversation has work still running in its box, with no turn
-   * to say so.
+   * True while this conversation has work running in its box outside of a
+   * turn.
    */
   backgroundBusy: boolean;
   /**
-   * True while the agent is producing output on this thread — text, thinking,
-   * a tool call of its own.
+   * True while the agent produces output on this thread, such as text,
+   * thoughts or its own tool calls.
    *
-   * Independent of `turnActive`: a thread woken by a task reporting in speaks
-   * with no prompt open, and a thread holding a subagent's turn open is
-   * silent with one.
+   * The value is independent of `turnActive`. A task report can wake a thread,
+   * which then speaks with no open prompt. A thread that holds the turn of a
+   * subagent open is silent with an open prompt.
    */
   speaking: boolean;
   /** Permission requests from this thread waiting for a browser to answer. */
   pendingCount: number;
   /**
-   * Whether the reader has marked this conversation as finished. The mark
-   * only affects the list: a thread marked done still takes prompts.
+   * True when the user marked this conversation as finished. The mark changes
+   * the list only, and a thread marked done still accepts prompts.
    */
   done: boolean;
-  /** When the thread was created, in epoch milliseconds. */
+  /** The creation time of the thread, in epoch milliseconds. */
   createdAt: number;
-  /** When the thread was last active, in epoch milliseconds. */
+  /** The time of the last activity on the thread, in epoch milliseconds. */
   lastActiveAt: number;
 }
 
-/** One port of a dev tunnel a box hosts, as the box's views show it. */
+/** One port of a dev tunnel in a box. */
 export interface BoxTunnel {
   /** The tunnel id. */
   id: string;
-  /** The region the tunnel lives in, such as `euw`. */
+  /** The region of the tunnel, such as `euw`. */
   cluster: string;
   /** The port in the box the tunnel forwards to. */
   port: number;
-  /** The public URL of that port. */
+  /** The public URL of the port. */
   url: string;
 }
 
 /** A box as returned by the list endpoint. */
 export interface BoxSummary {
-  /** The box's id. */
+  /** The id of the box. */
   id: string;
   /** The name the user gave the box. */
   name: string;
@@ -345,115 +341,117 @@ export interface BoxSummary {
   profile: string;
   /** Lifecycle status, as stored. */
   status: BoxStatus;
-  /** Live state of the box, resolved against the runtime on every request. */
+  /** The live state of the box, read from the runtime on every request. */
   runtimeState: RuntimeState;
   /**
-   * True while a prompt this gateway forwarded is open on any of the
-   * box's threads. Derived from the threads rather than stored.
+   * True while a prompt that the gateway forwarded is open on a thread of the
+   * box. The value comes from the threads of the box.
    */
   turnActive: boolean;
-  /** True while the agent is producing output on any of them. */
+  /** True while the agent produces output on a thread of the box. */
   speaking: boolean;
   /**
-   * Whether the box still has work running in it, such as a command left
-   * running or a monitor, with no turn to say so. What is running, and which
-   * thread owns it, is on {@link TurnStateParams.background}.
+   * True while the box has work running outside of a turn, such as a command
+   * or a monitor. {@link TurnStateParams.background} tells what runs and which
+   * thread owns it.
    */
   backgroundBusy: boolean;
   /**
-   * How many pieces of background work the box has running: the tasks its
-   * adapters announced, or what the box reading found where none did. Zero
-   * while {@link backgroundBusy} is false.
+   * The number of background work items in the box: the tasks that its
+   * adapters announced, or else the processes that the read of the box found.
+   * Zero while {@link BoxSummary.backgroundBusy} is false.
    */
   backgroundCount: number;
-  /** Permission requests waiting for a browser to answer them, on any thread. */
+  /** Permission requests on all threads that wait for an answer from a browser. */
   pendingCount: number;
   /**
-   * Number of browsers currently attached to the box, across all of its
-   * threads. Two tabs on two threads is two attachments.
+   * The number of browsers attached to the box, over all of its threads. Two
+   * tabs on two threads count as two.
    */
   attachedCount: number;
   /**
-   * Bearer token an ACP client authenticates the WebSocket upgrade with,
-   * carried in the subprotocol. This box's own: it opens this box and
-   * no other one in the deployment.
+   * The bearer token that a client sends in the subprotocol list to authenticate the WebSocket upgrade of the ACP
+   * endpoint or the terminal endpoint. The token opens this box only.
    */
   wsToken: string;
-  /** Every conversation this box owns, oldest first. */
+  /** All threads of the box, oldest first. */
   threads: ThreadSummary[];
   /**
-   * The agent set selected when this box was created, or null for the
-   * global set alone. Null is also what a box whose set has since been
-   * deleted reports.
+   * The agent set that the user selected when the box was created, or null
+   * for the global set only. The value is also null when the set was deleted
+   * later.
    */
   agentSetId: string | null;
-  /** That set's current name, for the UI. Null whenever `agentSetId` is. */
+  /** The current name of the agent set, for the UI. Null when `agentSetId` is null. */
   agentSetName: string | null;
   /**
-   * How much disk this box takes up, in bytes: its workspace, its home and its
-   * Nix store together. Null when there is no measurement yet.
+   * The disk space of the box in bytes: its workspace, its home and its Nix
+   * store together. Null before the first measurement.
    *
-   * The value is the last measurement, so it lags. A box is measured before
-   * each stop, and a running box again at most every fifteen minutes.
+   * The value comes from the last measurement. The orchestrator measures a box before each stop. It also measures
+   * a running box when it reads the summary and the last measurement is older than fifteen minutes.
    */
   diskBytes: number | null;
-  /** When `diskBytes` was measured, in epoch milliseconds. Null when it is. */
+  /** The time of the measurement of `diskBytes`, in epoch milliseconds. Null when `diskBytes` is null. */
   diskMeasuredAt: number | null;
   /**
-   * The dev tunnel ports the box hosts, as the orchestrator read them at its
-   * last minute tick. Empty when it hosts none.
+   * The dev tunnel ports in the box, from the last read of the orchestrator. The orchestrator reads them every
+   * minute while a Dev Tunnels credential is stored. Empty when there are none.
    */
   tunnels: BoxTunnel[];
-  /** When the box was created, in epoch milliseconds. */
+  /** The creation time of the box, in epoch milliseconds. */
   createdAt: number;
-  /** When the box was last active, in epoch milliseconds. */
+  /** The time of the last activity in the box, in epoch milliseconds. */
   lastActiveAt: number;
 }
 
 /** A single box with the extra detail the detail view needs. */
 export interface BoxDetail extends BoxSummary {
   /**
-   * Facts the runtime knows about the box, as label and value, for example
-   * the container and the network. A fact the runtime cannot read is left out.
+   * Facts that the runtime knows about the box, as label and value, such as
+   * the container and the network. A fact that the runtime cannot read is
+   * not in the list.
    */
   runtimeDetails: Array<[string, string]>;
-  /** The adapter's id for the box's most recently active thread, or null before one exists. */
+  /** The adapter id of the most recently active thread of the box, or null before a thread exists. */
   acpSessionId: string | null;
-  /** True when the network isolation of the box is complete, so the agent reaches the egress proxy. */
+  /**
+   * True when the runtime finds the network isolation of the box complete. With complete isolation, the container
+   * of the box can connect only to the egress proxy. False also when the runtime cannot read the isolation.
+   */
   isolated: boolean;
   /**
-   * What the last reading found running in the box, which is what the
-   * box-wide stop would signal. Empty for a box that is not up or has not
-   * been read yet. It is on the detail only, because the list polls every box
-   * at once.
+   * The processes that the last read found in the box. A stop of the whole box reads the process table again and
+   * signals the processes that it finds then. Empty when the box is not running or was not read yet. Only the
+   * detail has this field.
    */
   boxWork: BoxWork[];
 }
 
 /**
- * What a new thread is to run and be configured with. An absent field means
- * the harness's own default.
+ * The harness and the settings of a new thread. An absent field means the
+ * default of the harness.
  */
 export interface ThreadOptions {
-  /** The agent the thread runs. */
+  /** The harness of the thread. */
   harness: HarnessId;
-  /** Registry default when absent. */
+  /** The mode of the thread. Absent means the default from the registry. */
   modeId?: string;
-  /** The harness's `defaultConfig` when absent. */
+  /** The config option values, by option id. Absent means the `defaultConfig` of the harness. */
   config?: Record<string, string>;
 }
 
 /** Body of a request to add a thread to a box. */
 export interface CreateThreadBody {
   /**
-   * Fork this thread, carrying its context into the new one. Absent means a
-   * fresh, empty thread on the same workspace.
+   * The id of the thread to fork. The new thread gets its context. Absent
+   * means a new, empty thread on the same workspace.
    */
   from?: string;
   /**
-   * What the new thread runs. Ignored when `from` is set: a transcript can
-   * only be loaded by the adapter that wrote it, so a fork stays on its
-   * source's harness. Absent means Claude on its defaults.
+   * The options of the new thread. Ignored when `from` is set, because only
+   * the adapter that wrote a transcript can load it. So a fork keeps the
+   * harness of its source. Absent means Claude with its defaults.
    */
   options?: ThreadOptions;
 }
@@ -469,113 +467,107 @@ export interface CreateBoxBody {
   /** The name the user gives the box. */
   name: string;
   /**
-   * Ignored. Every box uses the deployment's one set of credentials. The field
-   * is accepted so that older clients still create a box rather than get a 400.
+   * Ignored. Every box gets the profile `DEFAULT`, because all boxes use the credentials of the deployment.
    */
   profile?: string;
   /**
-   * Id of the agent set whose AGENTS.md and skills are merged over
-   * the global ones for this box. Absent, empty or the global set's id means
-   * the global set alone, which every box gets.
+   * The id of the agent set whose AGENTS.md and skills are merged over the
+   * global ones for this box. Absent, empty or the id of the global set means
+   * the global set only.
    */
   agentSet?: string | null;
   /**
-   * What the box's first thread runs. Every box is created with one thread.
-   * Absent means Claude on its defaults.
+   * The options of the first thread of the box. The orchestrator creates each box with one thread. Absent means
+   * Claude with its defaults.
    */
   thread?: ThreadOptions;
 }
 
 /**
- * Which copy of one image the deployment is running, and when it was built.
+ * The build of one image that the deployment runs.
  *
- * The digest is the registry's manifest digest where there is one. An image
- * built on this host has never been in a registry, so its config digest
- * stands in.
+ * On Docker, the digest is the manifest digest of the registry, if there is one. An image built on this host was
+ * never in a registry, so it gets its config digest. On Kubernetes, the digest is the image id that the kubelet
+ * reports, and the other fields are null.
  */
 export interface ImageInfo {
-  /** `sha256:...`, of the manifest where there is one and of the config otherwise. */
+  /** The `sha256:...` digest of the image. */
   digest: string;
-  /** When the image was built, in epoch milliseconds, or null where it says nothing. */
+  /** The build time of the image, in epoch milliseconds, or null when the runtime does not report it. */
   builtAt: number | null;
   /**
-   * What the image takes on this host, in bytes, or null where it says
-   * nothing.
+   * The disk space of the image on this host, in bytes, or null when the
+   * runtime does not report it.
    *
-   * The daemon's figure: the uncompressed size of every layer, not the
-   * download. A layer shared with another image is counted here as well.
+   * Docker gives the uncompressed size of all layers, not the download
+   * size. A layer that another image shares is also counted here.
    */
   sizeBytes: number | null;
 }
 
-/**
- * The three images a deployment runs, each null where the daemon could not be
- * asked or has nothing under that name.
- */
+/** The images of a deployment. Each is null when the runtime cannot read the image. */
 export interface DeploymentImages {
-  /** The orchestrator's image. */
+  /** The image of the orchestrator. */
   orchestrator: ImageInfo | null;
-  /** The egress proxy's image. */
+  /** The image of the egress proxy. */
   proxy: ImageInfo | null;
-  /** The image boxes run. */
+  /** The image of the boxes. */
   box: ImageInfo | null;
 }
 
 /** Answer to a health probe. */
 export interface HealthResponse {
-  /** Always true: an answer at all means the orchestrator is up. */
+  /** Always true, because an answer means that the orchestrator is up. */
   ok: boolean;
-  /** The orchestrator's version. */
+  /** The version of the orchestrator. */
   version: string;
-  /** How many boxes exist that are not deleted. */
+  /** The number of boxes that are not deleted. */
   boxes: number;
   /** Box ids whose network isolation the repair loop could not complete. */
   isolationWarnings: string[];
-  /** Egress policy state, or null before the first push has been attempted. */
+  /** The egress policy state, or null before the first push attempt. */
   egress: EgressHealth | null;
   /**
-   * Every harness this deployment can run, and whether each has a credential
-   * that works. The threads of a harness that is not runnable fail at their
-   * first turn.
+   * The harnesses whose credential is in the credential set of the configuration, each with its credential state.
    */
   harnesses: HarnessHealth[];
-  /** Every stored credential, GitHub included. Never the secrets. */
+  /** All stored credentials, GitHub included, without their secrets. */
   credentials: CredentialSummary[];
-  /** How many browsers are registered for Web Push. */
+  /** The number of browsers that are registered for Web Push. */
   pushSubscriptions: number;
-  /** Which build of each of the deployment's own images is running. */
+  /** The build of each image of the deployment. */
   images: DeploymentImages;
 }
 
-/** How far a pull of an image has come. */
+/** The progress of an image pull. */
 export interface PullProgress {
   /** The image reference that is pulled. */
   image: string;
   /** The layers of the image. */
   layers: {
-    /** The layers that are downloaded. */
+    /** The number of downloaded layers. */
     downloaded: number;
-    /** The layers that are on the host now, unpacked. */
+    /** The number of layers that are unpacked on the host. */
     done: number;
-    /** The layers the daemon has named so far. */
+    /** The number of layers that the daemon has named so far. */
     total: number;
   };
   /**
-   * The bytes of the layers that are downloaded. The daemon gives the size of
-   * a layer only when its download starts, so the total can increase.
+   * The download progress of the layers in bytes. The daemon gives the size of
+   * a layer when its download starts, so the total can increase.
    */
   bytes: {
-    /** The bytes downloaded. */
+    /** The downloaded bytes. */
     current: number;
-    /** The bytes to download, as far as known. */
+    /** The bytes to download, as far as they are known. */
     total: number;
   };
   /**
-   * The layer that the daemon unpacks now, or null when it unpacks none. The
-   * daemon unpacks one layer at a time, in order.
+   * The progress of the layer that the daemon unpacks now, or null when it
+   * unpacks no layer. The daemon unpacks one layer at a time, in order.
    */
   unpacking: {
-    /** How far the unpacking has come, in the unit. */
+    /** The current value, in the unit. */
     current: number;
     /** The value at the end, or 0 when the daemon does not give it. */
     total: number;
@@ -584,7 +576,7 @@ export interface PullProgress {
   } | null;
 }
 
-/** What the orchestrator answers while it starts, and once it has started. */
+/** The answer of the orchestrator during its start and after it. */
 export interface BootResponse {
   /** True once the orchestrator serves the dashboard and the API. */
   ready: boolean;
@@ -593,66 +585,64 @@ export interface BootResponse {
 }
 
 /**
- * What the readiness probe answers, ready or not.
+ * The answer of the readiness probe.
  *
- * The status code carries the same answer, so a probe that reads nothing but
- * the code is served. This body is for a person looking at why.
+ * The status code gives the same answer, so a probe can read the code only.
+ * The body shows a person the reason.
  */
 export interface ReadyResponse {
-  /** True only when every check passed. */
+  /** True when all checks passed. */
   ready: boolean;
-  /** The orchestrator's version. */
+  /** The version of the orchestrator. */
   version: string;
-  /** Each thing a box needs before it can be served, and whether it is there. */
+  /** The checks that must pass before the orchestrator can serve a box. */
   checks: {
-    /** The database answered a query. */
+    /** True when the database answered a query. */
     database: boolean;
-    /** The proxy holds the egress policy this orchestrator composed. */
+    /** True when the proxy holds the egress policy that this orchestrator composed. */
     egress: boolean;
-    /** The runtime answered. */
+    /** True when the runtime answered. */
     runtime: boolean;
   };
 }
 
-/** The deployment's VAPID public key, which a browser subscribes with. */
+/** The VAPID public key of the deployment, which a browser uses to subscribe. */
 export interface PushKeyResponse {
-  /** Uncompressed P-256 point, base64url. Not a secret. */
+  /** An uncompressed P-256 point, as base64url. It is not a secret. */
   publicKey: string;
 }
 
 /**
- * Body of a push registration, shaped like the browser's own
- * PushSubscription.toJSON() so the page can pass it through unchanged.
+ * Body of a push registration. It has the shape of PushSubscription.toJSON()
+ * in the browser, so the page can send it unchanged.
  */
 export interface PushSubscribeBody {
-  /** The push service URL the browser was given. */
+  /** The push service URL that the browser got. */
   endpoint: string;
-  /** The browser's keys for encrypting messages to it. */
+  /** The keys that encrypt messages to the browser: the public key `p256dh` and the secret `auth`. */
   keys: { p256dh: string; auth: string };
-  /** What this browser calls itself, for the deployment's own reference. */
+  /** A name for the browser, for reference in the deployment. */
   label?: string;
 }
 
 /** Body of any 4xx or 5xx answer from the API. */
 export interface ApiError {
-  /** What went wrong. */
+  /** The description of the error. */
   error: string;
 }
 
 /** One file the user attached to a prompt, as the upload endpoint reports it back. */
 export interface StoredAttachment {
-  /** The stored file name. It is sanitised, and a collision gets a suffix. */
+  /** The stored file name. It is sanitised, and a name collision gets a suffix. */
   name: string;
   /**
-   * Path relative to the workspace, slash-separated. A client puts it in the
+   * The path relative to the workspace, with slashes. A client puts it in the
    * prompt, and the agent uses it in a tool call.
    */
   path: string;
   /** Size in bytes. */
   size: number;
 }
-
-// --- egress policy: the orchestrator -> proxy control channel ---------------
 
 /**
  * One credential the proxy swaps in on the wire.
@@ -664,54 +654,59 @@ export interface StoredAttachment {
  * `passthroughSchemes`.
  */
 export interface EgressCredential {
-  /** Stable identifier, used in logs and status. Never secret. */
+  /** A stable id for logs and status. It is not secret. */
   id: string;
   /**
-   * Hostnames whose TLS is intercepted so this credential can be swapped in.
-   * Same grammar as the allowlist: exact names and one-label wildcards.
+   * The hostnames for which the proxy intercepts TLS to swap in this
+   * credential. The grammar is the same as for the allowlist: exact names and
+   * wildcards for one label.
    */
   hosts: string[];
   /**
-   * Header names that may carry it, lowercased. A header in this list that
-   * holds another value refuses the request. Empty means any header may carry
-   * it, and no header value is refused.
+   * The lowercase names of the headers that can carry the credential. When a
+   * header in this list holds another value, the proxy refuses the request.
+   * Empty means that any header can carry it, and the proxy refuses no header
+   * value.
    */
   headers: string[];
   /**
-   * Authorization schemes, lowercased, whose values the host issues itself,
-   * such as a token it minted for one resource. A header value under one of
-   * these schemes passes unchanged instead of counting as a foreign
-   * credential. Absent means none.
+   * The lowercase authorization schemes whose values the host issues itself,
+   * such as a token for one resource. A header value with one of these
+   * schemes passes unchanged and does not count as a foreign credential.
+   * Absent means none.
    */
   passthroughSchemes?: string[];
-  /** What the box holds. Shaped like the real thing, worth nothing. */
+  /** The value in the box. It has the format of the real credential but gives no access. */
   placeholder: string;
   /** The real credential. */
   secret: string;
 }
 
 /**
- * The proxy's entire configuration. The proxy holds it in memory only, and
- * has none of it until the orchestrator pushes.
+ * The full configuration of the proxy. The proxy keeps it in memory only, and
+ * has no configuration until the orchestrator pushes it.
  */
 export interface EgressPolicy {
-  /** Hostnames a box may reach. Empty means every public host. */
+  /**
+   * The hostname patterns that an agent can reach through the proxy. The proxy also allows the hosts of each
+   * credential. Empty means every public host.
+   */
   allowedHosts: string[];
-  /** CA the proxy mints interception leaf certificates from, or null. */
+  /** The `key` and the `cert` of the CA from which the proxy makes leaf certificates for interception, or null. */
   ca: { key: string; cert: string } | null;
-  /** Credentials to translate. Empty means nothing is intercepted. */
+  /** The credentials that the proxy swaps in. Empty means that the proxy intercepts nothing. */
   credentials: EgressCredential[];
 }
 
-/** What the proxy reports back on the control channel. Carries no secret. */
+/** The status that the proxy reports on the control channel. It holds no secret. */
 export interface EgressStatus {
-  /** False until a policy has been pushed. */
+  /** False before the first policy push. */
   applied: boolean;
-  /** Fingerprint of the applied policy. */
+  /** The fingerprint of the applied policy. */
   policyHash: string;
-  /** Number of entries in the applied allowlist; 0 means the allowlist is off. */
+  /** The number of entries in the applied allowlist. 0 means that the allowlist is off. */
   allowedHostCount: number;
-  /** Ids of the credentials being translated. */
+  /** The ids of the credentials that the proxy swaps in. */
   credentialIds: string[];
   /** Denials since the proxy booted, counted by category. */
   denials: Record<string, number>;
@@ -725,15 +720,13 @@ export interface EgressHealth {
   inSync: boolean;
   /** True when an allowlist is configured. */
   allowlistActive: boolean;
-  /** Credentials being translated, by id. Never the values. */
+  /** The ids of the credentials that the proxy swaps in, without the values. */
   credentialIds: string[];
   /** Denials the proxy has counted since it booted, by category. */
   denials: Record<string, number>;
-  /** Why the last push or status read failed, or null. */
+  /** The reason for the failure of the last push, or null. */
   error: string | null;
 }
-
-// --- code review over a box's workspace ---------------------------------
 
 /** The git status of a file, as the review tree colours it. */
 export type ReviewFileStatus =
@@ -744,62 +737,61 @@ export type ReviewFileStatus =
   | 'deleted'
   | 'conflict';
 
-/** What happened to a line of a file, relative to the base revision. */
+/** The change to a line of a file, relative to the base revision. */
 export type ReviewLineChange = 'added' | 'modified';
 
 /**
- * One repository the workspace holds. A review covers the whole workspace,
- * which may hold several.
+ * One repository in the workspace. A review covers the whole workspace,
+ * which can hold more than one repository.
  */
 export interface ReviewRepo {
   /**
-   * Where it sits relative to the workspace, slash-separated. Empty when the
-   * workspace is itself the repository.
+   * The path of the repository relative to the workspace, with slashes. Empty
+   * when the workspace is the repository.
    */
   path: string;
-  /** What to call it: its own directory name. */
+  /** The directory name of the repository. */
   name: string;
-  /** The commit its HEAD names, or '' before its first commit. */
+  /** The commit of HEAD, or '' before the first commit. */
   head: string;
   /**
-   * What the review's base revision resolved to here, or '' when there is no
-   * base or the revision names nothing in this repository. The working tree
-   * is then compared against its own HEAD.
+   * The commit of the base revision of the review in this repository, or ''
+   * when there is no base or the revision names nothing in this repository.
+   * With '', the review compares the working tree against HEAD.
    */
   baseCommit: string;
 }
 
 /**
- * The revision a review is compared against: one expression for the whole
- * workspace, resolved independently in each repository. `main` means
- * main-in-each, through the merge base with that repository's own HEAD.
+ * The revision that a review compares against. It is one expression for the whole workspace. The orchestrator
+ * resolves it in each repository to the merge base of the revision and HEAD, or to the revision itself when the
+ * two have no common ancestor.
  *
- * Empty compares each repository against its own HEAD, which is the default.
- * Where it landed is on {@link ReviewRepo.baseCommit}.
+ * An empty revision compares each repository against its own HEAD, which is
+ * the default. {@link ReviewRepo.baseCommit} holds the resolved commit.
  */
 export interface ReviewBase {
-  /** What the user asked for: a branch, a tag, a short id. */
+  /** The revision that the user entered, such as a branch, a tag or a short commit id. */
   rev: string;
 }
 
 /**
- * One entry of a review directory: a file, or a folder of them.
+ * One entry of a review directory: a file or a folder.
  *
- * A file carries its own git status and its own comment count. A folder
- * carries what its whole subtree holds, so a closed one still says there is
- * something inside it to look at. The optional fields are absent rather than
- * empty, because a directory of a thousand files goes to a phone.
+ * A folder shows the state of its whole subtree, so a closed folder still
+ * shows that it holds something to look at. The optional fields are absent
+ * instead of empty, because a phone can get a directory of a thousand files.
  */
 export interface ReviewDirEntry {
-  /** The entry's own name inside its directory. */
+  /** The name of the entry in its directory. */
   name: string;
-  /** Path relative to the workspace, slash-separated. */
+  /** The path relative to the workspace, with slashes. */
   path: string;
   /** True for a folder. */
   isDir: boolean;
   /** A file's git status. Absent when it has none, and on a folder. */
   status?: ReviewFileStatus;
-  /** How many comments a file has. Absent when it has none, and on a folder. */
+  /** The number of comments on a file. Absent when it has none, and on a folder. */
   comments?: number;
   /** True on a folder whose subtree holds a changed file. Absent elsewhere. */
   changed?: boolean;
@@ -810,14 +802,13 @@ export interface ReviewDirEntry {
 }
 
 /**
- * What a review is, apart from the files: which repositories the workspace
- * holds, what they are compared against, and whether there is a review at all.
+ * The facts of a review that do not depend on one file.
  *
- * Every directory answer carries them, so the first screen is one request and
- * the header never waits on a second.
+ * Each directory answer includes them, so the first screen needs one request
+ * and the header does not wait for a second request.
  */
 export interface ReviewFacts {
-  /** Every repository the workspace holds, sorted by path. */
+  /** All repositories in the workspace, sorted by path. */
   repos: ReviewRepo[];
   /** False when the workspace holds no repository at all. */
   hasGit: boolean;
@@ -825,9 +816,9 @@ export interface ReviewFacts {
   base: ReviewBase;
   /** True when the workspace holds a REVIEW.md. */
   hasReview: boolean;
-  /** The date the review was started, or '' when there is no review yet. */
+  /** The date the review was started, or '' when there is no REVIEW.md or it records no date. */
   started: string;
-  /** How many comments the whole review holds, over every file. */
+  /** The number of comments in the whole review, over all files. */
   commentCount: number;
 }
 
@@ -835,9 +826,9 @@ export interface ReviewFacts {
 export interface ReviewDirResponse extends ReviewFacts {
   /** The directory listed, relative to the workspace. Empty for the root. */
   path: string;
-  /** Its children: folders first, then files, each in name order. */
+  /** The children: folders first, then files, each in name order. */
   entries: ReviewDirEntry[];
-  /** True when this directory hit the entry cap and the rest were left out. */
+  /** True when the directory has more entries than the cap, and the list does not include the rest. */
   truncated: boolean;
 }
 
@@ -845,9 +836,9 @@ export interface ReviewDirResponse extends ReviewFacts {
 export interface ReviewAnnotation {
   /** The line the comment is on, counted from 1. */
   line: number;
-  /** The comment's text. */
+  /** The text of the comment. */
   comment: string;
-  /** True when the code the comment was written against is gone. */
+  /** True when the code that the comment was written for is gone. */
   outdated: boolean;
 }
 
@@ -857,112 +848,111 @@ export interface ReviewDiffHunk {
   startLine: number;
   /** Last line of the current file the hunk covers. */
   endLine: number;
-  /** The hunk's raw diff text, which is what the hunk sheet shows. */
+  /** The raw diff text of the hunk, which the hunk sheet shows. */
   diff: string;
 }
 
 /**
- * A block of lines deleted between two lines of the current file. How many is
- * not recorded: the hunk it points at shows them.
+ * A block of deleted lines between two lines of the current file. The hunk
+ * that it points to shows the deleted lines.
  */
 export interface ReviewDiffDeletion {
-  /** The deletion sits after this line; 0 means the top of the file. */
+  /** The deletion is after this line. 0 means the top of the file. */
   afterLine: number;
-  /** Index into a response's `hunks`. */
+  /** The index into the `hunks` of the response. */
   hunkIndex: number;
 }
 
 /** The diff markers a file view draws in its gutter. */
 export interface ReviewFileDiff {
-  /** Changed lines, keyed by line number as a string, since JSON has no int keys. */
+  /** The changed lines, keyed by line number as a string, because JSON keys are strings. */
   lines: Record<string, ReviewLineChange>;
-  /** The file's diff hunks. */
+  /** The diff hunks of the file. */
   hunks: ReviewDiffHunk[];
-  /** Where lines were deleted. */
+  /** The places of the deleted lines. */
   deletions: ReviewDiffDeletion[];
 }
 
 /** The whole file view in one response. */
 export interface ReviewFileResponse {
-  /** The file's path, relative to the workspace. */
+  /** The path of the file, relative to the workspace. */
   path: string;
   /**
-   * The path of the repository this file belongs to, or null when no
-   * repository claims it — in which case it has no status and no diff.
+   * The path of the repository of this file, or null when the file is in no
+   * repository. A file without a repository has no status and no diff.
    */
   repo: string | null;
-  /** Plain text; the browser tokenizes it. */
+  /** The content as plain text. The browser tokenizes it. */
   content: string;
   /**
-   * A hash of the file as it was read, which a save sends back so a write
-   * over an agent's edit is refused rather than made. Empty for a file that
-   * is not there.
+   * A hash of the file at the time of the read. A save sends it back, so that
+   * a write over an edit of the agent fails. Empty when the file does not
+   * exist.
    */
   hash: string;
-  /** True when the file was longer than the cap and the rest was dropped. */
+  /** True when the file is longer than the cap, and the content does not include the rest. */
   truncated: boolean;
-  /** True when the file holds a NUL byte, in which case content is empty. */
+  /** True when the file holds a NUL byte. The content is then empty. */
   binary: boolean;
   /**
    * True when the change under review deleted the file. The tree still lists
-   * it, and there is nothing on disk to show.
+   * it, but the file is not on disk.
    */
   deleted: boolean;
-  /** The file's real size in bytes, whatever was returned. */
+  /** The real size of the file in bytes, independent of the returned content. */
   size: number;
-  /** Lines in what was returned. */
+  /** The number of lines in the returned content. */
   lines: number;
-  /** Language guess for the highlighter, or '' when there is none. */
+  /** The guessed language for the highlighter, or '' when there is none. */
   language: string;
-  /** This file's git status, or null when it has none. */
+  /** The git status of the file, or null when it has none. */
   status: ReviewFileStatus | null;
   /** The diff markers for the gutter. */
   diff: ReviewFileDiff;
-  /** The file's comments. */
+  /** The comments on the file. */
   annotations: ReviewAnnotation[];
 }
 
-/** A file's comments, as the mutation endpoints answer with. */
+/** The comments on a file, as the mutation endpoints return them. */
 export interface ReviewAnnotationsResponse {
-  /** The file's path, relative to the workspace. */
+  /** The path of the file, relative to the workspace. */
   path: string;
-  /** Every comment the file now has. */
+  /** All comments on the file after the change. */
   annotations: ReviewAnnotation[];
 }
 
 /** Body of a create-or-update annotation request. */
 export interface ReviewAnnotationBody {
-  /** The file's path, relative to the workspace. */
+  /** The path of the file, relative to the workspace. */
   path: string;
   /** The line to comment on. */
   line: number;
-  /** The comment's text. */
+  /** The text of the comment. */
   comment: string;
 }
 
 /** Body of a save-file request. */
 export interface ReviewFileBody {
-  /** The file's path, relative to the workspace. */
+  /** The path of the file, relative to the workspace. */
   path: string;
-  /** The file's new content. */
+  /** The new content of the file. */
   content: string;
   /**
-   * The hash the browser last read. The save is refused when the file on disk
-   * no longer matches it.
+   * The hash that the browser last read. The save fails when the file on disk
+   * does not match it.
    */
   hash: string;
 }
 
 /** Body of a set-base request. */
 export interface ReviewBaseBody {
-  /** The revision to compare against. Null clears the base back to HEAD. */
+  /** The revision to compare against. Null clears the base, so that the review compares against HEAD. */
   rev: string | null;
 }
 
 /**
- * What setting a base answers with: the expression, and where it landed in
- * each repository. A revision can resolve in one repository and name nothing
- * in another.
+ * The answer to a set-base request. A revision can resolve in one repository
+ * and name nothing in another.
  */
 export interface ReviewBaseResponse {
   /** The expression as stored, or '' when the base was cleared. */
@@ -971,31 +961,29 @@ export interface ReviewBaseResponse {
   repos: ReviewRepo[];
 }
 
-// --- agent configuration ----------------------------------------------------
-
 /**
- * The id of the one set that is applied to every box. The migration that
- * creates the table seeds it.
+ * The id of the agent set that every box gets. The migration that creates the
+ * table adds this set.
  */
 export const GLOBAL_AGENT_SET = 'global';
 
 /** One skill of an agent set, as stored and as the API reports it. */
 export interface AgentItem {
   /**
-   * The skill's directory (`skills/<name>/SKILL.md`), which is also what
-   * invokes it as `/<name>`. Lowercase, digits and dashes, so it is a safe
-   * path component.
+   * The directory name of the skill, as in `skills/<name>/SKILL.md`. The
+   * skill is invoked as `/<name>`. The name holds only lowercase letters,
+   * digits and dashes, so it is safe as a path component.
    */
   name: string;
-  /** The whole SKILL.md. */
+  /** The full SKILL.md. */
   content: string;
-  /** When the item was last written, in epoch milliseconds. */
+  /** The time the skill was last written, in epoch milliseconds. */
   updatedAt: number;
 }
 
 /** An agent set as the list endpoint reports it, without the content. */
 export interface AgentSetSummary {
-  /** The set's id. */
+  /** The id of the set. */
   id: string;
   /** The name the user gave the set. */
   name: string;
@@ -1003,57 +991,57 @@ export interface AgentSetSummary {
   global: boolean;
   /** True when this set contributes an AGENTS.md of its own. */
   hasAgentsMd: boolean;
-  /** How many skills the set holds, not counting those of its repositories. */
+  /** The number of skills in the set, without the skills of its repositories. */
   skillCount: number;
-  /** How many repositories the set takes skills from. */
+  /** The number of repositories that the set takes skills from. */
   repoCount: number;
-  /** How many live boxes were created with this set selected. */
+  /** The number of live boxes that were created with this set. */
   boxCount: number;
-  /** When the set was created, in epoch milliseconds. */
+  /** The creation time of the set, in epoch milliseconds. */
   createdAt: number;
-  /** When the set or one of its items last changed, in epoch milliseconds. */
+  /** The time of the last change to the set or one of its items, in epoch milliseconds. */
   updatedAt: number;
 }
 
-/** An agent set with everything in it, which is what the editor loads. */
+/** An agent set with all of its content, as the editor loads it. */
 export interface AgentSetDetail extends AgentSetSummary {
-  /** This set's own AGENTS.md, or '' when it contributes none. */
+  /** The AGENTS.md of the set, or '' when it has none. */
   agentsMd: string;
-  /** Its skills, by name. */
+  /** The skills of the set, by name. */
   items: AgentItem[];
-  /** The repositories it takes more skills from, in the order they were added. */
+  /** The repositories that the set takes more skills from, in the order they were added. */
   repos: AgentRepo[];
 }
 
 /** A git repository an agent set takes skills from. */
 export interface AgentRepo {
-  /** The repository's id within the deployment. */
+  /** The id of the repository in the deployment. */
   id: string;
-  /** The HTTPS URL it is fetched from. */
+  /** The HTTPS URL of the repository. */
   url: string;
-  /** The branch, tag or commit it is fetched at, or '' for the default branch. */
+  /** The branch, tag or commit to fetch, or '' for the default branch. */
   ref: string;
   /** The commit the skills come from, or null before the first good pull. */
   commit: string | null;
   /** Names of the skills found in that commit. */
   skills: string[];
-  /** When the last pull ran, good or failed, in epoch milliseconds, or null. */
+  /** The time of the last pull, with or without success, in epoch milliseconds, or null before the first pull. */
   pulledAt: number | null;
-  /** Why the last pull failed, or null when it did not. */
+  /** The reason for the failure of the last pull, or null when the last pull worked. */
   error: string | null;
 }
 
 /** Body of a create-set request. */
 export interface CreateAgentSetBody {
-  /** The new set's name. */
+  /** The name of the new set. */
   name: string;
 }
 
-/** Body of a set update. An absent field is left as it stands. */
+/** Body of a set update. An absent field stays unchanged. */
 export interface UpdateAgentSetBody {
-  /** The set's new name. */
+  /** The new name of the set. */
   name?: string;
-  /** The set's new AGENTS.md. */
+  /** The new AGENTS.md of the set. */
   agentsMd?: string;
 }
 
@@ -1065,116 +1053,117 @@ export interface AgentRepoBody {
   ref?: string;
 }
 
-/** Body of a skill write. Creates the skill, or replaces it under its name. */
+/** Body of a skill write. The write creates the skill, or replaces the skill with the same name. */
 export interface AgentItemBody {
-  /** The skill's name. */
+  /** The name of the skill. */
   name: string;
-  /** The skill's whole SKILL.md. */
+  /** The full SKILL.md of the skill. */
   content: string;
 }
 
 /**
- * What one box's merged configuration comes to: the global set, with the
- * selected set laid over it.
+ * The merged agent configuration of one box: the global set, with the
+ * selected set merged over it.
  */
 export interface AgentBundlePreview {
-  /** The global AGENTS.md and the set's, joined by a blank line. */
+  /** The global AGENTS.md and the AGENTS.md of the set, each trimmed, joined by a blank line. */
   agentsMd: string;
-  /** Every skill the box gets, after the overrides, by name. */
+  /** All skills of the box after the overrides, by name. */
   skills: AgentBundleSkill[];
-  /** Names of the skills the selected set took over from the global one. */
+  /**
+   * The names of the skills of the selected set, its repositories included, that replace skills of the global
+   * set.
+   */
   overrides: string[];
 }
 
 /** One skill of a merged configuration. */
 export interface AgentBundleSkill {
-  /** The skill's name. */
+  /** The name of the skill. */
   name: string;
-  /** The URL of the repository the skill comes from, or null for a skill of a set. */
+  /** The URL of the repository of the skill, or null for a skill of a set. */
   repo: string | null;
 }
 
-// --- the gateway's own ACP extensions ---------------------------------------
-
 /**
- * Method of the notification the gateway sends a browser about the state of
- * the thread it watches.
+ * The method of the notification that tells a browser the state of the thread that it watches.
  *
- * In ACP, a client learns that a turn is running by awaiting its own prompt.
- * A browser that reconnects never sent that prompt. The gateway sends this
- * after the replay and again on every change. The underscore is ACP's
- * extension prefix, so a client that does not know the method ignores it.
+ * In ACP, a client knows that a turn runs while its own prompt is open. A
+ * browser that reconnects did not send the prompt. The gateway sends the
+ * notification after the replay and again at each change. The underscore is
+ * the ACP prefix for extensions, so a client that does not know the method
+ * ignores it.
  */
 export const TURN_STATE_METHOD = '_boxes/turn_state';
 
 /**
- * Params of a `_boxes/turn_state` notification: what a thread is doing, as far
- * as a browser cannot work it out itself.
+ * Params of a `_boxes/turn_state` notification: the state of a thread that a
+ * browser cannot find out itself.
  */
 export interface TurnStateParams {
-  /** The adapter's own id for the thread, as every ACP message names it. */
+  /** The id of the thread in the adapter, as all ACP messages name it. */
   sessionId: string;
   /**
-   * True while a prompt the gateway forwarded is still open on that thread.
+   * True while a prompt that the gateway forwarded is open on the thread.
    *
-   * The adapter holds a prompt open until the background subagents its turn
-   * spawned settle, so this stays true after the agent has gone quiet.
+   * An adapter can keep a prompt open until the background subagents of the
+   * turn finish, so the value can stay true after the agent stops its output.
    */
   active: boolean;
-  /** True while the agent is producing output on that thread, now. */
+  /** True while the agent produces output on the thread. */
   speaking: boolean;
-  /** What this conversation has left running in the box. */
+  /** The work that this conversation left running in the box. */
   background: BackgroundProcess[];
 }
 
 /**
- * Method of the notification the gateway sends a browser when it opens a
- * thread. It says whether the updates that follow start at the browser's
- * resume point.
+ * The method of the notification that the gateway sends a browser when it
+ * opens a thread. The notification tells if the updates that follow start at
+ * the resume point of the browser.
  *
- * It arrives before the first update. A browser that gets the whole thread
- * then drops what it holds, and a browser that gets only the tail keeps it.
- * The underscore is ACP's extension prefix, so a client that does not know
- * the method ignores it.
+ * It arrives before the first update. A browser that gets the whole thread drops the messages that it holds. A
+ * browser that gets the tail keeps the messages before the resume point. The underscore is the ACP prefix for
+ * extensions, so a client that does not know the method ignores it.
  */
 export const REPLAY_METHOD = '_boxes/replay';
 
 /** Params of a `_boxes/replay` notification. */
 export interface ReplayParams {
-  /** The adapter's own id for the thread being opened. */
+  /** The id in the adapter of the thread that the gateway opens. */
   sessionId: string;
   /**
-   * True when what follows starts at the browser's resume point. False when
-   * it is the whole thread, which is the answer whenever the point was not
-   * asked for or the gateway no longer holds the message it names.
+   * True when the updates that follow start at the resume point of the
+   * browser. False when they are the whole thread. The gateway sends the whole
+   * thread when the browser gave no resume point, or when the gateway does not
+   * hold the message of the resume point.
    */
   resumed: boolean;
   /**
-   * True when the gateway no longer holds the start of the thread, so what it
-   * sends lacks the oldest messages. A browser can ask for the full history
-   * with {@link LoadMeta.full}.
+   * True when the gateway does not hold the start of the thread, so the
+   * updates do not include the oldest messages. A browser can ask for the full
+   * history with {@link LoadMeta.full}.
    */
   truncated: boolean;
 }
 
 /**
- * The `_meta` key a browser puts its own `session/load` options under. The
- * adapter reads only its own key in `_meta`, so neither side has to strip
- * this one.
+ * The `_meta` key that holds the `session/load` options of a browser. The gateway reads the options when it
+ * answers the load itself.
  */
 export const BOXES_META = 'boxes';
 
-/** What a browser may ask of a `session/load`, under `_meta.boxes`. */
+/** The `session/load` options of a browser, under `_meta.boxes`. */
 export interface LoadMeta {
   /**
-   * The adapter's id for the last message the browser holds. The gateway
-   * sends the thread from that message onward; absent, it sends the thread
-   * whole.
+   * The adapter id of the last message that the browser holds. The gateway
+   * sends the thread from that message on. When absent, the gateway sends the
+   * whole thread.
    */
   resumeFrom?: string;
   /**
-   * True to ask for the full history of the thread, which the adapter
-   * replays again. The gateway refuses this while the thread works.
+   * True to ask for the full history of the thread, which the adapter replays again. The gateway refuses the
+   * request while a prompt is open, the agent produces output or a background task runs. It also refuses it for a
+   * fork that has no prompt of its own yet.
    */
   full?: boolean;
 }

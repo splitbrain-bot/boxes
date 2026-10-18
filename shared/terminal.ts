@@ -4,20 +4,18 @@
  */
 
 /**
- * The WebSocket subprotocol the terminal endpoint negotiates.
+ * The WebSocket subprotocol that the terminal endpoint selects.
  *
- * A browser offers this alongside a bearer.<token> entry, which is
- * credentials rather than a protocol, so this is the one the server selects.
- * The ACP gateway negotiates a different name, so neither endpoint answers a
- * client holding the other's handshake.
+ * A browser also offers a `bearer.<token>` entry, which holds the credential and is not a protocol.
+ * The ACP gateway uses a different name, so a client cannot open one endpoint with the handshake of the other.
  */
 export const TERMINAL_SUBPROTOCOL = 'boxes-terminal.v1';
 
 /**
- * What the browser says about the size of its window onto the shell.
+ * The size of the terminal in the browser.
  *
- * The pty needs this to wrap lines and to place a full-screen program, and
- * only the browser knows it. Sent once on connect and again on every resize.
+ * The pty needs the size to wrap lines and to place a full-screen program.
+ * The browser sends it once when it connects and again at each resize.
  */
 export interface TerminalResize {
   /** Message type. */
@@ -28,23 +26,25 @@ export interface TerminalResize {
   rows: number;
 }
 
-/** Every control message the browser may send. */
+/** A control message that the browser can send. */
 export type TerminalControl = TerminalResize;
 
 /**
- * The widest window the server passes on, in cells. A wider one is clamped.
+ * The maximum terminal width in cells. {@link parseTerminalControl} clamps a larger width.
  *
- * A pty size is two 16-bit numbers, so without this ceiling a browser
- * reporting nonsense would pass it on to the Docker daemon.
+ * A pty size is two 16-bit numbers. The limit stops a browser from sending an invalid size to the runtime.
  */
 export const MAX_TERMINAL_COLS = 500;
 
-/** The tallest window the server passes on, in cells. A taller one is clamped. */
+/** The maximum terminal height in cells. {@link parseTerminalControl} clamps a larger height. */
 export const MAX_TERMINAL_ROWS = 300;
 
 /**
- * One control message, or null when the frame is not one. Sizes are clamped
- * to between 1 and {@link MAX_TERMINAL_COLS} or {@link MAX_TERMINAL_ROWS}.
+ * Parses one control message. The function clamps each size to between 1 and
+ * {@link MAX_TERMINAL_COLS} or {@link MAX_TERMINAL_ROWS}.
+ *
+ * @param text The text of one WebSocket frame.
+ * @returns The control message, or null when the frame is not a control message.
  */
 export function parseTerminalControl(text: string): TerminalControl | null {
   let parsed: unknown;
