@@ -8,7 +8,7 @@ export default defineConfig({
   ssr: { noExternal: true },
   build: {
     ssr: 'src/main.ts',
-    target: 'node22',
+    target: 'node26',
     outDir: 'dist',
     emptyOutDir: true,
     minify: false,

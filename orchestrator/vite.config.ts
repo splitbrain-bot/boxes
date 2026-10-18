@@ -11,7 +11,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   build: {
     ssr: 'src/index.ts',
-    target: 'node22',
+    target: 'node26',
     outDir: 'dist',
     emptyOutDir: true,
     minify: false,
