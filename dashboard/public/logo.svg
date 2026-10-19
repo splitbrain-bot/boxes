@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>Boxes</title>
+  <rect width="512" height="512" rx="102" fill="#18181b"/>
+  <path fill="#fafafa" fill-rule="evenodd" d="M147 115h218a32 32 0 0 1 32 32v218a32 32 0 0 1-32 32H147a32 32 0 0 1-32-32V147a32 32 0 0 1 32-32Zm40 48a24 24 0 0 0-24 24v138a24 24 0 0 0 24 24h138a24 24 0 0 0 24-24V187a24 24 0 0 0-24-24Z"/>
+</svg>
