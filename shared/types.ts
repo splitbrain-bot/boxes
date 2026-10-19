@@ -521,6 +521,11 @@ export interface HealthResponse {
   ok: boolean;
   /** The version of the orchestrator. */
   version: string;
+  /**
+   * The username of the request, or null in single user mode and for a request
+   * without a username.
+   */
+  user: string | null;
   /** The number of boxes that are not deleted. */
   boxes: number;
   /** Box ids whose network isolation the repair loop could not complete. */
@@ -962,8 +967,8 @@ export interface ReviewBaseResponse {
 }
 
 /**
- * The id of the agent set that every box gets. The migration that creates the
- * table adds this set.
+ * The name for the global agent set in a request that creates a box. Such a
+ * request is the same as a request without an agent set.
  */
 export const GLOBAL_AGENT_SET = 'global';
 
@@ -987,7 +992,7 @@ export interface AgentSetSummary {
   id: string;
   /** The name the user gave the set. */
   name: string;
-  /** True for the one set every box gets. It cannot be deleted. */
+  /** True for the one set that every box of its owner gets. It cannot be deleted. */
   global: boolean;
   /** True when this set contributes an AGENTS.md of its own. */
   hasAgentsMd: boolean;

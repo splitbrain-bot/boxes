@@ -70,7 +70,7 @@ async function deployment(
   dbs.push(db);
   const credentials = new CredentialStore(db, () => {}, cfg.credentialSet);
   for (const [id, secret] of Object.entries(secrets)) {
-    credentials.put(id as CredentialId, methods[id as CredentialId] ?? 'token', secret);
+    credentials.put('', id as CredentialId, methods[id as CredentialId] ?? 'token', secret);
   }
   const egress = new EgressManager(cfg, credentials, new ApiKeyStore(db, () => {}), db);
   await egress.prepare();
@@ -92,12 +92,12 @@ async function envFor(
 ): Promise<Record<string, string>> {
   const { cfg, egress } = await deployment(secrets, over, methods);
   return boxEnv({
-    placeholderFor: (id) => egress.placeholderFor(id),
-    methodFor: (id) => egress.methodFor(id),
+    placeholderFor: (id) => egress.placeholderFor('', id),
+    methodFor: (id) => egress.methodFor('', id),
     gitlabHost: cfg.GITLAB_HOST,
     proxyUrl: new DockerRuntime(cfg).proxyUrl(),
     hasCa: egress.caCertificate() !== '',
-    apiKeys: egress.apiKeyEnv(),
+    apiKeys: egress.apiKeyEnv(''),
   });
 }
 

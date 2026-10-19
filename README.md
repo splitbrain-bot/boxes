@@ -38,33 +38,34 @@ work on the same checkout.
 
 ### Install and configure
 
-- [Quickstart](doc/quickstart.md) — Deploy with Docker Compose, put a reverse proxy in front, and do the first steps
+- [Quickstart](doc/quickstart.md): Deploy with Docker Compose, put a reverse proxy in front, and do the first steps
   in the dashboard
-- [Docker Compose setup](doc/compose.md) — The services, the volume and the Docker socket
-- [Kubernetes setup](doc/kubernetes.md) — Run Boxes in a Kubernetes cluster in place of Docker Compose
-- [Environment variables](doc/environment.md) — Every variable the orchestrator reads, and its default
-- [Credentials](doc/credentials.md) — The credentials Boxes uses, how to enter them, and their path into a box
-- [Custom box images](doc/custom-images.md) — Build a box image from the base image, with the tools of a project
+- [Docker Compose setup](doc/compose.md): The services, the volume and the Docker socket
+- [Kubernetes setup](doc/kubernetes.md): Run Boxes in a Kubernetes cluster in place of Docker Compose
+- [Environment variables](doc/environment.md): Every variable the orchestrator reads, and its default
+- [Credentials](doc/credentials.md): The credentials Boxes uses, how to enter them, and their path into a box
+- [Users](doc/users.md): Multiple users on one deployment, with a username passed from the reverse proxy
+- [Custom box images](doc/custom-images.md): Build a box image from the base image, with the tools of a project
 
 ### Use Boxes
 
-- [Boxes](doc/boxes.md) — Create, suspend and delete a box, and what is in one
-- [Box status](doc/status.md) — The status badges in the box list and the box details
-- [Threads](doc/threads.md) — Start, fork and end a conversation with an agent
-- [Code review](doc/review.md) — Inspect, comment on and edit the files of a workspace
-- [Terminal](doc/terminal.md) — An interactive shell in a box
-- [Agent sets](doc/agent-sets.md) — Give the agents instructions and skills
-- [Built-in skills](doc/skills.md) — The skills the box image carries, and how to replace one
-- [Push notifications](doc/notifications.md) — Let the browser tell you when a thread needs you
-- [Glossary](doc/glossary.md) — The terms the documentation uses
+- [Boxes](doc/boxes.md): Create, suspend and delete a box, and what is in one
+- [Box status](doc/status.md): The status badges in the box list and the box details
+- [Threads](doc/threads.md): Start, fork and end a conversation with an agent
+- [Code review](doc/review.md): Inspect, comment on and edit the files of a workspace
+- [Terminal](doc/terminal.md): An interactive shell in a box
+- [Agent sets](doc/agent-sets.md): Give the agents instructions and skills
+- [Built-in skills](doc/skills.md): The skills the box image carries, and how to replace one
+- [Push notifications](doc/notifications.md): Let the browser tell you when a thread needs you
+- [Glossary](doc/glossary.md): The terms the documentation uses
 
 ### Internals
 
-- [Orchestrator](doc/orchestrator.md) — The service that serves the dashboard and drives Docker
-- [Agent communication](doc/acp.md) — The way the dashboard, the orchestrator and an agent speak ACP
-- [Runtime](doc/runtime.md) — The layer through which the orchestrator runs, stores and isolates the boxes
-- [Egress proxy](doc/egress.md) — Host filtering and credential injection
-- [Storage](doc/storage.md) — The contents of the data volume, and the files a box keeps
-- [File service](doc/files.md) — The process in a box through which the orchestrator reads and writes its files
-- [REST API](doc/rests.md) — The HTTP API under `/api` used by the dashboard
-- [Development](doc/development.md) — Repository layout, technologies and tests
+- [Orchestrator](doc/orchestrator.md): The service that serves the dashboard and drives Docker
+- [Agent communication](doc/acp.md): The way the dashboard, the orchestrator and an agent speak ACP
+- [Runtime](doc/runtime.md): The layer through which the orchestrator runs, stores and isolates the boxes
+- [Egress proxy](doc/egress.md): Host filtering and credential injection
+- [Storage](doc/storage.md): The contents of the data volume, and the files a box keeps
+- [File service](doc/files.md): The process in a box through which the orchestrator reads and writes its files
+- [REST API](doc/rests.md): The HTTP API under `/api` used by the dashboard
+- [Development](doc/development.md): Repository layout, technologies and tests

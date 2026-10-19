@@ -36,7 +36,7 @@ window when one exists, and in a new window otherwise.
 2. Click **Notify me** in the header of the box list. The browser asks for the notification permission.
 3. Grant the permission. The dashboard registers this browser with the orchestrator.
 
-One subscription covers every box and thread of the deployment. Click the same toggle (now labelled **Notifying**) to
+One subscription covers every box and thread in the box list. Click the same toggle (now labelled **Notifying**) to
 unsubscribe this browser again.
 
 Special cases the toggle reports instead of subscribing:
@@ -61,7 +61,9 @@ The dashboard serves a service worker at `/sw.js` and registers it on every page
 with `userVisibleOnly: true` and the deployment's VAPID public key from `GET /api/push/key`, then posts the resulting
 endpoint and keys to `POST /api/push/subscribe`. The orchestrator validates the endpoint — https, a hostname, not an
 address literal or localhost — and stores one row per endpoint in its [database](storage.md). `DELETE
-/api/push/subscribe` forgets one. Subscriptions belong to the deployment, not to a user: Boxes has no accounts.
+/api/push/subscribe` forgets one. A subscription belongs to the user who made it, and an event about a box goes to the
+browsers of the owner of the box. In single user mode, each event goes to the browsers of the empty user. See
+[Users](users.md).
 
 ### Receiving
 

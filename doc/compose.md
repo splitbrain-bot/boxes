@@ -35,7 +35,8 @@ no authentication of its own and controls the host Docker daemon.
 
 To provide access from outside the host, put an authenticated reverse proxy in front of Boxes. The reverse proxy must
 forward WebSocket upgrades for `/ws`. A reverse proxy on the host can connect through the loopback address. A proxy
-running in a container can join `boxes_default` and connect to `orchestrator:3000`.
+running in a container can join `boxes_default` and connect to `orchestrator:3000`. In multi-user mode, the reverse
+proxy must send the username in a header. See [Users](users.md).
 
 ## Persistent data
 

@@ -1,6 +1,6 @@
 /**
- * The skills of the orchestrator. Each one describes a feature of the
- * deployment, so a box gets it only while the deployment has that feature.
+ * The skills of the orchestrator. Each one describes a feature that a box can
+ * use, so a box gets it only while that feature is available to it.
  */
 
 /// <reference types="vite/client" />
@@ -15,10 +15,10 @@ export interface BuiltinSkill {
   content: string;
 }
 
-/** The state of the deployment that the conditions of the skills read. */
+/** The state of the owner of a box that the conditions of the skills read. */
 export interface BuiltinConditions {
   /**
-   * Checks if a credential is stored.
+   * Checks if the owner of the box has stored a credential.
    *
    * @param id The id of the credential.
    * @returns True when the credential is stored.
@@ -37,7 +37,7 @@ const SKILLS: ReadonlyArray<BuiltinSkill & { available: (c: BuiltinConditions) =
 /**
  * Gives the skills of the orchestrator whose condition is true now.
  *
- * @param conditions The state of the deployment.
+ * @param conditions The state of the owner of the box.
  * @returns The available skills.
  */
 export function builtinSkills(conditions: BuiltinConditions): BuiltinSkill[] {

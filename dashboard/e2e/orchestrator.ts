@@ -1085,22 +1085,22 @@ export async function startOrchestrator(
   ): void => {
     // Credentials live only in the real store, as if entered on the settings page.
     if (status === null) {
-      app.credentials.remove(id);
+      app.credentials.remove('', id);
       return;
     }
-    app.credentials.put(id, method, secret);
-    if (status !== 'ok') app.credentials.markStatus(id, status, null);
+    app.credentials.put('', id, method, secret);
+    if (status !== 'ok') app.credentials.markStatus('', id, status, null);
   };
   let catalogued: HarnessId[] = [];
   const state: DeploymentState = {
     get claudeCredential() {
-      return app.credentials.get('claude')?.status ?? null;
+      return app.credentials.get('', 'claude')?.status ?? null;
     },
     set claudeCredential(status: CredentialStatus | null) {
       holdCredential('claude', 'token', CLAUDE_TOKEN, status);
     },
     get openaiCredential() {
-      return app.credentials.get('openai')?.status ?? null;
+      return app.credentials.get('', 'openai')?.status ?? null;
     },
     set openaiCredential(status: CredentialStatus | null) {
       holdCredential('openai', 'api_key', OPENAI_KEY, status);

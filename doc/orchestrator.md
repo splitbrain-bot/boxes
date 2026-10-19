@@ -4,7 +4,7 @@ The orchestrator is the service a user talks to. It serves the dashboard, answer
 deployment, and drives the Docker daemon. The [egress proxy](egress.md) is the only other service.
 
 The orchestrator has no authentication of its own, and it holds the Docker socket of the host. Put an authenticated
-reverse proxy in front of it; see [Docker Compose setup](compose.md).
+reverse proxy in front of it. See [Docker Compose setup](compose.md).
 
 ## What it serves
 

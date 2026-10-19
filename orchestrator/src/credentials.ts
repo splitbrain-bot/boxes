@@ -46,6 +46,8 @@ export function isCredentialMethod(method: string): method is CredentialMethod {
 
 /** One row of the credentials table. */
 export interface CredentialRow {
+  /** The username of the owner, or the empty user. */
+  owner: string;
   /** The id of the credential. */
   id: CredentialId;
   /** The method that got the secret. */
@@ -113,25 +115,38 @@ export class CredentialStore {
   ) {}
 
   /**
-   * Gives one stored credential.
+   * Gives one stored credential of a user.
    *
+   * @param owner The user.
    * @param id The id of the credential.
    * @returns The row, or undefined when no secret is stored for the id.
    */
-  get(id: CredentialId): CredentialRow | undefined {
-    return this.db.prepare('SELECT * FROM credentials WHERE id = ?').get(id) as
+  get(owner: string, id: CredentialId): CredentialRow | undefined {
+    return this.db.prepare('SELECT * FROM credentials WHERE owner = ? AND id = ?').get(owner, id) as
       | CredentialRow
       | undefined;
   }
 
   /**
-   * Lists every stored credential.
+   * Lists the stored credentials of a user.
    *
+   * @param owner The user.
    * @returns The rows, in the order of the settings page.
    */
-  list(): CredentialRow[] {
-    const rows = this.db.prepare('SELECT * FROM credentials').all() as CredentialRow[];
+  list(owner: string): CredentialRow[] {
+    const rows = this.db
+      .prepare('SELECT * FROM credentials WHERE owner = ?')
+      .all(owner) as CredentialRow[];
     return rows.sort((a, b) => CREDENTIAL_IDS.indexOf(a.id) - CREDENTIAL_IDS.indexOf(b.id));
+  }
+
+  /**
+   * Lists the stored credentials of every user, for the egress policy and the refresh.
+   *
+   * @returns The rows, sorted by owner.
+   */
+  listAll(): CredentialRow[] {
+    return this.db.prepare('SELECT * FROM credentials ORDER BY owner').all() as CredentialRow[];
   }
 
   /**
@@ -141,6 +156,7 @@ export class CredentialStore {
    * the secret. When `extra` names no status and no error, the status goes
    * back to `ok`, and the last error is cleared.
    *
+   * @param owner The user.
    * @param id The id of the credential.
    * @param method The method that got the secret.
    * @param secret The secret.
@@ -148,14 +164,16 @@ export class CredentialStore {
    * @returns The stored row.
    */
   put(
+    owner: string,
     id: CredentialId,
     method: CredentialMethod,
     secret: string,
     extra: Partial<CredentialRow> = {},
   ): CredentialRow {
     const now = Date.now();
-    const existing = this.get(id);
+    const existing = this.get(owner, id);
     const row: CredentialRow = {
+      owner,
       id,
       method,
       secret,
@@ -170,11 +188,11 @@ export class CredentialStore {
     };
     this.db
       .prepare(
-        `INSERT INTO credentials (id, method, secret, account, expires_at,
+        `INSERT INTO credentials (owner, id, method, secret, account, expires_at,
            refreshed_at, status, last_error, placeholder, created_at, updated_at)
-         VALUES (@id, @method, @secret, @account, @expires_at,
+         VALUES (@owner, @id, @method, @secret, @account, @expires_at,
            @refreshed_at, @status, @last_error, @placeholder, @created_at, @updated_at)
-         ON CONFLICT(id) DO UPDATE SET
+         ON CONFLICT(owner, id) DO UPDATE SET
            method = excluded.method, secret = excluded.secret,
            account = excluded.account, expires_at = excluded.expires_at,
            refreshed_at = excluded.refreshed_at, status = excluded.status,
@@ -186,17 +204,18 @@ export class CredentialStore {
   }
 
   /**
-   * Gives the placeholder of a credential.
+   * Gives the placeholder of a credential of a user.
    *
    * With the empty string, the variable is not in the environment of the box,
    * so a box created now gets the credential when its container is created
    * again.
    *
+   * @param owner The user.
    * @param id The id of the credential.
    * @returns The placeholder, or the empty string when no secret is stored.
    */
-  placeholderFor(id: string): string {
-    return isCredentialId(id) ? (this.get(id)?.placeholder ?? '') : '';
+  placeholderFor(owner: string, id: string): string {
+    return isCredentialId(id) ? (this.get(owner, id)?.placeholder ?? '') : '';
   }
 
   /**
@@ -211,12 +230,13 @@ export class CredentialStore {
   }
 
   /**
-   * Removes a credential. The proxy then stops the interception of its hosts.
+   * Removes a credential of a user. The proxy then stops using its secret.
    *
+   * @param owner The user.
    * @param id The id of the credential.
    */
-  remove(id: CredentialId): void {
-    this.db.prepare('DELETE FROM credentials WHERE id = ?').run(id);
+  remove(owner: string, id: CredentialId): void {
+    this.db.prepare('DELETE FROM credentials WHERE owner = ? AND id = ?').run(owner, id);
     this.onChange();
   }
 
@@ -224,14 +244,23 @@ export class CredentialStore {
    * Records the result of the last use or refresh of the credential. The
    * secret and the account stay, because the proxy still sends a failing token.
    *
+   * @param owner The user.
    * @param id The id of the credential.
    * @param status The new status.
    * @param error The reason of the failure, or null.
    */
-  markStatus(id: CredentialId, status: CredentialStatus, error: string | null): void {
+  markStatus(
+    owner: string,
+    id: CredentialId,
+    status: CredentialStatus,
+    error: string | null,
+  ): void {
     this.db
-      .prepare('UPDATE credentials SET status = ?, last_error = ?, updated_at = ? WHERE id = ?')
-      .run(status, error, Date.now(), id);
+      .prepare(
+        `UPDATE credentials SET status = ?, last_error = ?, updated_at = ?
+          WHERE owner = ? AND id = ?`,
+      )
+      .run(status, error, Date.now(), owner, id);
     this.onChange();
   }
 
@@ -464,7 +493,7 @@ export const postToken: TokenPost = async (url, body) => {
 };
 
 /**
- * Refreshes or checks every stored credential once.
+ * Refreshes or checks every stored credential of every user once.
  *
  * A Codex or Dev Tunnels `oauth` row gets the refresh that its CLI would do.
  * The orchestrator holds the only copy, so nothing else rotates the token. A
@@ -483,14 +512,14 @@ export async function refreshCredentials(
   post: TokenPost = postToken,
   now: number = Date.now(),
 ): Promise<void> {
-  for (const row of store.list()) {
+  for (const row of store.listAll()) {
     if (row.method === 'oauth') {
       if (row.id === 'openai') await refreshCodex(store, row, post, now);
       if (row.id === 'devtunnels') await refreshDevTunnels(store, row, post, now);
       continue;
     }
     if (row.expires_at !== null && row.expires_at <= now && row.status !== 'expired') {
-      store.markStatus(row.id, 'expired', 'the credential has expired: log in again');
+      store.markStatus(row.owner, row.id, 'expired', 'the credential has expired: log in again');
     }
   }
 }
@@ -541,6 +570,7 @@ async function refreshCodex(
     // A retry cannot fix this, so the status is written once.
     if (row.status !== 'failing') {
       store.markStatus(
+        row.owner,
         row.id,
         'failing',
         'the stored login carries no refresh token: log in again',
@@ -558,12 +588,17 @@ async function refreshCodex(
       refresh_token: refreshToken,
     });
   } catch (err) {
-    store.markStatus(row.id, 'failing', `could not refresh: ${(err as Error).message}`);
+    store.markStatus(row.owner, row.id, 'failing', `could not refresh: ${(err as Error).message}`);
     return;
   }
 
   if (!answer.access_token) {
-    store.markStatus(row.id, 'failing', 'the token endpoint answered without an access token');
+    store.markStatus(
+      row.owner,
+      row.id,
+      'failing',
+      'the token endpoint answered without an access token',
+    );
     return;
   }
 
@@ -578,7 +613,7 @@ async function refreshCodex(
   };
 
   const described = parseAuthDocument(JSON.stringify(updated));
-  store.put(row.id, 'oauth', JSON.stringify(updated), {
+  store.put(row.owner, row.id, 'oauth', JSON.stringify(updated), {
     // The new id token names the account, if it came back.
     account: described?.account ?? row.account,
     expires_at: described?.expiresAt ?? (answer.expires_in ? now + answer.expires_in * 1000 : null),
@@ -611,6 +646,7 @@ async function refreshDevTunnels(
     // A retry cannot fix this, so the status is written once.
     if (row.status !== 'failing') {
       store.markStatus(
+        row.owner,
         row.id,
         'failing',
         'the stored login carries no refresh token: log in again',
@@ -628,13 +664,14 @@ async function refreshDevTunnels(
       refresh_token: refreshToken,
     });
   } catch (err) {
-    store.markStatus(row.id, 'failing', `could not refresh: ${(err as Error).message}`);
+    store.markStatus(row.owner, row.id, 'failing', `could not refresh: ${(err as Error).message}`);
     return;
   }
 
   if (!answer.access_token) {
     const reason = answer.error_description ?? answer.error ?? 'no access token in the answer';
     store.markStatus(
+      row.owner,
       row.id,
       'failing',
       `could not refresh: ${reason}. Log in again if this persists`,
@@ -643,6 +680,7 @@ async function refreshDevTunnels(
   }
 
   store.put(
+    row.owner,
     row.id,
     'oauth',
     JSON.stringify({

@@ -83,7 +83,7 @@ function storeWith(
   dbs.push(db);
   const store = new CredentialStore(db, onChange, cfg.credentialSet);
   for (const [id, secret] of Object.entries(secrets)) {
-    store.put(id as CredentialId, 'token', secret);
+    store.put('', id as CredentialId, 'token', secret);
   }
   return { store, db };
 }
@@ -95,7 +95,7 @@ function storeWith(
  * @returns The rows.
  */
 function rows(store: CredentialStore): CredentialRow[] {
-  return store.list();
+  return store.list('');
 }
 
 describe('resolveEgressMaterial', () => {
@@ -142,13 +142,38 @@ describe('composePolicy', () => {
 
     expect(policy.credentials.map((c) => c.id)).toEqual(['github']);
     expect(policy.credentials[0]?.secret).toBe(GH_TOKEN);
-    expect(policy.credentials[0]?.placeholder).toBe(store.get('github')?.placeholder);
+    expect(policy.credentials[0]?.placeholder).toBe(store.get('', 'github')?.placeholder);
+  }, 30_000);
+
+  it('carries the credential of each user for one host, with the owner in the id', async () => {
+    const cfg = configFrom();
+    const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN });
+    store.put('alice', 'claude', 'token', 'sk-ant-oat01-alice-token');
+    const key = new ApiKeyStore(db, () => {}).put(
+      'alice',
+      'OPENROUTER_API_KEY',
+      ['openrouter.ai'],
+      'sk-or-v1-0123456789abcdef',
+    );
+    const material = await resolveEgressMaterial(db);
+    const policy = composePolicy(cfg, material, store.listAll(), [key]);
+
+    // The proxy selects the credential whose placeholder is in the request.
+    expect(policy.credentials.map((c) => [c.id, c.secret, c.placeholder])).toEqual([
+      ['claude', CLAUDE_TOKEN, store.get('', 'claude')?.placeholder],
+      ['alice/claude', 'sk-ant-oat01-alice-token', store.get('alice', 'claude')?.placeholder],
+      ['api-key:alice/OPENROUTER_API_KEY', 'sk-or-v1-0123456789abcdef', key.placeholder],
+    ]);
+    expect(store.get('', 'claude')?.placeholder).not.toBe(
+      store.get('alice', 'claude')?.placeholder,
+    );
   }, 30_000);
 
   it('carries a Dev Tunnels login as its access token, with the tunnel scheme passed', async () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg);
     store.put(
+      '',
       'devtunnels',
       'oauth',
       JSON.stringify({ access_token: 'ghu_theaccesstoken', refresh_token: 'ghr_refresh' }),
@@ -165,6 +190,7 @@ describe('composePolicy', () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg);
     const key = new ApiKeyStore(db, () => {}).put(
+      '',
       'OPENROUTER_API_KEY',
       ['openrouter.ai'],
       'sk-or-v1-0123456789abcdef',
@@ -234,14 +260,14 @@ describe('composePolicy', () => {
     const { store, db } = storeWith(cfg);
     // `codex login --device-auth` leaves a document, not a header value. It
     // authenticates traffic to chatgpt.com, which the proxy does not intercept.
-    store.put('openai', 'oauth', '{"tokens":{"access_token":"a.b.c"}}');
+    store.put('', 'openai', 'oauth', '{"tokens":{"access_token":"a.b.c"}}');
     const material = await resolveEgressMaterial(db);
     const policy = composePolicy(cfg, material, rows(store), []);
 
     expect(policy.credentials.find((c) => c.id === 'openai')).toBeUndefined();
     // The row still has a placeholder, because a box gets one for every
     // stored credential, deliverable or not.
-    expect(store.get('openai')?.placeholder).toMatch(/^sk-/);
+    expect(store.get('', 'openai')?.placeholder).toMatch(/^sk-/);
   }, 30_000);
 
   it('intercepts the OpenAI key host, and only that one', async () => {
@@ -254,7 +280,7 @@ describe('composePolicy', () => {
     expect(openai?.hosts).toEqual(['api.openai.com']);
     expect(openai?.headers).toEqual(['authorization']);
     expect(openai?.secret).toBe(OPENAI_KEY);
-    expect(openai?.placeholder).toBe(store.get('openai')?.placeholder);
+    expect(openai?.placeholder).toBe(store.get('', 'openai')?.placeholder);
 
     // Codex logs in and refreshes at auth.openai.com and may talk to
     // chatgpt.com. Both stay reachable under a narrow allowlist, and the key
@@ -350,9 +376,9 @@ describe('EgressManager', () => {
     const manager = new EgressManager(cfg, store, new ApiKeyStore(db, () => {}), db);
     await manager.prepare();
 
-    const claude = manager.placeholderFor('claude');
-    const github = manager.placeholderFor('github');
-    const openai = manager.placeholderFor('openai');
+    const claude = manager.placeholderFor('', 'claude');
+    const github = manager.placeholderFor('', 'github');
+    const openai = manager.placeholderFor('', 'openai');
 
     expect(claude).not.toBe(CLAUDE_TOKEN);
     expect(claude.startsWith('sk-ant-oat01-')).toBe(true);
@@ -372,9 +398,9 @@ describe('EgressManager', () => {
     // A box keeps the CA it was created with for its whole life. boxEnv drops
     // a variable with an empty value, so the box gets no credential variable.
     expect(manager.caCertificate()).toContain('BEGIN CERTIFICATE');
-    expect(manager.placeholderFor('claude')).toBe('');
-    expect(manager.placeholderFor('github')).toBe('');
-    expect(manager.placeholderFor('openai')).toBe('');
+    expect(manager.placeholderFor('', 'claude')).toBe('');
+    expect(manager.placeholderFor('', 'github')).toBe('');
+    expect(manager.placeholderFor('', 'openai')).toBe('');
   }, 30_000);
 
   it('has nothing for a credential this deployment cannot translate', async () => {
@@ -383,7 +409,7 @@ describe('EgressManager', () => {
     const manager = new EgressManager(cfg, store, new ApiKeyStore(db, () => {}), db);
     await manager.prepare();
 
-    expect(manager.placeholderFor('gemini')).toBe('');
+    expect(manager.placeholderFor('', 'gemini')).toBe('');
   }, 30_000);
 
   it('recomposes from the store on every sync, so a pasted token is live', async () => {
@@ -423,11 +449,59 @@ describe('EgressManager', () => {
     await manager.sync();
     expect(seen.at(-1)).toEqual([]);
 
-    store.put('github', 'token', GH_TOKEN);
+    store.put('', 'github', 'token', GH_TOKEN);
     await expect.poll(() => seen.at(-1)).toEqual(['github']);
 
-    store.remove('github');
+    store.remove('', 'github');
     await expect.poll(() => seen.at(-1)).toEqual([]);
+  }, 30_000);
+
+  it('reports to each user only the credential ids of that user', async () => {
+    // The fake proxy reports the ids of the policy that it got.
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        const ids = (JSON.parse(body) as { credentials: Array<{ id: string }> }).credentials.map(
+          (c) => c.id,
+        );
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            applied: true,
+            policyHash: 'x',
+            allowedHostCount: 0,
+            credentialIds: ids,
+            denials: {},
+            uptimeSeconds: 1,
+          }),
+        );
+      });
+    });
+    servers.push(server);
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+    });
+
+    const cfg = configFrom({ EGRESS_CONTROL_URL: `http://127.0.0.1:${port}` });
+    const { store, db } = storeWith(cfg, { github: GH_TOKEN });
+    store.put('alice', 'github', 'token', GH_TOKEN);
+    const apiKeys = new ApiKeyStore(db, () => {});
+    apiKeys.put('alice', 'OPENROUTER_API_KEY', ['openrouter.ai'], 'sk-or-v1-0123456789abcdef');
+    const manager = new EgressManager(cfg, store, apiKeys, db);
+    await manager.sync();
+
+    expect(manager.status()?.credentialIds).toEqual([
+      'github',
+      'alice/github',
+      'api-key:alice/OPENROUTER_API_KEY',
+    ]);
+    expect(manager.statusFor('alice')?.credentialIds).toEqual([
+      'alice/github',
+      'api-key:alice/OPENROUTER_API_KEY',
+    ]);
+    expect(manager.statusFor('')?.credentialIds).toEqual(['github']);
+    expect(manager.statusFor('bob')?.credentialIds).toEqual([]);
   }, 30_000);
 
   it('records why a push failed, for the health probe', async () => {

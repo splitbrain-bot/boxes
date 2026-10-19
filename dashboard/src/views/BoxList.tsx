@@ -12,15 +12,25 @@ import { startPolling, useBoxes } from '../stores/boxes.ts';
 
 /** Home page that shows every box as a card. */
 export function BoxList() {
-  const { boxes, images, error, loading } = useBoxes();
+  const { boxes, images, user, error, loading } = useBoxes();
 
   // Polls the box list only while this page is mounted. Other views watch one box.
   useEffect(() => startPolling(), []);
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Boxes</h1>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <h1 className="shrink-0">
+            <img src="/logo.svg" alt="Boxes" className="size-7" />
+          </h1>
+          {/* The name tells which account is in use. */}
+          {user ? (
+            <span className="truncate text-sm text-muted-foreground" title={user}>
+              {user}
+            </span>
+          ) : null}
+        </div>
         <div className="flex items-center gap-1">
           <PushToggle />
           <Button asChild size="sm" variant="ghost" aria-label="Agent configuration">

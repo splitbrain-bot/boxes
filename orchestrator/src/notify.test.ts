@@ -39,10 +39,12 @@ function fakeFetch(answer: (url: string) => { status: number } | Error): void {
  *
  * @param endpoint The endpoint URL.
  * @param vapidKey The VAPID public key of the subscription. It defaults to the current key of the deployment.
+ * @param owner The user who subscribed.
  */
-function subscribe(endpoint: string, vapidKey = loadVapidKeys(db).publicKey): void {
+function subscribe(endpoint: string, vapidKey = loadVapidKeys(db).publicKey, owner = ''): void {
   upsertPushSubscription(
     db,
+    owner,
     endpoint,
     Buffer.concat([
       Buffer.from([0x04]),
@@ -93,6 +95,26 @@ test('one event reaches every subscribed browser', async () => {
   const push = calls.find((c) => c.url.includes('push.example.net'))!;
   assert.equal(push.headers['Content-Encoding'], 'aes128gcm');
   assert.match(push.headers.Authorization!, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]+$/);
+});
+
+test('in multi-user mode an event reaches only the browsers of the owner of the box', async () => {
+  db.prepare(
+    `INSERT INTO boxes (id, name, owner, status, created_at, last_active_at)
+     VALUES ('s1', 'muffin', 'alice', 'running', 0, 0)`,
+  ).run();
+  const key = loadVapidKeys(db).publicKey;
+  subscribe('https://push.example.net/alice', key, 'alice');
+  subscribe('https://push.example.net/bob', key, 'bob');
+  fakeFetch(() => ({ status: 201 }));
+
+  await new Notifier(db, loadConfig({ DATA_DIR: dir, AUTH_USER_HEADER: 'Remote-User' })).notify(
+    event,
+  );
+
+  assert.deepEqual(
+    calls.map((c) => c.url),
+    ['https://push.example.net/alice'],
+  );
 });
 
 test('the thread is named in the message, not just the box', () => {

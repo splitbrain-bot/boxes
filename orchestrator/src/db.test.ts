@@ -8,6 +8,7 @@ import {
   type Db,
   MIGRATIONS,
   openDb,
+  readAppKey,
   readHarnessCatalog,
   touchBox,
   upsertHarnessCatalog,
@@ -505,8 +506,9 @@ test('the credential and settings tables arrive empty on an existing deployment'
     };
     assert.equal(settings.n, 0);
 
-    assert.deepEqual(columns(upgraded, 'settings'), ['key', 'value', 'updated_at']);
+    assert.deepEqual(columns(upgraded, 'settings'), ['owner', 'key', 'value', 'updated_at']);
     assert.deepEqual(columns(upgraded, 'credentials'), [
+      'owner',
       'id',
       'method',
       'secret',
@@ -515,9 +517,9 @@ test('the credential and settings tables arrive empty on an existing deployment'
       'refreshed_at',
       'status',
       'last_error',
+      'placeholder',
       'created_at',
       'updated_at',
-      'placeholder',
     ]);
 
     // The box stays the same. It gets a placeholder for each stored credential
@@ -642,6 +644,59 @@ test('a stored credential gets a placeholder shaped like its token, and the app 
     assert.deepEqual(columns(upgraded, 'app_keys'), ['key', 'value', 'created_at']);
     const keys = upgraded.prepare('SELECT COUNT(*) AS n FROM app_keys').get() as { n: number };
     assert.equal(keys.n, 0);
+  } finally {
+    upgraded.close();
+  }
+});
+
+/**
+ * Writes a database at the last migration before the owners, with one row in
+ * each table that gets an owner.
+ */
+function atLastReleaseBeforeOwners(): void {
+  const db = new Database(join(dir, 'boxes.db'));
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('ADD COLUMN owner'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  db.prepare(
+    `INSERT INTO boxes (id, name, status, created_at, last_active_at)
+     VALUES ('live', 'a box', 'running', 1000, 2000)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO credentials (id, method, secret, placeholder, created_at, updated_at)
+     VALUES ('github', 'token', 'ghp_therealtoken', 'ghp_placeholder', 1000, 2000)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO api_keys (name, hosts, secret, placeholder, created_at, updated_at)
+     VALUES ('KEY', '["example.com"]', 'secret', 'placeholder', 1000, 2000)`,
+  ).run();
+  db.prepare(
+    `INSERT INTO settings (key, value, updated_at) VALUES
+       ('git.name', 'Someone', 1000), ('deployment.id', 'cafe0123', 1000)`,
+  ).run();
+  db.close();
+}
+
+test('each row gets the empty user, and the deployment id stays with the deployment', () => {
+  atLastReleaseBeforeOwners();
+
+  const upgraded = openDb(dir);
+  try {
+    for (const table of ['boxes', 'credentials', 'api_keys', 'agent_sets', 'settings']) {
+      const owners = upgraded.prepare(`SELECT DISTINCT owner FROM ${table}`).all();
+      assert.deepEqual(owners, [{ owner: '' }], table);
+    }
+    const secret = upgraded.prepare("SELECT secret FROM credentials WHERE id = 'github'").get();
+    assert.deepEqual(secret, { secret: 'ghp_therealtoken' });
+
+    // The global set keeps its id and gets the flag.
+    const sets = upgraded.prepare('SELECT id, global FROM agent_sets').all();
+    assert.deepEqual(sets, [{ id: 'global', global: 1 }]);
+
+    // The deployment id is no setting of a user.
+    assert.equal(readAppKey<string>(upgraded, 'deployment.id'), 'cafe0123');
+    const keys = upgraded.prepare('SELECT key FROM settings').all();
+    assert.deepEqual(keys, [{ key: 'git.name' }]);
   } finally {
     upgraded.close();
   }

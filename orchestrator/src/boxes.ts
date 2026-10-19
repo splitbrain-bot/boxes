@@ -342,14 +342,31 @@ export class BoxManager {
   }
 
   /**
-   * Gives the rows of all boxes that are not deleted.
+   * Gives the row of a box that a user can see and use.
    *
+   * @param id The id of the box.
+   * @param user The user, or null in single user mode, in which the user sees every box.
+   * @returns The row, or undefined when the box does not exist, is deleted, or belongs to another user.
+   */
+  visibleRow(id: string, user: string | null): BoxRow | undefined {
+    const row = this.getRow(id);
+    if (!row || row.status === 'deleted') return undefined;
+    return user === null || row.owner === user ? row : undefined;
+  }
+
+  /**
+   * Gives the rows of the boxes that are not deleted.
+   *
+   * @param owner The owner of the boxes, or null for the boxes of every user.
    * @returns The rows, newest first.
    */
-  private allRows(): BoxRow[] {
+  private allRows(owner: string | null = null): BoxRow[] {
     return this.db
-      .prepare("SELECT * FROM boxes WHERE status != 'deleted' ORDER BY created_at DESC")
-      .all() as BoxRow[];
+      .prepare(
+        `SELECT * FROM boxes WHERE status != 'deleted' AND (? IS NULL OR owner = ?)
+          ORDER BY created_at DESC`,
+      )
+      .all(owner, owner) as BoxRow[];
   }
 
   /**
@@ -370,22 +387,24 @@ export class BoxManager {
    * The data that the runtime needs to create or repair the container of a
    * box. The runtime builds a new box and each recreated container from it.
    *
-   * The placeholders are those of the credentials stored now, so a credential
-   * that arrives later reaches a box when its container is created again.
+   * The placeholders are those of the credentials that the owner of the box
+   * has stored now. A credential that arrives later reaches a box when its
+   * container is created again.
    *
    * @param id The id of the box.
    * @returns The id and the environment of the box.
    */
   private boxSpec(id: string): BoxSpec {
+    const { owner } = this.mustGet(id);
     return {
       boxId: id,
       env: boxEnv({
-        placeholderFor: (credential) => this.egress.placeholderFor(credential),
-        methodFor: (credential) => this.egress.methodFor(credential),
+        placeholderFor: (credential) => this.egress.placeholderFor(owner, credential),
+        methodFor: (credential) => this.egress.methodFor(owner, credential),
         gitlabHost: this.cfg.GITLAB_HOST,
         proxyUrl: runtime().proxyUrl(),
         hasCa: this.egress.caCertificate() !== '',
-        apiKeys: this.egress.apiKeyEnv(),
+        apiKeys: this.egress.apiKeyEnv(owner),
       }),
     };
   }
@@ -420,20 +439,26 @@ export class BoxManager {
    * tears the whole box down and marks it as an error.
    *
    * @param body The name, the agent set and the first thread of the box.
+   * @param owner The user who owns the new box.
    * @returns The detail of the new box.
    * @throws {HttpError} A 400 for a request that is not valid, a 503 when the box image is
    *   not available, or a 500 when a step of the create fails.
    */
-  async create(body: CreateBoxBody): Promise<BoxDetail> {
+  async create(body: CreateBoxBody, owner: string): Promise<BoxDetail> {
     const name = body.name?.trim();
     if (!name) throw new HttpError(400, 'name is required');
     if (name.length > 100) throw new HttpError(400, 'name must be 100 characters or fewer');
 
-    // Each box gets the global set, so a request that names it is the same as a
-    // request without a set, and the row stores null.
+    // Each box gets the global set of its owner, so a request that names it is
+    // the same as a request without a set, and the row stores null.
     const requested = body.agentSet?.trim() ?? '';
-    const agentSetId = requested === '' || requested === GLOBAL_AGENT_SET ? null : requested;
-    if (agentSetId && !this.agents.has(agentSetId)) {
+    const agentSetId =
+      requested === '' ||
+      requested === GLOBAL_AGENT_SET ||
+      requested === this.agents.globalId(owner)
+        ? null
+        : requested;
+    if (agentSetId && !this.agents.has(owner, agentSetId)) {
       throw new HttpError(400, `Unknown agent set: ${agentSetId}`);
     }
 
@@ -458,7 +483,8 @@ export class BoxManager {
     const row: BoxRow = {
       id,
       name,
-      // Each box has the DEFAULT profile, because the deployment has one set of credentials.
+      owner,
+      // Each box has the DEFAULT profile, because each user has one set of credentials.
       profile: 'DEFAULT',
       // No base revision until the reviewer selects one. By default, a review
       // compares each repository with its own HEAD.
@@ -476,9 +502,9 @@ export class BoxManager {
 
     this.db
       .prepare(
-        `INSERT INTO boxes (id, name, profile, status, agent_set_id,
+        `INSERT INTO boxes (id, name, owner, profile, status, agent_set_id,
            ws_token, created_at, last_active_at)
-         VALUES (@id, @name, @profile, @status, @agent_set_id,
+         VALUES (@id, @name, @owner, @profile, @status, @agent_set_id,
            @ws_token, @created_at, @last_active_at)`,
       )
       .run(row);
@@ -619,14 +645,14 @@ export class BoxManager {
   private async makeReady(row: BoxRow): Promise<void> {
     if (this.mustGet(row.id).ready_at !== null) return;
     const slog = log.box(row.id);
-    const settings = readSettings(this.db);
+    const settings = readSettings(this.db, row.owner);
     try {
       await setUpBox(
         row.id,
         {
           caCertificate: this.egress.caCertificate(),
           identity: { gitName: settings.gitName, gitEmail: settings.gitEmail },
-          agentSet: this.agents.pack(row.agent_set_id),
+          agentSet: this.agents.pack(row.owner, row.agent_set_id),
         },
         slog,
       );
@@ -865,23 +891,26 @@ export class BoxManager {
   }
 
   /**
-   * The command lines running in every box that has not been deleted, for
-   * the tunnel reconciler. A box that is not running has none. A box whose
-   * state or processes cannot be read is reported as null.
+   * The command lines running in each box of the given owners that has not
+   * been deleted, for the tunnel reconciler. A box that is not running has
+   * none. A box whose state or processes cannot be read is reported as null.
    *
+   * @param owners The owners whose boxes to read.
    * @returns The reading of each box.
    */
-  async processReadings(): Promise<BoxReading[]> {
+  async processReadings(owners: ReadonlySet<string>): Promise<BoxReading[]> {
+    const rows = this.allRows().filter((row) => owners.has(row.owner));
     return Promise.all(
-      this.allRows().map(async (row): Promise<BoxReading> => {
+      rows.map(async (row): Promise<BoxReading> => {
         const state = await runtime().state(row.id);
-        if (state === 'stopped') return { boxId: row.id, commands: [] };
-        if (state !== 'running') return { boxId: row.id, commands: null };
+        const reading = { boxId: row.id, owner: row.owner };
+        if (state === 'stopped') return { ...reading, commands: [] };
+        if (state !== 'running') return { ...reading, commands: null };
         try {
           const processes = await boxProcesses(row.id);
-          return { boxId: row.id, commands: processes.map((p) => p.command) };
+          return { ...reading, commands: processes.map((p) => p.command) };
         } catch {
-          return { boxId: row.id, commands: null };
+          return { ...reading, commands: null };
         }
       }),
     );
@@ -890,10 +919,11 @@ export class BoxManager {
   /**
    * Lists the boxes that are not deleted.
    *
+   * @param owner The owner of the boxes, or null for the boxes of every user.
    * @returns The summary of each box, newest first.
    */
-  async list(): Promise<BoxSummary[]> {
-    const rows = this.allRows();
+  async list(owner: string | null): Promise<BoxSummary[]> {
+    const rows = this.allRows(owner);
     const counts = this.pending.countsByBox();
     const running = boxesWithActiveTurns(this.db);
     return Promise.all(

@@ -233,8 +233,8 @@ afterEach(() => {
 });
 
 test('the Codex flow shows a URL and a code, and stores the document the CLI wrote', async () => {
-  const loginId = logins.start('openai');
-  assert.deepEqual(logins.state('openai', loginId), { state: 'starting' });
+  const loginId = logins.start('', 'openai');
+  assert.deepEqual(logins.state('', 'openai', loginId), { state: 'starting' });
 
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
@@ -253,10 +253,10 @@ test('the Codex flow shows a URL and a code, and stores the document the CLI wro
   cli.print(`${coloured('WXYZ-1234')}\n`);
 
   await until('the URL and the code to be read', () => {
-    const state = logins.state('openai', loginId);
+    const state = logins.state('', 'openai', loginId);
     return state.state === 'awaiting_browser' && state.code !== null;
   });
-  assert.deepEqual(logins.state('openai', loginId), {
+  assert.deepEqual(logins.state('', 'openai', loginId), {
     state: 'awaiting_browser',
     url: 'https://auth.openai.com/codex/device',
     code: 'WXYZ-1234',
@@ -273,9 +273,9 @@ test('the Codex flow shows a URL and a code, and stores the document the CLI wro
   read.print(document);
   read.end(0);
 
-  await until('the login to finish', () => logins.state('openai', loginId).state === 'done');
+  await until('the login to finish', () => logins.state('', 'openai', loginId).state === 'done');
 
-  const row = store.get('openai');
+  const row = store.get('', 'openai');
   assert.equal(row?.method, 'oauth');
   // The whole document, so the refresh has the refresh token beside the
   // access token.
@@ -287,22 +287,22 @@ test('the Codex flow shows a URL and a code, and stores the document the CLI wro
 });
 
 test('a Codex login that exits non-zero fails with what it printed', async () => {
-  const loginId = logins.start('openai');
+  const loginId = logins.start('', 'openai');
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
   cli.print('device code login is disabled for this account\n');
   cli.end(1);
 
-  await until('the failure', () => logins.state('openai', loginId).state === 'failed');
-  const state = logins.state('openai', loginId);
+  await until('the failure', () => logins.state('', 'openai', loginId).state === 'failed');
+  const state = logins.state('', 'openai', loginId);
   assert.equal(state.state, 'failed');
   assert.match(state.state === 'failed' ? state.error : '', /disabled for this account/);
-  assert.equal(store.get('openai'), undefined);
+  assert.equal(store.get('', 'openai'), undefined);
   await until('the container to be removed', () => fake.removed.length === 1);
 });
 
 test('the Claude flow takes a code back and stores the token it prints', async () => {
-  const loginId = logins.start('claude');
+  const loginId = logins.start('', 'claude');
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
   // The CLI is an Ink UI. It refuses to run without a terminal, and the code
@@ -312,27 +312,27 @@ test('the Claude flow takes a code back and stores the token it prints', async (
 
   cli.print(`${ESC}[2J${ESC}[HVisit: https://claude.ai/oauth/authorize?code=true\n`);
   await until('the URL to be read', () => {
-    return logins.state('claude', loginId).state === 'awaiting_browser';
+    return logins.state('', 'claude', loginId).state === 'awaiting_browser';
   });
-  assert.deepEqual(logins.state('claude', loginId), {
+  assert.deepEqual(logins.state('', 'claude', loginId), {
     state: 'awaiting_browser',
     url: 'https://claude.ai/oauth/authorize?code=true',
     code: null,
   });
 
   cli.print('\nPaste code here if prompted > ');
-  await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
+  await until('the prompt', () => logins.state('', 'claude', loginId).state === 'awaiting_code');
 
-  logins.submitCode('claude', loginId, '  the-code-from-the-page  ');
+  logins.submitCode('', 'claude', loginId, '  the-code-from-the-page  ');
   await until('the code to be entered', () => cli.input.endsWith('\r'));
   // A carriage return is what the Enter key sends. The UI reads its terminal
   // raw, so a newline is typed rather than entered.
   assert.equal(cli.input, 'the-code-from-the-page\r');
 
   cli.print('\nsk-ant-oat01-abcdefghijklmnop1234\n');
-  await until('the login to finish', () => logins.state('claude', loginId).state === 'done');
+  await until('the login to finish', () => logins.state('', 'claude', loginId).state === 'done');
 
-  const row = store.get('claude');
+  const row = store.get('', 'claude');
   assert.equal(row?.method, 'token');
   assert.equal(row?.secret, 'sk-ant-oat01-abcdefghijklmnop1234');
   // A year, because that is what the CLI mints and nothing can renew it.
@@ -344,13 +344,13 @@ test('the Claude flow takes a code back and stores the token it prints', async (
 });
 
 test('a token a read ended in the middle of is stored whole', async () => {
-  const loginId = logins.start('claude');
+  const loginId = logins.start('', 'claude');
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
 
   cli.print(`${ESC}[2J${ESC}[HVisit: https://claude.ai/oauth/authorize?code=true\n`);
   await until('the URL to be read', () => {
-    return logins.state('claude', loginId).state === 'awaiting_browser';
+    return logins.state('', 'claude', loginId).state === 'awaiting_browser';
   });
 
   // The first piece carries the prefix and more than the length the parse
@@ -359,50 +359,50 @@ test('a token a read ended in the middle of is stored whole', async () => {
   await flush();
   cli.print('1234\n');
 
-  await until('the login to finish', () => logins.state('claude', loginId).state === 'done');
-  assert.equal(store.get('claude')?.secret, 'sk-ant-oat01-abcdefghijklmnop1234');
+  await until('the login to finish', () => logins.state('', 'claude', loginId).state === 'done');
+  assert.equal(store.get('', 'claude')?.secret, 'sk-ant-oat01-abcdefghijklmnop1234');
 });
 
 test('the prompt is recognised when the UI lays it out by column', async () => {
-  const loginId = logins.start('claude');
+  const loginId = logins.start('', 'claude');
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
   cli.print('Visit: https://claude.ai/oauth/authorize?code=true\n');
-  await until('the URL', () => logins.state('claude', loginId).state === 'awaiting_browser');
+  await until('the URL', () => logins.state('', 'claude', loginId).state === 'awaiting_browser');
 
   // The CLI places each word at a column of its own, so the stripped text
   // has no spaces.
   cli.print(`${ESC}[2GPaste${ESC}[8Gcode${ESC}[13Ghere${ESC}[18Gif${ESC}[21Gprompted${ESC}[30G>`);
-  await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
-  assert.equal(logins.state('claude', loginId).state, 'awaiting_code');
+  await until('the prompt', () => logins.state('', 'claude', loginId).state === 'awaiting_code');
+  assert.equal(logins.state('', 'claude', loginId).state, 'awaiting_code');
 });
 
 test('a code sent before the prompt is drawn still reaches the CLI', async () => {
-  const loginId = logins.start('claude');
+  const loginId = logins.start('', 'claude');
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
   cli.print('Visit: https://claude.ai/oauth/authorize\n');
-  await until('the URL', () => logins.state('claude', loginId).state === 'awaiting_browser');
+  await until('the URL', () => logins.state('', 'claude', loginId).state === 'awaiting_browser');
 
   // The prompt can be drawn before or after the code arrives. The stream
   // takes the code either way.
-  logins.submitCode('claude', loginId, 'early');
+  logins.submitCode('', 'claude', loginId, 'early');
   await until('the code to be entered', () => cli.input.endsWith('\r'));
   assert.equal(cli.input, 'early\r');
 });
 
 test('the return that enters a code is a keypress of its own', async () => {
-  const loginId = logins.start('claude');
+  const loginId = logins.start('', 'claude');
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
   cli.print('Visit: https://claude.ai/oauth/authorize\nPaste code here if prompted > ');
-  await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
+  await until('the prompt', () => logins.state('', 'claude', loginId).state === 'awaiting_code');
 
   // A real code has this length. A short code hides the problem, because it
   // arrives in a chunk small enough that the UI reads the return in it as the
   // key either way.
   const code = 'a'.repeat(92);
-  logins.submitCode('claude', loginId, code);
+  logins.submitCode('', 'claude', loginId, code);
   await until('the code to be entered', () => cli.input.endsWith('\r'));
 
   // The code and the return are two writes with a pause between them. Sent
@@ -411,72 +411,86 @@ test('the return that enters a code is a keypress of its own', async () => {
 });
 
 test('a code the CLI refuses is shown, and the login stays open for another', async () => {
-  const loginId = logins.start('claude');
+  const loginId = logins.start('', 'claude');
   await until('the CLI to be running', () => fake.execs.length === 1);
   const cli = fake.execs[0]!;
   cli.print('Visit: https://claude.ai/oauth/authorize\r\nPaste code here if prompted > ');
-  await until('the prompt', () => logins.state('claude', loginId).state === 'awaiting_code');
+  await until('the prompt', () => logins.state('', 'claude', loginId).state === 'awaiting_code');
 
-  logins.submitCode('claude', loginId, 'the-wrong-one');
+  logins.submitCode('', 'claude', loginId, 'the-wrong-one');
   // The CLI prints its complaint and draws the prompt again underneath,
   // because it asks for another code rather than ending.
   const complaint = 'Invalid code. Please make sure the full code was copied.';
   cli.print(`\r\nOAuth error: ${complaint}\r\nPaste code here if prompted > `);
   await until('the refusal to be read', () => {
-    const state = logins.state('claude', loginId);
+    const state = logins.state('', 'claude', loginId);
     return state.state === 'awaiting_code' && state.error !== null;
   });
-  const refused = logins.state('claude', loginId);
+  const refused = logins.state('', 'claude', loginId);
   assert.equal(refused.state, 'awaiting_code');
   // The error holds the whole complaint, because the screen keeps every
   // character the CLI drew.
   assert.equal(refused.state === 'awaiting_code' ? refused.error : null, complaint);
 
   // Sending another code clears the previous refusal at once.
-  logins.submitCode('claude', loginId, 'the-right-one');
-  const answered = logins.state('claude', loginId);
+  logins.submitCode('', 'claude', loginId, 'the-right-one');
+  const answered = logins.state('', 'claude', loginId);
   assert.equal(answered.state === 'awaiting_code' ? answered.error : 'x', null);
 
   cli.print('\r\nsk-ant-oat01-abcdefghijklmnop1234\r\n');
-  await until('the login to finish', () => logins.state('claude', loginId).state === 'done');
-  assert.equal(store.get('claude')?.secret, 'sk-ant-oat01-abcdefghijklmnop1234');
+  await until('the login to finish', () => logins.state('', 'claude', loginId).state === 'done');
+  assert.equal(store.get('', 'claude')?.secret, 'sk-ant-oat01-abcdefghijklmnop1234');
 });
 
 test('a login that never finishes fails, and takes its container with it', async () => {
   const quick = new LoginManager(store, 10);
-  const loginId = quick.start('openai');
+  const loginId = quick.start('', 'openai');
 
-  await until('the timeout', () => quick.state('openai', loginId).state === 'failed');
-  const state = quick.state('openai', loginId);
+  await until('the timeout', () => quick.state('', 'openai', loginId).state === 'failed');
+  const state = quick.state('', 'openai', loginId);
   assert.match(state.state === 'failed' ? state.error : '', /not finished/);
   await until('the container to be removed', () => fake.removed.length === 1);
-  assert.equal(store.get('openai'), undefined);
+  assert.equal(store.get('', 'openai'), undefined);
 });
 
 test('cancelling ends the login, removes the container, and forgets the id', async () => {
-  const loginId = logins.start('openai');
+  const loginId = logins.start('', 'openai');
   await until('the CLI to be running', () => fake.execs.length === 1);
 
-  logins.cancel('openai', loginId);
+  logins.cancel('', 'openai', loginId);
   await until('the container to be removed', () => fake.removed.length === 1);
   assert.throws(
-    () => logins.state('openai', loginId),
+    () => logins.state('', 'openai', loginId),
     (err: unknown) => {
       return err instanceof HttpError && err.statusCode === 404;
     },
   );
-  assert.equal(store.get('openai'), undefined);
+  assert.equal(store.get('', 'openai'), undefined);
 });
 
 test('a second login cancels the first, and the first id stops resolving', async () => {
-  const first = logins.start('openai');
+  const first = logins.start('', 'openai');
   await until('the first CLI', () => fake.execs.length === 1);
-  const second = logins.start('openai');
+  const second = logins.start('', 'openai');
 
   await until('the first container to go', () => fake.removed.length >= 1);
   assert.equal(fake.removed[0], fake.started[0]);
-  assert.throws(() => logins.state('openai', first));
-  assert.equal(logins.state('openai', second).state !== 'failed', true);
+  assert.throws(() => logins.state('', 'openai', first));
+  assert.equal(logins.state('', 'openai', second).state !== 'failed', true);
+});
+
+test('two users log in for the same credential at the same time, each for themselves', async () => {
+  const alice = logins.start('alice', 'openai');
+  await until('the first CLI', () => fake.execs.length === 1);
+  const bob = logins.start('bob', 'openai');
+  await until('the second CLI', () => fake.execs.length === 2);
+
+  // The login of bob does not replace the login of alice.
+  assert.deepEqual(fake.removed, []);
+  assert.notEqual(logins.state('alice', 'openai', alice).state, 'failed');
+  assert.notEqual(logins.state('bob', 'openai', bob).state, 'failed');
+  // A user cannot read the login of another user.
+  assert.throws(() => logins.state('bob', 'openai', alice));
 });
 
 /**
@@ -526,16 +540,19 @@ test("the Dev Tunnels flow shows GitHub's code and stores both tokens", async ()
     { access_token: 'ghu_access', refresh_token: 'ghr_refresh', expires_in: 28_800 },
   ]);
   const manager = new LoginManager(store, 5_000, github);
-  const loginId = manager.start('devtunnels');
+  const loginId = manager.start('', 'devtunnels');
 
-  await until('the code', () => manager.state('devtunnels', loginId).state === 'awaiting_browser');
-  assert.deepEqual(manager.state('devtunnels', loginId), {
+  await until(
+    'the code',
+    () => manager.state('', 'devtunnels', loginId).state === 'awaiting_browser',
+  );
+  assert.deepEqual(manager.state('', 'devtunnels', loginId), {
     state: 'awaiting_browser',
     url: 'https://github.com/login/device',
     code: 'ABCD-1234',
   });
 
-  await until('the login', () => manager.state('devtunnels', loginId).state === 'done');
+  await until('the login', () => manager.state('', 'devtunnels', loginId).state === 'done');
   // The orchestrator runs the device flow itself, so no container starts.
   assert.deepEqual(fake.started, []);
   assert.deepEqual(calls[0]?.body, { client_id: DEVTUNNELS_CLIENT_ID, scope: 'read:user' });
@@ -547,7 +564,7 @@ test("the Dev Tunnels flow shows GitHub's code and stores both tokens", async ()
   });
   assert.deepEqual(lookups, ['ghu_access']);
 
-  const row = store.get('devtunnels');
+  const row = store.get('', 'devtunnels');
   assert.equal(row?.method, 'oauth');
   assert.equal(row?.account, 'octocat');
   assert.deepEqual(JSON.parse(row?.secret ?? '{}'), {
@@ -562,46 +579,49 @@ test("a Dev Tunnels login GitHub ends fails with GitHub's reason", async () => {
     { error: 'access_denied', error_description: 'The authorization request was denied.' },
   ]);
   const manager = new LoginManager(store, 5_000, github);
-  const loginId = manager.start('devtunnels');
+  const loginId = manager.start('', 'devtunnels');
 
-  await until('the failure', () => manager.state('devtunnels', loginId).state === 'failed');
-  const state = manager.state('devtunnels', loginId);
+  await until('the failure', () => manager.state('', 'devtunnels', loginId).state === 'failed');
+  const state = manager.state('', 'devtunnels', loginId);
   assert.match(state.state === 'failed' ? state.error : '', /was denied/);
-  assert.equal(store.get('devtunnels'), undefined);
+  assert.equal(store.get('', 'devtunnels'), undefined);
 });
 
 test('a cancelled Dev Tunnels login stops polling and stores nothing', async () => {
   const { github, calls } = fakeGitHub([]);
   const manager = new LoginManager(store, 5_000, github);
-  const loginId = manager.start('devtunnels');
-  await until('the code', () => manager.state('devtunnels', loginId).state === 'awaiting_browser');
+  const loginId = manager.start('', 'devtunnels');
+  await until(
+    'the code',
+    () => manager.state('', 'devtunnels', loginId).state === 'awaiting_browser',
+  );
 
-  manager.cancel('devtunnels', loginId);
+  manager.cancel('', 'devtunnels', loginId);
   const polled = calls.length;
   await new Promise((resolve) => setTimeout(resolve, 20));
   // At most the poll already in flight completes.
   assert.ok(calls.length <= polled + 1);
-  assert.equal(store.get('devtunnels'), undefined);
+  assert.equal(store.get('', 'devtunnels'), undefined);
 });
 
 test('GitHub has no login flow and says so instead of starting a container', () => {
   assert.throws(
-    () => logins.start('github'),
+    () => logins.start('', 'github'),
     (err: unknown) => err instanceof HttpError && err.statusCode === 400,
   );
   assert.deepEqual(fake.started, []);
 });
 
 test('a code is refused when no login is waiting for one', async () => {
-  const loginId = logins.start('openai');
+  const loginId = logins.start('', 'openai');
   await until('the CLI to be running', () => fake.execs.length === 1);
 
   assert.throws(
-    () => logins.submitCode('openai', loginId, 'x'),
+    () => logins.submitCode('', 'openai', loginId, 'x'),
     (err: unknown) => err instanceof HttpError && err.statusCode === 409,
   );
   assert.throws(
-    () => logins.submitCode('openai', 'not-this-login', 'x'),
+    () => logins.submitCode('', 'openai', 'not-this-login', 'x'),
     (err: unknown) => err instanceof HttpError && err.statusCode === 404,
   );
 });

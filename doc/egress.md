@@ -226,3 +226,8 @@ presents, and the proxy refuses every later call that presents a different one.
 The orchestrator side (`orchestrator/src/egress.ts`) generates the CA and that token once, and stores them in the
 database. A placeholder is generated when a credential is stored, and is kept with it. A restarted proxy has lost the
 policy, so the reconciler pushes it again every minute.
+
+The policy holds the credentials and the API keys of every [user](users.md), so one host can have one credential of
+each user. The proxy selects the credential whose placeholder is in the request. In the policy, the id of a credential
+has its owner as a prefix, for example `alice/claude`, because the ids must be unique. A credential of the empty user
+has no prefix.

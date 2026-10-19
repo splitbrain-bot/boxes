@@ -21,6 +21,11 @@ export interface BoxRow {
   id: string;
   /** The display name. */
   name: string;
+  /**
+   * The username of the owner, or the empty user. The box uses the credentials,
+   * the agent sets and the settings of its owner.
+   */
+  owner: string;
   /** The credential profile. Every box is DEFAULT. */
   profile: string;
   /**
@@ -152,18 +157,24 @@ export interface PushSubscriptionRow {
    * push signed with another key is refused.
    */
   vapid_key: string | null;
+  /** The username of the user who subscribed, or the empty user. */
+  owner: string;
 }
 
 /**
  * One named agent set, with an AGENTS.md and any number of skills.
  *
- * The `global` set, which its migration inserts, applies to every box. A box
- * can name one more set at creation, and the orchestrator merges its content
- * over the global set.
+ * The global set of a user applies to every box of that user. A box can name
+ * one more set at creation, and the orchestrator merges its content over the
+ * global set.
  */
 export interface AgentSetRow {
   /** The set id. */
   id: string;
+  /** The username of the owner, or the empty user. */
+  owner: string;
+  /** 1 for the global set of the owner, else 0. Each owner has at most one. */
+  global: number;
   /** The display name. */
   name: string;
   /** The AGENTS.md of this set, or '' when it has none. */
@@ -575,6 +586,76 @@ export const MIGRATIONS: string[] = [
     updated_at  INTEGER NOT NULL
   );
   `,
+  // Adds the owner of each box, credential, API key, agent set, setting and
+  // push subscription. The stored rows get the empty user. The credentials, the
+  // API keys and the settings get the owner in their key. The flag `global`
+  // replaces the fixed id of the global set. The deployment id moves to
+  // app_keys, because it belongs to the deployment.
+  `
+  ALTER TABLE boxes ADD COLUMN owner TEXT NOT NULL DEFAULT '';
+  CREATE INDEX idx_boxes_owner ON boxes(owner);
+
+  CREATE TABLE credentials_new (
+    owner        TEXT NOT NULL DEFAULT '',
+    id           TEXT NOT NULL,
+    method       TEXT NOT NULL,
+    secret       TEXT NOT NULL,
+    account      TEXT,
+    expires_at   INTEGER,
+    refreshed_at INTEGER,
+    status       TEXT NOT NULL DEFAULT 'ok',
+    last_error   TEXT,
+    placeholder  TEXT NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (owner, id)
+  );
+  INSERT INTO credentials_new (id, method, secret, account, expires_at, refreshed_at,
+                               status, last_error, placeholder, created_at, updated_at)
+    SELECT id, method, secret, account, expires_at, refreshed_at,
+           status, last_error, placeholder, created_at, updated_at
+      FROM credentials;
+  DROP TABLE credentials;
+  ALTER TABLE credentials_new RENAME TO credentials;
+
+  CREATE TABLE api_keys_new (
+    owner       TEXT NOT NULL DEFAULT '',
+    name        TEXT NOT NULL,
+    hosts       TEXT NOT NULL,
+    secret      TEXT NOT NULL,
+    placeholder TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (owner, name)
+  );
+  INSERT INTO api_keys_new (name, hosts, secret, placeholder, created_at, updated_at)
+    SELECT name, hosts, secret, placeholder, created_at, updated_at FROM api_keys;
+  DROP TABLE api_keys;
+  ALTER TABLE api_keys_new RENAME TO api_keys;
+
+  INSERT INTO app_keys (key, value, created_at)
+    SELECT 'deployment.id', json_quote(value), updated_at
+      FROM settings WHERE key = 'deployment.id';
+  CREATE TABLE settings_new (
+    owner      TEXT NOT NULL DEFAULT '',
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (owner, key)
+  );
+  INSERT INTO settings_new (key, value, updated_at)
+    SELECT key, value, updated_at FROM settings WHERE key != 'deployment.id';
+  DROP TABLE settings;
+  ALTER TABLE settings_new RENAME TO settings;
+
+  ALTER TABLE agent_sets ADD COLUMN owner TEXT NOT NULL DEFAULT '';
+  ALTER TABLE agent_sets ADD COLUMN global INTEGER NOT NULL DEFAULT 0;
+  UPDATE agent_sets SET global = 1 WHERE id = 'global';
+  CREATE INDEX idx_agent_sets_owner ON agent_sets(owner);
+  CREATE UNIQUE INDEX idx_agent_sets_global ON agent_sets(owner) WHERE global = 1;
+
+  ALTER TABLE push_subscriptions ADD COLUMN owner TEXT NOT NULL DEFAULT '';
+  `,
 ];
 
 /** An open database handle. */
@@ -932,6 +1013,7 @@ export function boxesWithActiveTurns(db: Db): Set<string> {
  * so the function keeps one row and updates the keys.
  *
  * @param db The database.
+ * @param owner The user who subscribed.
  * @param endpoint The URL of the push service.
  * @param p256dh The public key of the subscriber.
  * @param auth The authentication secret of the subscriber.
@@ -940,6 +1022,7 @@ export function boxesWithActiveTurns(db: Db): Set<string> {
  */
 export function upsertPushSubscription(
   db: Db,
+  owner: string,
   endpoint: string,
   p256dh: string,
   auth: string,
@@ -949,12 +1032,12 @@ export function upsertPushSubscription(
   const now = Date.now();
   db.prepare(
     `INSERT INTO push_subscriptions
-       (endpoint, p256dh, auth, label, created_at, last_used_at, vapid_key)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+       (endpoint, p256dh, auth, label, created_at, last_used_at, vapid_key, owner)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(endpoint) DO UPDATE SET
        p256dh = excluded.p256dh, auth = excluded.auth, label = excluded.label,
-       vapid_key = excluded.vapid_key`,
-  ).run(endpoint, p256dh, auth, label, now, now, vapidKey);
+       vapid_key = excluded.vapid_key, owner = excluded.owner`,
+  ).run(endpoint, p256dh, auth, label, now, now, vapidKey, owner);
 }
 
 /**
@@ -971,25 +1054,41 @@ export function dropOtherKeySubscriptions(db: Db, vapidKey: string): number {
 }
 
 /**
- * Lists every push subscription of this deployment.
+ * Lists the push subscriptions of one user.
  *
  * @param db The database.
+ * @param owner The user.
  * @returns The rows, oldest first.
  */
-export function listPushSubscriptions(db: Db): PushSubscriptionRow[] {
+export function listPushSubscriptions(db: Db, owner: string): PushSubscriptionRow[] {
   return db
-    .prepare('SELECT * FROM push_subscriptions ORDER BY created_at ASC')
-    .all() as PushSubscriptionRow[];
+    .prepare('SELECT * FROM push_subscriptions WHERE owner = ? ORDER BY created_at ASC')
+    .all(owner) as PushSubscriptionRow[];
 }
 
 /**
- * Deletes one subscription, for an unsubscribe or a subscription that the push service removed.
+ * Deletes one subscription, for a subscription that the push service removed.
  *
  * @param db The database.
  * @param endpoint The URL of the push service.
  */
 export function deletePushSubscription(db: Db, endpoint: string): void {
   db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
+}
+
+/**
+ * Deletes one subscription of a user, for an unsubscribe. A subscription of
+ * another user stays.
+ *
+ * @param db The database.
+ * @param owner The user.
+ * @param endpoint The URL of the push service.
+ */
+export function deleteOwnPushSubscription(db: Db, owner: string, endpoint: string): void {
+  db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ? AND owner = ?').run(
+    endpoint,
+    owner,
+  );
 }
 
 /**
@@ -1019,15 +1118,16 @@ export function countLiveBoxes(db: Db): number {
 }
 
 /**
- * Counts the subscribed browsers.
+ * Counts the subscribed browsers of one user.
  *
  * @param db The database.
+ * @param owner The user.
  * @returns The number of subscriptions.
  */
-export function countPushSubscriptions(db: Db): number {
-  const row = db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').get() as {
-    n: number;
-  };
+export function countPushSubscriptions(db: Db, owner: string): number {
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM push_subscriptions WHERE owner = ?')
+    .get(owner) as { n: number };
   return row.n;
 }
 

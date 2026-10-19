@@ -1,7 +1,7 @@
 /**
  * API keys that a user adds for services without a credential in Boxes.
  *
- * In each box, the environment variable with the name of a key holds a
+ * In each box of the user, the environment variable with the name of a key holds a
  * placeholder. The egress proxy replaces the placeholder with the key in each
  * header of a request to a host of the key.
  */
@@ -15,7 +15,9 @@ import { HttpError } from './http-error.ts';
 
 /** One row of the api_keys table, with its hosts parsed. */
 export interface ApiKeyRow {
-  /** The environment variable that holds the placeholder in each box. */
+  /** The username of the owner, or the empty user. */
+  owner: string;
+  /** The environment variable that holds the placeholder in each box of the owner. */
   name: string;
   /** The hosts where the egress proxy puts in the key, as allowlist patterns. */
   hosts: string[];
@@ -71,25 +73,41 @@ export class ApiKeyStore {
   ) {}
 
   /**
-   * Gives one key.
+   * Gives one key of a user.
    *
+   * @param owner The user.
    * @param name The environment variable name of the key.
    * @returns The key, or undefined when no key has this name.
    */
-  get(name: string): ApiKeyRow | undefined {
-    const row = this.db.prepare('SELECT * FROM api_keys WHERE name = ?').get(name) as
-      | StoredRow
-      | undefined;
+  get(owner: string, name: string): ApiKeyRow | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM api_keys WHERE owner = ? AND name = ?')
+      .get(owner, name) as StoredRow | undefined;
     return row ? parse(row) : undefined;
   }
 
   /**
-   * Lists every key.
+   * Lists the keys of a user.
    *
+   * @param owner The user.
    * @returns The keys, sorted by name.
    */
-  list(): ApiKeyRow[] {
-    const rows = this.db.prepare('SELECT * FROM api_keys ORDER BY name').all() as StoredRow[];
+  list(owner: string): ApiKeyRow[] {
+    const rows = this.db
+      .prepare('SELECT * FROM api_keys WHERE owner = ? ORDER BY name')
+      .all(owner) as StoredRow[];
+    return rows.map(parse);
+  }
+
+  /**
+   * Lists the keys of every user, for the egress policy.
+   *
+   * @returns The keys, sorted by owner and name.
+   */
+  listAll(): ApiKeyRow[] {
+    const rows = this.db
+      .prepare('SELECT * FROM api_keys ORDER BY owner, name')
+      .all() as StoredRow[];
     return rows.map(parse);
   }
 
@@ -100,13 +118,19 @@ export class ApiKeyStore {
    * key gets a new placeholder when its prefix or its length differs from
    * the old one, so the placeholder keeps the shape of the key.
    *
+   * @param owner The user.
    * @param name The environment variable name of the key.
    * @param hosts The hosts of the key, as exact hostnames or `*.` wildcards.
    * @param secret The key, or undefined to keep the stored key.
    * @returns The stored row.
    * @throws {HttpError} A 400 when the name, a host or the secret is not valid.
    */
-  put(name: string, hosts: readonly string[], secret: string | undefined): ApiKeyRow {
+  put(
+    owner: string,
+    name: string,
+    hosts: readonly string[],
+    secret: string | undefined,
+  ): ApiKeyRow {
     if (!NAME_PATTERN.test(name)) {
       throw new HttpError(400, `${name} is not a valid environment variable name`);
     }
@@ -121,13 +145,14 @@ export class ApiKeyStore {
       }
     }
 
-    const existing = this.get(name);
+    const existing = this.get(owner, name);
     const key = secret ?? existing?.secret;
     if (!key) throw new HttpError(400, 'secret: must not be empty');
     const keepPlaceholder = existing !== undefined && sameShape(existing.secret, key);
 
     const now = Date.now();
     const row: ApiKeyRow = {
+      owner,
       name,
       hosts: patterns,
       secret: key,
@@ -137,9 +162,9 @@ export class ApiKeyStore {
     };
     this.db
       .prepare(
-        `INSERT INTO api_keys (name, hosts, secret, placeholder, created_at, updated_at)
-         VALUES (@name, @hosts, @secret, @placeholder, @created_at, @updated_at)
-         ON CONFLICT(name) DO UPDATE SET
+        `INSERT INTO api_keys (owner, name, hosts, secret, placeholder, created_at, updated_at)
+         VALUES (@owner, @name, @hosts, @secret, @placeholder, @created_at, @updated_at)
+         ON CONFLICT(owner, name) DO UPDATE SET
            hosts = excluded.hosts, secret = excluded.secret,
            placeholder = excluded.placeholder, updated_at = excluded.updated_at`,
       )
@@ -149,13 +174,16 @@ export class ApiKeyStore {
   }
 
   /**
-   * Removes a key.
+   * Removes a key of a user.
    *
+   * @param owner The user.
    * @param name The environment variable name of the key.
-   * @throws {HttpError} A 404 when no key has this name.
+   * @throws {HttpError} A 404 when the user has no key with this name.
    */
-  remove(name: string): void {
-    const info = this.db.prepare('DELETE FROM api_keys WHERE name = ?').run(name);
+  remove(owner: string, name: string): void {
+    const info = this.db
+      .prepare('DELETE FROM api_keys WHERE owner = ? AND name = ?')
+      .run(owner, name);
     if (info.changes === 0) throw new HttpError(404, `No API key named ${name}`);
     this.onChange();
   }

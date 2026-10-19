@@ -10,6 +10,7 @@ import {
 } from './db.ts';
 import { log } from './log.ts';
 import { loadVapidKeys, sendPush, type VapidKeys } from './push.ts';
+import { isMultiUser } from './users.ts';
 
 /** Longest a thread title may be in a notification, in characters. */
 const MAX_TITLE = 80;
@@ -97,7 +98,7 @@ function target(event: NotifyEvent): string {
   return event.threadId ? `/boxes/${event.boxId}/threads/${event.threadId}` : '/';
 }
 
-/** Sends one event to every subscribed browser. */
+/** Sends one event to the subscribed browsers of the user of the box. */
 export class Notifier {
   /** The VAPID keypair, or null before first use. */
   private keys: VapidKeys | null = null;
@@ -156,13 +157,22 @@ export class Notifier {
   }
 
   /**
-   * Pushes to every subscribed browser. It deletes subscriptions the push
-   * service reports as gone, and those made under another VAPID key.
+   * Pushes to the subscribed browsers of the user of the box. It deletes
+   * subscriptions the push service reports as gone, and those made under
+   * another VAPID key.
+   *
+   * In multi-user mode, the user is the owner of the box. In single user mode,
+   * the user sees every box, so each event goes to the browsers of the empty user.
    *
    * @param event The event.
    */
   private async push(event: NotifyEvent): Promise<void> {
-    const stored = listPushSubscriptions(this.db);
+    const box = this.db.prepare('SELECT owner FROM boxes WHERE id = ?').get(event.boxId) as
+      | { owner: string }
+      | undefined;
+    const user = isMultiUser(this.cfg) ? box?.owner : '';
+    if (user === undefined) return;
+    const stored = listPushSubscriptions(this.db, user);
     // Before the keypair is read, so a deployment without subscribers writes none.
     if (stored.length === 0) return;
 

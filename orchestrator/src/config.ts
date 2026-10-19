@@ -55,6 +55,21 @@ const schema = z.object({
    */
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
+  /**
+   * The HTTP header that holds the username, for example `Remote-User`. The
+   * reverse proxy in front of the orchestrator authenticates the user and sets
+   * the header. Empty is single user mode, in which the orchestrator ignores
+   * every header and each request has the empty user.
+   *
+   * The header is safe only when each request goes through the reverse proxy,
+   * and when each route of the reverse proxy replaces the header of the client.
+   */
+  AUTH_USER_HEADER: z
+    .string()
+    .regex(/^[A-Za-z0-9-]+$/, { message: 'must be an HTTP header name such as Remote-User' })
+    .transform((value) => value.toLowerCase())
+    .default(''),
+
   /** The image of each box container. */
   BOX_IMAGE: z.string().min(1).default('ghcr.io/splitbrain/boxes/box:latest'),
   /**

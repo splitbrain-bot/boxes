@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 test('a deployment that has set nothing gets the defaults', () => {
-  assert.deepEqual(readSettings(db), {
+  assert.deepEqual(readSettings(db, ''), {
     gitName: DEFAULT_GIT_NAME,
     gitEmail: DEFAULT_GIT_EMAIL,
     dialogs: {},
@@ -38,36 +38,36 @@ test('a deployment that has set nothing gets the defaults', () => {
 });
 
 test('a patch writes what it names and leaves the rest alone', () => {
-  patchSettings(db, { gitName: 'Release bot' });
-  assert.deepEqual(readSettings(db), {
+  patchSettings(db, '', { gitName: 'Release bot' });
+  assert.deepEqual(readSettings(db, ''), {
     gitName: 'Release bot',
     gitEmail: DEFAULT_GIT_EMAIL,
     dialogs: {},
   });
 
-  const both = patchSettings(db, { gitEmail: 'bot@example.com' });
+  const both = patchSettings(db, '', { gitEmail: 'bot@example.com' });
   assert.equal(both.gitName, 'Release bot');
   assert.equal(both.gitEmail, 'bot@example.com');
 });
 
 test('clearing a field puts the default back rather than leaving nobody there', () => {
-  patchSettings(db, { gitName: 'Release bot' });
+  patchSettings(db, '', { gitName: 'Release bot' });
   // The stored row is deleted, so a later change to the default applies here too.
-  assert.equal(patchSettings(db, { gitName: '  ' }).gitName, DEFAULT_GIT_NAME);
+  assert.equal(patchSettings(db, '', { gitName: '  ' }).gitName, DEFAULT_GIT_NAME);
 });
 
 test('a dialog is stored per harness and merged rather than replaced', () => {
-  patchSettings(db, { dialogs: { claude: { modeId: 'plan', config: { model: 'opus' } } } });
-  patchSettings(db, { dialogs: { codex: { modeId: 'agent-full-access' } } });
+  patchSettings(db, '', { dialogs: { claude: { modeId: 'plan', config: { model: 'opus' } } } });
+  patchSettings(db, '', { dialogs: { codex: { modeId: 'agent-full-access' } } });
 
-  assert.deepEqual(readSettings(db).dialogs, {
+  assert.deepEqual(readSettings(db, '').dialogs, {
     claude: { modeId: 'plan', config: { model: 'opus' } },
     codex: { modeId: 'agent-full-access' },
   });
 
   // The patch replaces the whole entry of one harness, because the entry is the state of one dialog.
-  patchSettings(db, { dialogs: { claude: { modeId: 'auto' } } });
-  assert.deepEqual(readSettings(db).dialogs.claude, { modeId: 'auto' });
+  patchSettings(db, '', { dialogs: { claude: { modeId: 'auto' } } });
+  assert.deepEqual(readSettings(db, '').dialogs.claude, { modeId: 'auto' });
 });
 
 test('a stored value that is not a dialog is ignored rather than fatal', () => {
@@ -76,7 +76,7 @@ test('a stored value that is not a dialog is ignored rather than fatal', () => {
     'not json at all',
     0,
   );
-  assert.deepEqual(readSettings(db).dialogs, {});
+  assert.deepEqual(readSettings(db, '').dialogs, {});
 });
 
 test('the deployment id is generated once and then kept', () => {
@@ -84,5 +84,5 @@ test('the deployment id is generated once and then kept', () => {
   assert.match(first, /^[0-9a-f]{8}$/);
   assert.equal(deploymentId(db), first);
   // It is not a setting a person sees.
-  assert.deepEqual(Object.keys(readSettings(db)).sort(), ['dialogs', 'gitEmail', 'gitName']);
+  assert.deepEqual(Object.keys(readSettings(db, '')).sort(), ['dialogs', 'gitEmail', 'gitName']);
 });

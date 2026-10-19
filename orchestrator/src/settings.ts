@@ -1,11 +1,11 @@
 /**
- * The deployment's settings that are not secrets, stored as key/value rows in
+ * The settings of each user that are not secrets, stored as key/value rows in
  * the `settings` table. A new setting needs a key, not a migration.
  */
 
 import { randomBytes } from 'node:crypto';
 import type { Settings, ThreadDialogDefaults } from '../../shared/types.ts';
-import type { Db } from './db.ts';
+import { type Db, readAppKey, writeAppKey } from './db.ts';
 
 /** The git author name for commits in a box when none is set. */
 export const DEFAULT_GIT_NAME = 'boxes-bot';
@@ -19,7 +19,7 @@ const GIT_NAME = 'git.name';
 /** Settings key of the git author email. */
 const GIT_EMAIL = 'git.email';
 
-/** Settings key of the deployment's id. */
+/** The app key of the deployment's id. */
 const DEPLOYMENT_ID = 'deployment.id';
 
 /**
@@ -33,13 +33,14 @@ function dialogKey(harnessId: string): string {
 }
 
 /**
- * Returns every setting, with the default filled in for each unset one.
+ * Returns every setting of a user, with the default filled in for each unset one.
  *
  * @param db The database.
+ * @param owner The user.
  * @returns The settings.
  */
-export function readSettings(db: Db): Settings {
-  const stored = readAll(db);
+export function readSettings(db: Db, owner: string): Settings {
+  const stored = readAll(db, owner);
   const dialogs: Record<string, ThreadDialogDefaults> = {};
   for (const [key, value] of Object.entries(stored)) {
     if (!key.startsWith('dialog.')) continue;
@@ -64,10 +65,11 @@ export function readSettings(db: Db): Settings {
  * agents do not overwrite each other. Each harness entry is replaced whole.
  *
  * @param db The database.
+ * @param owner The user.
  * @param patch The settings to write.
- * @returns All settings after the write.
+ * @returns All settings of the user after the write.
  */
-export function patchSettings(db: Db, patch: Partial<Settings>): Settings {
+export function patchSettings(db: Db, owner: string, patch: Partial<Settings>): Settings {
   const writes: Array<[string, string | null]> = [];
   if (patch.gitName !== undefined) writes.push([GIT_NAME, patch.gitName.trim() || null]);
   if (patch.gitEmail !== undefined) writes.push([GIT_EMAIL, patch.gitEmail.trim() || null]);
@@ -79,18 +81,18 @@ export function patchSettings(db: Db, patch: Partial<Settings>): Settings {
   db.transaction(() => {
     for (const [key, value] of writes) {
       if (value === null) {
-        db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+        db.prepare('DELETE FROM settings WHERE owner = ? AND key = ?').run(owner, key);
         continue;
       }
       db.prepare(
-        `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+        `INSERT INTO settings (owner, key, value, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(owner, key) DO UPDATE SET value = excluded.value,
            updated_at = excluded.updated_at`,
-      ).run(key, value, now);
+      ).run(owner, key, value, now);
     }
   })();
 
-  return readSettings(db);
+  return readSettings(db, owner);
 }
 
 /**
@@ -102,25 +104,22 @@ export function patchSettings(db: Db, patch: Partial<Settings>): Settings {
  * @returns The id.
  */
 export function deploymentId(db: Db): string {
-  const stored = readAll(db)[DEPLOYMENT_ID];
+  const stored = readAppKey<string>(db, DEPLOYMENT_ID);
   if (stored) return stored;
   const id = randomBytes(4).toString('hex');
-  db.prepare('INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run(
-    DEPLOYMENT_ID,
-    id,
-    Date.now(),
-  );
-  return readAll(db)[DEPLOYMENT_ID] ?? id;
+  writeAppKey(db, DEPLOYMENT_ID, id);
+  return id;
 }
 
 /**
- * Returns every stored row as a map of key to value.
+ * Returns every stored row of a user as a map of key to value.
  *
  * @param db The database.
+ * @param owner The user.
  * @returns The values by key.
  */
-function readAll(db: Db): Record<string, string> {
-  const rows = db.prepare('SELECT key, value FROM settings').all() as Array<{
+function readAll(db: Db, owner: string): Record<string, string> {
+  const rows = db.prepare('SELECT key, value FROM settings WHERE owner = ?').all(owner) as Array<{
     key: string;
     value: string;
   }>;

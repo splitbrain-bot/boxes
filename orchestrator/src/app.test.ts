@@ -14,7 +14,7 @@ import { PassThrough } from 'node:stream';
 import Docker from 'dockerode';
 import { afterEach, beforeEach, test } from 'vitest';
 import { buildApp, type Orchestrator } from './app.ts';
-import { config } from './config.ts';
+import { config, loadConfig } from './config.ts';
 import { type Db, openDb, upsertHarnessCatalog } from './db.ts';
 import * as dk from './docker.ts';
 import { setFileServiceSpawnerForTests } from './files.ts';
@@ -98,13 +98,14 @@ let orchestrator: Orchestrator;
  * Inserts a running box row with one thread.
  *
  * @param id The id of the box. The thread gets the id `<id>-t1`.
+ * @param owner The owner of the box.
  */
-function insertBox(id: string): void {
+function insertBox(id: string, owner = ''): void {
   const now = Date.now();
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, status, ws_token, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'running', ?, ?, ?)`,
-  ).run(id, `token-${id}`, now, now);
+    `INSERT INTO boxes (id, name, owner, profile, status, ws_token, created_at, last_active_at)
+     VALUES (?, 'test', ?, 'DEFAULT', 'running', ?, ?, ?)`,
+  ).run(id, owner, `token-${id}`, now, now);
   insertThread(id, `${id}-t1`, 1);
 }
 
@@ -1302,7 +1303,7 @@ test('an account credential is reported, and says why it cannot run a box yet', 
     tokens: { access_token: 'a.b.c', refresh_token: 'r' },
     last_refresh: '2026-09-12T10:00:00Z',
   });
-  orchestrator.credentials.put('openai', 'oauth', document, { account: 'someone@example.com' });
+  orchestrator.credentials.put('', 'openai', 'oauth', document, { account: 'someone@example.com' });
 
   const health = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
     harnesses: Array<{
@@ -1435,7 +1436,7 @@ test('a credential that is failing is still offered, and says it is not runnable
     url: '/api/credentials/claude',
     payload: { method: 'token', secret: 'sk-ant-oat01-abcdefgh1234' },
   });
-  orchestrator.credentials.markStatus('claude', 'expired', 'a year is up');
+  orchestrator.credentials.markStatus('', 'claude', 'expired', 'a year is up');
 
   const health = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
     harnesses: Array<{ runnable: boolean; credential: { status: string; lastError: string } }>;
@@ -1551,4 +1552,182 @@ test('a thread for an agent nobody has is refused before anything is started', a
   });
   assert.equal(created.statusCode, 400);
   assert.match((created.json() as { error: string }).error, /Unknown harness/);
+});
+
+/**
+ * Builds the app of the test again in multi-user mode, on the same database.
+ * The reverse proxy sends the username in `Remote-User`.
+ */
+async function multiUser(): Promise<void> {
+  await orchestrator.app.close();
+  orchestrator = buildApp(
+    loadConfig({
+      ...process.env,
+      DATA_DIR: orchestrator.cfg.DATA_DIR,
+      AUTH_USER_HEADER: 'Remote-User',
+    }),
+    db,
+  );
+  await orchestrator.egress.prepare();
+}
+
+/**
+ * Gives the headers that the reverse proxy sends for a user.
+ *
+ * @param user The username.
+ * @returns The headers.
+ */
+function as(user: string): Record<string, string> {
+  return { 'remote-user': user };
+}
+
+/**
+ * Gives the owner of a box row.
+ *
+ * @param id The id of the box.
+ * @returns The owner.
+ */
+function ownerOf(id: string): string | undefined {
+  return (
+    db.prepare('SELECT owner FROM boxes WHERE id = ?').get(id) as { owner: string } | undefined
+  )?.owner;
+}
+
+test('in multi-user mode a request without a username is refused, and a page tells why', async () => {
+  await multiUser();
+
+  const api = await orchestrator.app.inject({ url: '/api/boxes' });
+  assert.equal(api.statusCode, 401);
+  assert.match((api.json() as { error: string }).error, /no username/);
+
+  const blank = await orchestrator.app.inject({ url: '/api/boxes', headers: as('   ') });
+  assert.equal(blank.statusCode, 401);
+
+  // The browser gets a page that tells why, and not the dashboard.
+  const page = await orchestrator.app.inject({ url: '/', headers: { accept: 'text/html' } });
+  assert.equal(page.statusCode, 401);
+  assert.match(page.headers['content-type'] as string, /text\/html/);
+  assert.match(page.payload, /No user/);
+
+  // The probes answer without a username.
+  const health = await orchestrator.app.inject({ url: '/healthz' });
+  assert.equal(health.statusCode, 200);
+  assert.equal((health.json() as { user: string | null }).user, null);
+});
+
+test('the first user with a name gets the data without an owner, and a probe claims nothing', async () => {
+  insertBox('abc123');
+  orchestrator.credentials.put('', 'github', 'token', 'ghp_0123456789abcdef');
+  await multiUser();
+
+  const health = await orchestrator.app.inject({ url: '/healthz', headers: as('alice') });
+  assert.equal((health.json() as { user: string }).user, 'alice');
+  assert.equal(ownerOf('abc123'), '');
+
+  // The username is not case-sensitive.
+  const alice = await orchestrator.app.inject({ url: '/api/boxes', headers: as('Alice') });
+  assert.deepEqual(
+    (alice.json() as Array<{ id: string }>).map((b) => b.id),
+    ['abc123'],
+  );
+  assert.equal(ownerOf('abc123'), 'alice');
+  assert.equal(orchestrator.credentials.get('alice', 'github')?.secret, 'ghp_0123456789abcdef');
+
+  // The data went to the first user, so the next user starts empty.
+  const bob = await orchestrator.app.inject({ url: '/api/boxes', headers: as('bob') });
+  assert.deepEqual(bob.json(), []);
+  const bobCredentials = await orchestrator.app.inject({
+    url: '/api/credentials',
+    headers: as('bob'),
+  });
+  assert.deepEqual(bobCredentials.json(), []);
+});
+
+test('a box of another user is a 404, as a box that does not exist', async () => {
+  await multiUser();
+  insertBox('abc123', 'alice');
+
+  const own = await orchestrator.app.inject({
+    url: '/api/boxes/abc123/threads',
+    headers: as('alice'),
+  });
+  assert.equal(own.statusCode, 200);
+
+  for (const [method, url] of [
+    ['GET', '/api/boxes/abc123'],
+    ['GET', '/api/boxes/abc123/threads'],
+    ['POST', '/api/boxes/abc123/stop'],
+    ['DELETE', '/api/boxes/abc123'],
+    ['GET', '/api/boxes/abc123/review/dir'],
+  ] as const) {
+    const res = await orchestrator.app.inject({ method, url, headers: as('bob') });
+    assert.equal(res.statusCode, 404, `${method} ${url}`);
+    assert.deepEqual(res.json(), { error: 'Box not found' });
+  }
+  assert.equal(ownerOf('abc123'), 'alice');
+
+  const listed = await orchestrator.app.inject({ url: '/api/boxes', headers: as('bob') });
+  assert.deepEqual(listed.json(), []);
+});
+
+test('each user has their own credentials, settings and agent sets', async () => {
+  await multiUser();
+  for (const [user, secret] of [
+    ['alice', 'ghp_alice0123456789'],
+    ['bob', 'ghp_bob00123456789'],
+  ] as const) {
+    const put = await orchestrator.app.inject({
+      method: 'PUT',
+      url: '/api/credentials/github',
+      headers: as(user),
+      payload: { method: 'token', secret },
+    });
+    assert.equal(put.statusCode, 200);
+  }
+  assert.equal(orchestrator.credentials.get('alice', 'github')?.secret, 'ghp_alice0123456789');
+  assert.equal(orchestrator.credentials.get('bob', 'github')?.secret, 'ghp_bob00123456789');
+
+  await orchestrator.app.inject({
+    method: 'PATCH',
+    url: '/api/settings',
+    headers: as('alice'),
+    payload: { gitName: 'Alice' },
+  });
+  const aliceSettings = await orchestrator.app.inject({
+    url: '/api/settings',
+    headers: as('alice'),
+  });
+  const bobSettings = await orchestrator.app.inject({ url: '/api/settings', headers: as('bob') });
+  assert.equal((aliceSettings.json() as { gitName: string }).gitName, 'Alice');
+  assert.notEqual((bobSettings.json() as { gitName: string }).gitName, 'Alice');
+
+  // Each user gets their own global set.
+  const aliceSets = (
+    await orchestrator.app.inject({ url: '/api/agent-sets', headers: as('alice') })
+  ).json() as Array<{ id: string; global: boolean }>;
+  const bobSets = (
+    await orchestrator.app.inject({ url: '/api/agent-sets', headers: as('bob') })
+  ).json() as Array<{ id: string; global: boolean }>;
+  assert.equal(aliceSets.length, 1);
+  assert.equal(bobSets.length, 1);
+  assert.ok(aliceSets[0]?.global && bobSets[0]?.global);
+  assert.notEqual(aliceSets[0]?.id, bobSets[0]?.id);
+
+  const foreign = await orchestrator.app.inject({
+    url: `/api/agent-sets/${aliceSets[0]?.id}`,
+    headers: as('bob'),
+  });
+  assert.equal(foreign.statusCode, 404);
+});
+
+test('in single user mode every box is listed, whatever its owner', async () => {
+  insertBox('abc123', 'alice');
+  insertBox('def456');
+  const res = await orchestrator.app.inject({ url: '/api/boxes' });
+  assert.deepEqual((res.json() as Array<{ id: string }>).map((b) => b.id).sort(), [
+    'abc123',
+    'def456',
+  ]);
+  const health = await orchestrator.app.inject({ url: '/healthz' });
+  assert.equal((health.json() as { user: string | null }).user, null);
 });

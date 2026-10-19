@@ -6,8 +6,8 @@ home directory. The orchestrator writes these files from the sets.
 
 ## The global set and named sets
 
-There is one set with the id `global`. It is seeded when the database is created. The global set applies to every box
-and cannot be deleted.
+Each set belongs to one [user](users.md). Each user has one global set, which the orchestrator creates at the first
+use. The global set applies to every box of its owner, and the user cannot delete it.
 
 More sets can be added in the dashboard. A set has a display name, an optional `AGENTS.md`, and any number of skills.
 
@@ -52,7 +52,7 @@ The orchestrator pulls a repository when it is added, once a day, and when the u
 directory with a `SKILL.md` file is one skill, at any depth. The directory name is the skill name. A `SKILL.md` at the
 root gets the name of the repository. The orchestrator copies the full directory, but no links.
 
-Private repositories on `github.com` use the GitHub [credential](credentials.md).
+Private repositories on `github.com` use the GitHub [credential](credentials.md) of the owner of the set.
 
 When a pull fails, the editor shows the error on the repository. The skills of the last good pull stay in use.
 
