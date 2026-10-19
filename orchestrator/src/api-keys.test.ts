@@ -33,9 +33,9 @@ afterEach(() => {
 });
 
 test('a key is stored with its hosts and shown as its last four characters', () => {
-  store.put('OPENROUTER_API_KEY', ['OpenRouter.ai', ' openrouter.ai '], KEY);
+  store.put('', 'OPENROUTER_API_KEY', ['OpenRouter.ai', ' openrouter.ai '], KEY);
 
-  const row = store.get('OPENROUTER_API_KEY');
+  const row = store.get('', 'OPENROUTER_API_KEY');
   assert.equal(row?.secret, KEY);
   assert.deepEqual(row?.hosts, ['openrouter.ai']);
   assert.deepEqual(store.summarize(row!), {
@@ -66,20 +66,28 @@ test('a short key gets a placeholder with enough random characters', () => {
 });
 
 test('the placeholder stays while the key keeps its shape, and changes with it', () => {
-  const first = store.put('OPENROUTER_API_KEY', ['openrouter.ai'], KEY).placeholder;
+  const first = store.put('', 'OPENROUTER_API_KEY', ['openrouter.ai'], KEY).placeholder;
 
   const sameShape = KEY.replace('0123', '9999');
-  assert.equal(store.put('OPENROUTER_API_KEY', ['openrouter.ai'], sameShape).placeholder, first);
+  assert.equal(
+    store.put('', 'OPENROUTER_API_KEY', ['openrouter.ai'], sameShape).placeholder,
+    first,
+  );
 
   const longer = `${KEY}0000`;
-  const second = store.put('OPENROUTER_API_KEY', ['openrouter.ai'], longer).placeholder;
+  const second = store.put('', 'OPENROUTER_API_KEY', ['openrouter.ai'], longer).placeholder;
   assert.notEqual(second, first);
   assert.equal(second.length, longer.length);
 });
 
 test('without a secret only the hosts change', () => {
-  const first = store.put('OPENROUTER_API_KEY', ['openrouter.ai'], KEY);
-  const second = store.put('OPENROUTER_API_KEY', ['openrouter.ai', '*.openrouter.ai'], undefined);
+  const first = store.put('', 'OPENROUTER_API_KEY', ['openrouter.ai'], KEY);
+  const second = store.put(
+    '',
+    'OPENROUTER_API_KEY',
+    ['openrouter.ai', '*.openrouter.ai'],
+    undefined,
+  );
 
   assert.equal(second.secret, KEY);
   assert.equal(second.placeholder, first.placeholder);
@@ -87,32 +95,32 @@ test('without a secret only the hosts change', () => {
 });
 
 test('a new key needs a secret', () => {
-  assert.throws(() => store.put('OPENROUTER_API_KEY', ['openrouter.ai'], undefined), /secret/);
+  assert.throws(() => store.put('', 'OPENROUTER_API_KEY', ['openrouter.ai'], undefined), /secret/);
 });
 
 test('a name must be a variable name that Boxes does not set itself', () => {
-  assert.throws(() => store.put('1KEY', ['openrouter.ai'], KEY), /not a valid/);
-  assert.throws(() => store.put('MY-KEY', ['openrouter.ai'], KEY), /not a valid/);
+  assert.throws(() => store.put('', '1KEY', ['openrouter.ai'], KEY), /not a valid/);
+  assert.throws(() => store.put('', 'MY-KEY', ['openrouter.ai'], KEY), /not a valid/);
   const taken = ['GH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'HTTPS_PROXY', 'PATH'];
   for (const name of taken) {
-    assert.throws(() => store.put(name, ['openrouter.ai'], KEY), /set by Boxes/, name);
+    assert.throws(() => store.put('', name, ['openrouter.ai'], KEY), /set by Boxes/, name);
   }
   assert.equal(changes, 0);
 });
 
 test('hosts must be hostnames or one-label wildcards', () => {
-  assert.throws(() => store.put('KEY', [], KEY), /at least one host/);
-  assert.throws(() => store.put('KEY', ['*'], KEY), /not a hostname/);
-  assert.throws(() => store.put('KEY', ['api.*.com'], KEY), /not a hostname/);
-  assert.throws(() => store.put('KEY', ['https://openrouter.ai'], KEY), /not a hostname/);
-  assert.doesNotThrow(() => store.put('KEY', ['*.example.com', 'api.example.com'], KEY));
+  assert.throws(() => store.put('', 'KEY', [], KEY), /at least one host/);
+  assert.throws(() => store.put('', 'KEY', ['*'], KEY), /not a hostname/);
+  assert.throws(() => store.put('', 'KEY', ['api.*.com'], KEY), /not a hostname/);
+  assert.throws(() => store.put('', 'KEY', ['https://openrouter.ai'], KEY), /not a hostname/);
+  assert.doesNotThrow(() => store.put('', 'KEY', ['*.example.com', 'api.example.com'], KEY));
 });
 
 test('removing a key forgets it, and an unknown name is a 404', () => {
-  store.put('OPENROUTER_API_KEY', ['openrouter.ai'], KEY);
-  store.remove('OPENROUTER_API_KEY');
+  store.put('', 'OPENROUTER_API_KEY', ['openrouter.ai'], KEY);
+  store.remove('', 'OPENROUTER_API_KEY');
 
-  assert.equal(store.get('OPENROUTER_API_KEY'), undefined);
-  assert.deepEqual(store.list(), []);
-  assert.throws(() => store.remove('OPENROUTER_API_KEY'), /No API key/);
+  assert.equal(store.get('', 'OPENROUTER_API_KEY'), undefined);
+  assert.deepEqual(store.list(''), []);
+  assert.throws(() => store.remove('', 'OPENROUTER_API_KEY'), /No API key/);
 });

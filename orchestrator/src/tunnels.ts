@@ -37,37 +37,45 @@ export interface RemoteTunnel extends TunnelRef {
   ports: Array<{ port: number; url: string | null }>;
 }
 
-/** The Dev Tunnels API calls this module makes. An interface, so tests can fake it. */
+/**
+ * The Dev Tunnels API calls this module makes. An interface, so tests can fake
+ * it. Each call uses the stored token of one user, because a tunnel belongs to
+ * the account of the owner of its box.
+ */
 export interface TunnelApi {
   /**
-   * Checks if a token is stored, which every call needs.
+   * Checks if a user has a stored token, which every call needs.
    *
+   * @param owner The user.
    * @returns True when a token is stored.
    */
-  available(): boolean;
+  available(owner: string): boolean;
   /**
    * Returns one tunnel with its ports.
    *
+   * @param owner The user whose token the call uses.
    * @param ref The tunnel.
    * @returns The tunnel, or null when it does not exist.
    * @throws Error when the call fails.
    */
-  get(ref: TunnelRef): Promise<RemoteTunnel | null>;
+  get(owner: string, ref: TunnelRef): Promise<RemoteTunnel | null>;
   /**
    * Replaces a tunnel's labels.
    *
+   * @param owner The user whose token the call uses.
    * @param ref The tunnel.
    * @param labels The new labels.
    * @throws Error when the call fails.
    */
-  setLabels(ref: TunnelRef, labels: string[]): Promise<void>;
+  setLabels(owner: string, ref: TunnelRef, labels: string[]): Promise<void>;
   /**
    * Deletes a tunnel. A tunnel that is already gone counts as deleted.
    *
+   * @param owner The user whose token the call uses.
    * @param ref The tunnel.
    * @throws Error when the call fails.
    */
-  remove(ref: TunnelRef): Promise<void>;
+  remove(owner: string, ref: TunnelRef): Promise<void>;
 }
 
 /**
@@ -77,6 +85,8 @@ export interface TunnelApi {
 export interface BoxReading {
   /** The box id. */
   boxId: string;
+  /** The owner of the box. */
+  owner: string;
   /** Every process command line, empty for a box that is not running, or null. */
   commands: string[] | null;
 }
@@ -123,15 +133,16 @@ export function boxLabel(deploymentId: string, boxId: string): string {
 }
 
 /**
- * Returns the API calls against the real service, authenticated with the stored GitHub token.
+ * Returns the API calls against the real service, authenticated with the stored GitHub token of a user.
  *
- * @param token Returns the stored GitHub token, or null when none is stored.
+ * @param token Returns the stored GitHub token of a user, or null when none is stored.
  * @returns The API.
  */
-export function devTunnelsApi(token: () => string | null): TunnelApi {
+export function devTunnelsApi(token: (owner: string) => string | null): TunnelApi {
   /**
    * Sends one request.
    *
+   * @param owner The user whose token the request uses.
    * @param host The API host.
    * @param path The path, with an optional query.
    * @param init The method and the JSON body.
@@ -139,11 +150,12 @@ export function devTunnelsApi(token: () => string | null): TunnelApi {
    * @throws Error when no token is stored.
    */
   const call = async (
+    owner: string,
     host: string,
     path: string,
     init: { method?: string; body?: unknown } = {},
   ): Promise<Response> => {
-    const secret = token();
+    const secret = token(owner);
     if (!secret) throw new Error('no Dev Tunnels login is stored');
     const separator = path.includes('?') ? '&' : '?';
     const res = await fetch(`https://${host}${path}${separator}api-version=${API_VERSION}`, {
@@ -166,26 +178,28 @@ export function devTunnelsApi(token: () => string | null): TunnelApi {
   const regional = (cluster: string): string => `${cluster}.rel.tunnels.api.visualstudio.com`;
 
   return {
-    available: () => Boolean(token()),
+    available: (owner) => Boolean(token(owner)),
 
-    async get(ref) {
-      const res = await call(regional(ref.cluster), `/tunnels/${ref.id}?includePorts=true`);
+    async get(owner, ref) {
+      const res = await call(owner, regional(ref.cluster), `/tunnels/${ref.id}?includePorts=true`);
       if (res.status === 404) return null;
       if (!res.ok) throw new Error(`${res.status} reading tunnel ${ref.id}`);
       return toRemote(await res.json());
     },
 
-    async setLabels(ref, labels) {
+    async setLabels(owner, ref, labels) {
       // Only the fields sent change.
-      const res = await call(regional(ref.cluster), `/tunnels/${ref.id}`, {
+      const res = await call(owner, regional(ref.cluster), `/tunnels/${ref.id}`, {
         method: 'PUT',
         body: { tunnelId: ref.id, labels },
       });
       if (!res.ok) throw new Error(`${res.status} labelling tunnel ${ref.id}`);
     },
 
-    async remove(ref) {
-      const res = await call(regional(ref.cluster), `/tunnels/${ref.id}`, { method: 'DELETE' });
+    async remove(owner, ref) {
+      const res = await call(owner, regional(ref.cluster), `/tunnels/${ref.id}`, {
+        method: 'DELETE',
+      });
       if (!res.ok && res.status !== 404) throw new Error(`${res.status} deleting tunnel ${ref.id}`);
     },
   };
@@ -253,6 +267,12 @@ interface TunnelRow {
   created_at: number;
 }
 
+/** A row of the tunnels table, with the owner of its box. */
+interface OwnedTunnelRow extends TunnelRow {
+  /** The owner of the box that served the tunnel last. */
+  owner: string;
+}
+
 /**
  * Keeps the tunnels table in line with what the boxes serve, and deletes the
  * remembered tunnels that no box has served for TUNNEL_GRACE_MS.
@@ -265,7 +285,7 @@ export class TunnelReconciler {
    * @param db The database that holds the tunnels table.
    * @param api The Dev Tunnels API.
    * @param deploymentId The id that the labels of this deployment carry.
-   * @param readBoxes Reads every box that has not been deleted.
+   * @param readBoxes Reads every box of the given owners that has not been deleted.
    * @param now The clock, in epoch milliseconds.
    */
   constructor(
@@ -275,8 +295,8 @@ export class TunnelReconciler {
     private readonly api: TunnelApi,
     /** The id this deployment's labels carry. */
     private readonly deploymentId: string,
-    /** Reads every box that has not been deleted. */
-    private readonly readBoxes: () => Promise<BoxReading[]>,
+    /** Reads every box of the given owners that has not been deleted. */
+    private readonly readBoxes: (owners: ReadonlySet<string>) => Promise<BoxReading[]>,
     /** The clock, in epoch milliseconds. */
     private readonly now: () => number = Date.now,
   ) {}
@@ -311,10 +331,22 @@ export class TunnelReconciler {
   /**
    * Reads every box, remembers the tunnels the boxes serve, and deletes the
    * remembered tunnels that have gone unserved for TUNNEL_GRACE_MS.
+   *
+   * The boxes and the tunnels of a user without a token stay as they are.
    */
   async tick(): Promise<void> {
-    if (!this.api.available()) return;
-    const readings = await this.readBoxes();
+    const tokens = new Map<string, boolean>();
+    const hasToken = (owner: string): boolean => {
+      const known = tokens.get(owner) ?? this.api.available(owner);
+      tokens.set(owner, known);
+      return known;
+    };
+    // The reading runs a command in each box, so it reads only the boxes of owners with a token.
+    const owners = this.db
+      .prepare("SELECT DISTINCT owner FROM boxes WHERE status != 'deleted'")
+      .all() as Array<{ owner: string }>;
+    const readable = new Set(owners.map((row) => row.owner).filter(hasToken));
+    const readings = readable.size > 0 ? await this.readBoxes(readable) : [];
     // A box that could not be read keeps its tunnels as they are, because the
     // reading says nothing about them.
     const unknownBoxes = new Set(readings.filter((r) => r.commands === null).map((r) => r.boxId));
@@ -323,21 +355,29 @@ export class TunnelReconciler {
     for (const reading of readings) {
       for (const ref of hostedTunnels(reading.commands ?? [])) {
         servedIds.add(ref.id);
-        await this.serve(reading.boxId, ref);
+        await this.serve(reading.boxId, reading.owner, ref);
       }
     }
 
     const now = this.now();
-    const rows = this.db.prepare('SELECT * FROM tunnels').all() as TunnelRow[];
+    // A deleted box keeps its row, so the join finds the owner of each tunnel.
+    // A tunnel without a box row belongs to the empty user.
+    const rows = this.db
+      .prepare(
+        `SELECT tunnels.*, COALESCE(boxes.owner, '') AS owner
+           FROM tunnels LEFT JOIN boxes ON boxes.id = tunnels.box_id`,
+      )
+      .all() as OwnedTunnelRow[];
     for (const row of rows) {
       if (servedIds.has(row.id) || unknownBoxes.has(row.box_id)) continue;
+      if (!hasToken(row.owner)) continue;
       if (row.unserved_since === null) {
         this.db.prepare('UPDATE tunnels SET unserved_since = ? WHERE id = ?').run(now, row.id);
         continue;
       }
       if (now - row.unserved_since < TUNNEL_GRACE_MS) continue;
       try {
-        await this.api.remove(row);
+        await this.api.remove(row.owner, row);
         this.db.prepare('DELETE FROM tunnels WHERE id = ?').run(row.id);
         log.info('deleted a tunnel no box serves any more', { tunnel: row.id, box: row.box_id });
       } catch (err) {
@@ -354,9 +394,10 @@ export class TunnelReconciler {
    * one and remembers it. A tunnel the API does not know is skipped.
    *
    * @param boxId The box id.
+   * @param owner The owner of the box.
    * @param ref The tunnel.
    */
-  private async serve(boxId: string, ref: TunnelRef): Promise<void> {
+  private async serve(boxId: string, owner: string, ref: TunnelRef): Promise<void> {
     const row = this.db.prepare('SELECT * FROM tunnels WHERE id = ?').get(ref.id) as
       | TunnelRow
       | undefined;
@@ -369,7 +410,7 @@ export class TunnelReconciler {
 
     let remote: RemoteTunnel | null;
     try {
-      remote = await this.api.get(ref);
+      remote = await this.api.get(owner, ref);
     } catch (err) {
       log.warn('could not read a tunnel a box hosts', {
         box: boxId,
@@ -389,7 +430,7 @@ export class TunnelReconciler {
       boxLabel(this.deploymentId, boxId),
     ];
     try {
-      await this.api.setLabels(ref, labels);
+      await this.api.setLabels(owner, ref, labels);
     } catch (err) {
       // The cleanup works without the label.
       log.warn('could not label a tunnel a box hosts', {

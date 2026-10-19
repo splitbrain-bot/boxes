@@ -21,6 +21,11 @@ export interface BoxesState {
    * probe answers.
    */
   images: DeploymentImages;
+  /**
+   * The username that the reverse proxy sent, or null in single user mode and
+   * until a probe answers.
+   */
+  user: string | null;
   /** The message from the last failed poll, or null. */
   error: string | null;
   /** True until the first poll has finished, with or without success. */
@@ -32,6 +37,7 @@ let state: BoxesState = {
   boxes: [],
   harnesses: [],
   images: { orchestrator: null, proxy: null, box: null },
+  user: null,
   error: null,
   loading: true,
 };
@@ -101,6 +107,7 @@ export async function refresh(): Promise<void> {
       ? {
           harnesses: health.value.harnesses,
           images: health.value.images,
+          user: health.value.user,
         }
       : {}),
     loading: false,
@@ -114,7 +121,7 @@ export async function refresh(): Promise<void> {
 export async function refreshHealth(): Promise<void> {
   try {
     const health = await api.health();
-    set({ harnesses: health.harnesses, images: health.images });
+    set({ harnesses: health.harnesses, images: health.images, user: health.user });
   } catch {
     // A failed probe keeps the held values.
   }

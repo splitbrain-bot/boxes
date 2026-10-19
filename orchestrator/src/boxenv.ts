@@ -53,7 +53,7 @@ const IMAGE_ENV_NAMES = [
  * share-app skill. The API keys of the user go in first, so a variable of
  * Boxes has priority over a key with the same name.
  *
- * @param inputs The placeholders, the methods and the settings of the deployment.
+ * @param inputs The placeholders and the methods of the owner of the box, and the settings of the deployment.
  * @returns The variables by name.
  */
 export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {

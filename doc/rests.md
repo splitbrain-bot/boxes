@@ -1,7 +1,9 @@
 # REST API
 
-The [orchestrator](orchestrator.md) serves a REST API under `/api`. The dashboard is its only client. The API is
-unauthenticated: put [authentication in front of the orchestrator](compose.md) when the deployment is reachable.
+The [orchestrator](orchestrator.md) serves a REST API under `/api`. The dashboard is its only client. The API has
+no authentication of its own, so put [authentication in front of the orchestrator](compose.md) when the deployment is
+reachable. In multi-user mode, each route gives only the data of the user in the request. See
+[Users](users.md).
 
 Requests and responses are JSON unless stated otherwise. A refusal answers with a 4xx or 5xx status and a body of `{
 "error": "…" }`.
@@ -13,8 +15,9 @@ Requests and responses are JSON unless stated otherwise. A refusal answers with 
 | GET | `/healthz` | `HealthResponse` |
 | GET | `/readyz` | `ReadyResponse`, status 200 or 503 |
 
-Liveness answers 200 always and describes what is wrong in the body. Readiness answers 200 only when the database, the
-egress proxy, and the Docker daemon are all reachable.
+Liveness answers 200 always, also without a username, and describes what is wrong in the body. In multi-user mode,
+`user` names the user of the request, and the credentials, harnesses and push subscriptions belong to the same user.
+Readiness answers 200 only when the database, the egress proxy, and the Docker daemon are all reachable.
 
 ## Harnesses
 
@@ -175,8 +178,9 @@ DELETE cancels the login and removes its container. `github` and `gitlab` have n
 | GET | `/api/settings` | `Settings` |
 | PATCH | `/api/settings` | `Settings` |
 
-Settings are the deployment's plain configuration, not secrets: the [git identity](credentials.md) the agent in a box
-commits as, and what each thread dialog last chose. PATCH writes the fields it names and answers with all of them.
+Settings are the plain configuration of the user and hold no secrets. They hold the
+[git identity](credentials.md) the agent in a box commits as, and what each thread dialog last chose. PATCH writes the
+fields it names and answers with all of them.
 
 ## Web Push
 
@@ -190,8 +194,7 @@ The key is the deployment's VAPID public key. A browser reads it before it [subs
 a `PushSubscribeBody` shaped like the browser's own `PushSubscription.toJSON()`, with the endpoint, the encryption keys,
 and an optional label. DELETE accepts `{ "endpoint": "…" }` and forgets that subscription.
 
-Boxes has no accounts: a subscription belongs to the deployment, and whatever authenticates `/api` decides who may add
-one.
+A subscription belongs to the user of the request, and DELETE forgets only a subscription of the same user.
 
 ## Static files
 

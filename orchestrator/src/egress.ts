@@ -9,7 +9,7 @@ import type {
   EgressStatus,
 } from '../../shared/types.ts';
 import type { ApiKeyRow, ApiKeyStore } from './api-keys.ts';
-import type { Config } from './config.ts';
+import type { Config, CredentialSpec } from './config.ts';
 import {
   type CredentialId,
   type CredentialMethod,
@@ -57,14 +57,39 @@ export async function resolveEgressMaterial(db: Db): Promise<EgressMaterial> {
 }
 
 /**
+ * Gives the id of a credential in the policy. The owner is the prefix, because
+ * the ids must be unique and each user can store each credential. The empty
+ * user has no prefix.
+ *
+ * @param owner The owner of the credential.
+ * @param id The id of the credential for its owner.
+ * @returns The id in the policy.
+ */
+export function policyId(owner: string, id: string): string {
+  return owner === '' ? id : `${owner}/${id}`;
+}
+
+/**
+ * Gives the id of an API key in the policy.
+ *
+ * @param key The API key.
+ * @returns The id in the policy.
+ */
+function apiKeyPolicyId(key: ApiKeyRow): string {
+  return `api-key:${policyId(key.owner, key.name)}`;
+}
+
+/**
  * Builds the policy the proxy runs, from the deployment's settings, the
  * stored material and the current rows of the credential store and the API
- * key store.
+ * key store, for every user.
  *
  * The policy always carries the CA, as boxes created before the first
- * credential already trust it. The proxy intercepts a host only while its
- * credential has a deliverable secret. An API key names no header, so the
- * proxy swaps it in whatever header carries its placeholder.
+ * credential already trust it. The proxy intercepts a host only while a
+ * credential for it has a deliverable secret. One host can have a credential
+ * of each user. The proxy selects the credential whose placeholder is in the
+ * request. An API key names no header, so the proxy swaps it in whatever
+ * header carries its placeholder.
  *
  * @param cfg The configuration of the deployment.
  * @param material The CA and the control token.
@@ -78,22 +103,27 @@ export function composePolicy(
   stored: readonly CredentialRow[],
   apiKeys: readonly ApiKeyRow[],
 ): EgressPolicy {
-  // A credential with no deliverable secret counts as absent.
-  const secrets = new Map(stored.map((row) => [row.id, deliverableSecret(row) ?? '']));
-  const configured = cfg.credentialSet.filter((spec) => (secrets.get(spec.id) ?? '') !== '');
-
-  const placeholders = new Map(stored.map((row) => [row.id, row.placeholder]));
-  const credentials: EgressCredential[] = configured.map((spec) => ({
-    id: spec.id,
-    hosts: [...spec.hosts],
-    headers: [...spec.headers],
-    ...(spec.passthroughSchemes ? { passthroughSchemes: [...spec.passthroughSchemes] } : {}),
-    placeholder: placeholders.get(spec.id) ?? '',
-    secret: secrets.get(spec.id) ?? '',
-  }));
+  const credentials: EgressCredential[] = [];
+  const configured = new Set<CredentialSpec>();
+  for (const spec of cfg.credentialSet) {
+    for (const row of stored) {
+      // A credential with no deliverable secret counts as absent.
+      const secret = row.id === spec.id ? deliverableSecret(row) : null;
+      if (!secret) continue;
+      configured.add(spec);
+      credentials.push({
+        id: policyId(row.owner, spec.id),
+        hosts: [...spec.hosts],
+        headers: [...spec.headers],
+        ...(spec.passthroughSchemes ? { passthroughSchemes: [...spec.passthroughSchemes] } : {}),
+        placeholder: row.placeholder,
+        secret,
+      });
+    }
+  }
   for (const key of apiKeys) {
     credentials.push({
-      id: `api-key:${key.name}`,
+      id: apiKeyPolicyId(key),
       hosts: [...key.hosts],
       headers: [],
       placeholder: key.placeholder,
@@ -103,7 +133,7 @@ export function composePolicy(
 
   // The proxy allows a credential's own hosts. The other hosts its tools
   // need are added here, so an allowlist cannot break an OAuth refresh.
-  const implied = configured.flatMap((spec) => [...spec.alsoAllow]);
+  const implied = [...configured].flatMap((spec) => [...spec.alsoAllow]);
   const allowedHosts =
     cfg.egressAllowedHosts.length === 0
       ? []
@@ -234,42 +264,64 @@ export class EgressManager {
   }
 
   /**
-   * Returns the placeholder that stands for a credential in a box. The empty
-   * string drops the variable from the environment of the box.
+   * Returns the placeholder that stands for a credential of a user in a box.
+   * The empty string drops the variable from the environment of the box.
    *
+   * @param owner The user.
    * @param id The id of the credential.
    * @returns The placeholder, or the empty string for a credential that is not stored.
    */
-  placeholderFor(id: string): string {
-    return this.credentials.placeholderFor(id);
+  placeholderFor(owner: string, id: string): string {
+    return this.credentials.placeholderFor(owner, id);
   }
 
   /**
-   * Returns the placeholder of each stored API key.
+   * Returns the placeholder of each stored API key of a user.
    *
+   * @param owner The user.
    * @returns The placeholders, by the name of the variable in a box.
    */
-  apiKeyEnv(): Record<string, string> {
-    return Object.fromEntries(this.apiKeys.list().map((key) => [key.name, key.placeholder]));
+  apiKeyEnv(owner: string): Record<string, string> {
+    return Object.fromEntries(this.apiKeys.list(owner).map((key) => [key.name, key.placeholder]));
   }
 
   /**
-   * Returns how a stored credential was obtained.
+   * Returns how a stored credential of a user was obtained.
    *
+   * @param owner The user.
    * @param id The id of the credential.
    * @returns The method, or null for a credential that is not stored.
    */
-  methodFor(id: CredentialId): CredentialMethod | null {
-    return this.credentials.get(id)?.method ?? null;
+  methodFor(owner: string, id: CredentialId): CredentialMethod | null {
+    return this.credentials.get(owner, id)?.method ?? null;
   }
 
   /**
-   * Returns the last health that the proxy reported, for /healthz.
+   * Returns the last health that the proxy reported.
    *
    * @returns The health, or null before the first push.
    */
   status(): EgressHealth | null {
     return this.health;
+  }
+
+  /**
+   * Returns the last health that the proxy reported, with only the credential
+   * ids of one user, for /healthz. The ids of the other users name those users.
+   *
+   * @param owner The user.
+   * @returns The health, or null before the first push.
+   */
+  statusFor(owner: string): EgressHealth | null {
+    if (!this.health) return null;
+    const own = new Set([
+      ...this.credentials.list(owner).map((row) => policyId(owner, row.id)),
+      ...this.apiKeys.list(owner).map(apiKeyPolicyId),
+    ]);
+    return {
+      ...this.health,
+      credentialIds: this.health.credentialIds.filter((id) => own.has(id)),
+    };
   }
 
   /**
@@ -284,8 +336,8 @@ export class EgressManager {
     const composed = composePolicy(
       this.cfg,
       material,
-      this.credentials.list(),
-      this.apiKeys.list(),
+      this.credentials.listAll(),
+      this.apiKeys.listAll(),
     );
 
     try {

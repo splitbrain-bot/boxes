@@ -53,7 +53,7 @@ async function deployment(
   dbs.push(db);
   const credentials = new CredentialStore(db, () => {}, cfg.credentialSet);
   for (const [id, secret] of Object.entries(secrets)) {
-    credentials.put(id as CredentialId, methods[id as CredentialId] ?? 'token', secret);
+    credentials.put('', id as CredentialId, methods[id as CredentialId] ?? 'token', secret);
   }
   const egress = new EgressManager(cfg, credentials, new ApiKeyStore(db, () => {}), db);
   await egress.prepare();

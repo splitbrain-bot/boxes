@@ -5,7 +5,7 @@ import { basename, dirname, join, normalize, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import compress from '@fastify/compress';
-import type { FastifyReply } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import Fastify from 'fastify';
 import type {
   ApiKeySummary,
@@ -59,7 +59,7 @@ import {
   countLiveBoxes,
   countPushSubscriptions,
   type Db,
-  deletePushSubscription,
+  deleteOwnPushSubscription,
   readHarnessCatalog,
   upsertPushSubscription,
 } from './db.ts';
@@ -78,7 +78,27 @@ import { runtime, setRuntime } from './runtime/runtime.ts';
 import { deploymentId, patchSettings, readSettings } from './settings.ts';
 import { fetchRepo } from './skill-repos.ts';
 import { devTunnelsApi, TunnelReconciler } from './tunnels.ts';
+import {
+  boxScope,
+  claimUnownedData,
+  hasUnownedData,
+  isMultiUser,
+  NO_USER_PAGE,
+  NO_USER_PAGE_CSP,
+  requestUser,
+} from './users.ts';
 import { setBoxOwner } from './workspaces.ts';
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    /**
+     * The user of the request, which the onRequest hook reads from the headers.
+     * Null when the request has no valid username. The empty user in single
+     * user mode.
+     */
+    user: string | null;
+  }
+}
 
 /** The version that the health endpoint reports. */
 const VERSION = '1.0.0';
@@ -255,9 +275,9 @@ export interface Orchestrator {
   cfg: Config;
   /** The manager of the egress policy, which keeps the policy in the proxy. */
   egress: EgressManager;
-  /** The credentials of the deployment, which the settings page manages. */
+  /** The credentials of each user, which the settings page manages. */
   credentials: CredentialStore;
-  /** The logins that run now, at most one for each credential. */
+  /** The logins that run now, at most one for each user and credential. */
   logins: LoginManager;
   /** The dev tunnels of each box, and the removal of tunnels that no box uses. */
   tunnels: TunnelReconciler;
@@ -313,25 +333,26 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     });
   }
   const logins = new LoginManager(credentials);
-  // Private repositories on github.com are fetched with the GitHub credential.
+  // The pull of a private repository on github.com uses the GitHub credential
+  // of the owner of the set.
   const agents = new AgentStore(
     db,
     cfg.DATA_DIR,
-    (dir, url, ref, keep) => {
-      const row = credentials.get('github');
+    (dir, url, ref, keep, owner) => {
+      const row = credentials.get(owner, 'github');
       return fetchRepo(dir, url, ref, row ? deliverableSecret(row) : null, keep);
     },
-    () => builtinSkills({ hasCredential: (id) => credentials.get(id) !== undefined }),
+    (owner) => builtinSkills({ hasCredential: (id) => credentials.get(owner, id) !== undefined }),
   );
   // The closure lets the reconciler be built before the manager it reads.
   const tunnels = new TunnelReconciler(
     db,
-    devTunnelsApi(() => {
-      const row = credentials.get('devtunnels');
+    devTunnelsApi((owner) => {
+      const row = credentials.get(owner, 'devtunnels');
       return row ? deliverableSecret(row) : null;
     }),
     deploymentId(db),
-    () => manager.processReadings(),
+    (owners) => manager.processReadings(owners),
   );
   const manager = new BoxManager(db, cfg, egress, notifier, agents, (id) => tunnels.forBox(id));
   // The manager finds the files of a box and starts its container when it is stopped.
@@ -341,7 +362,24 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   let isolationWarnings: string[] = [];
 
+  /** True while rows of the empty user wait for the first user. */
+  let unowned = isMultiUser(cfg) && hasUnownedData(db);
+
+  /**
+   * Gives the user of a request. The onRequest hook refuses each request
+   * without a valid username, except the boot endpoint and the probes.
+   *
+   * @param req The request.
+   * @returns The username, or the empty user in single user mode.
+   * @throws {HttpError} A 401 when the request has no valid username.
+   */
+  function userOf(req: FastifyRequest): string {
+    if (req.user === null) throw new HttpError(401, 'The reverse proxy sent no username');
+    return req.user;
+  }
+
   const app = Fastify({ logger: false });
+  app.decorateRequest('user', null);
 
   /**
    * Gives each octet-stream body, for example an attachment upload, to the
@@ -396,6 +434,57 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return reply.code(503).header('Retry-After', '5').send({ error: 'Boxes is starting' });
   });
 
+  /**
+   * Refuses each request without a valid username in multi-user mode, except
+   * the boot endpoint and the probes. A browser that asks for a page gets a
+   * page that tells why.
+   *
+   * The first request with a username gets the rows of the empty user. The
+   * probes cannot claim them, so a health check does not take the data.
+   */
+  app.addHook('onRequest', async (req, reply) => {
+    req.user = requestUser(req.headers, cfg.AUTH_USER_HEADER);
+    const path = req.url.split('?')[0] ?? '/';
+    if (BOOT_OPEN_PATHS.has(path)) return;
+    const user = req.user;
+    if (user === null) {
+      if (
+        req.method === 'GET' &&
+        !path.startsWith('/api') &&
+        req.headers.accept?.includes('text/html')
+      ) {
+        return reply
+          .code(401)
+          .headers({
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Content-Security-Policy': NO_USER_PAGE_CSP,
+          })
+          .send(NO_USER_PAGE);
+      }
+      return reply.code(401).send({ error: 'The reverse proxy sent no username' });
+    }
+    if (unowned && user !== '') {
+      const moved = claimUnownedData(db, user);
+      unowned = false;
+      // The ids of the moved credentials in the egress policy change.
+      if (moved > 0) repushPolicy();
+    }
+  });
+
+  /**
+   * Answers 404 for each box route that names a box the user cannot see. A
+   * box of another user gets the same answer as a box that does not exist, so
+   * a user cannot find the box ids of other users.
+   */
+  app.addHook('preHandler', async (req) => {
+    if (!req.routeOptions.url?.startsWith('/api/boxes/:id')) return;
+    const { id } = req.params as { id: string };
+    if (!manager.visibleRow(id, boxScope(cfg, userOf(req)))) {
+      throw new HttpError(404, 'Box not found');
+    }
+  });
+
   // --- REST API, without authentication (the reverse proxy in front authenticates) ---
 
   app.setErrorHandler((err, _req, reply) => {
@@ -416,18 +505,25 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * The liveness probe. It always answers 200, so a probe does not restart a
    * deployment that only has a wrong configuration. The body tells what is
    * wrong.
+   *
+   * The credentials, the harnesses, the push subscriptions and the credential
+   * ids of the egress policy are those of the user of the request. A request
+   * without a username gets those of the empty user. The number of boxes is
+   * that of the whole deployment.
    */
-  app.get('/healthz', async (): Promise<HealthResponse> => {
+  app.get('/healthz', async (req): Promise<HealthResponse> => {
     const boxes = countLiveBoxes(db);
+    const user = req.user ?? '';
     return {
       ok: true,
       version: VERSION,
+      user: isMultiUser(cfg) ? req.user : null,
       boxes,
       isolationWarnings,
-      egress: egress.status(),
-      harnesses: harnessHealth(),
-      credentials: credentials.list().map((row) => credentials.summarize(row)),
-      pushSubscriptions: countPushSubscriptions(db),
+      egress: egress.statusFor(user),
+      harnesses: harnessHealth(user),
+      credentials: credentials.list(user).map((row) => credentials.summarize(row)),
+      pushSubscriptions: countPushSubscriptions(db, user),
       // Only this field asks the runtime. The reading is cached for a minute, and an
       // image that cannot be read is null, so the probe stays green without the runtime.
       images: await deploymentImages(),
@@ -459,20 +555,21 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   app.get('/api/boot', async (): Promise<BootResponse> => boot.status());
 
   /**
-   * The credential state of each harness.
+   * The credential state of each harness for a user.
    *
    * The list holds only the harnesses with a credential in the credential set
    * of the config, because the orchestrator gives a box a placeholder only for
    * those credentials.
    *
+   * @param user The user.
    * @returns The state of each harness.
    */
-  function harnessHealth(): HarnessHealth[] {
+  function harnessHealth(user: string): HarnessHealth[] {
     const deliverable = new Set(cfg.credentialSet.map((spec) => spec.id));
     return Object.values(HARNESSES)
       .filter((h) => deliverable.has(h.credentialId))
       .map((h) => {
-        const row = credentials.get(h.credentialId);
+        const row = credentials.get(user, h.credentialId);
         // A valid credential can fail to reach a box, because a subscription from
         // a login is a document and not a header value. The reason goes in the
         // field that the dashboard shows next to the harness.
@@ -502,8 +599,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    */
   app.get(
     '/api/harnesses',
-    async (): Promise<HarnessInfo[]> =>
-      harnessHealth().map((health) => {
+    async (req): Promise<HarnessInfo[]> =>
+      harnessHealth(userOf(req)).map((health) => {
         const entry = HARNESSES[health.id];
         return {
           ...health,
@@ -515,10 +612,10 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       }),
   );
 
-  app.get('/api/boxes', async () => manager.list());
+  app.get('/api/boxes', async (req) => manager.list(boxScope(cfg, userOf(req))));
 
   app.post('/api/boxes', async (req, reply) => {
-    const created = await manager.create(parseBody(createBoxBody, req.body));
+    const created = await manager.create(parseBody(createBoxBody, req.body), userOf(req));
     return reply.code(201).send(created);
   });
 
@@ -749,85 +846,87 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   // --- Agent configuration ----------------------------------------------------
 
-  app.get('/api/agent-sets', async () => agents.listSets());
+  app.get('/api/agent-sets', async (req) => agents.listSets(userOf(req)));
 
   app.post('/api/agent-sets', async (req, reply) => {
     const body = parseBody(createAgentSetBody, req.body);
-    return reply.code(201).send(agents.createSet(body.name));
+    return reply.code(201).send(agents.createSet(userOf(req), body.name));
   });
 
   app.get('/api/agent-sets/:setId', async (req) => {
     const { setId } = req.params as { setId: string };
-    return agents.getSet(setId);
+    return agents.getSet(userOf(req), setId);
   });
 
   app.patch('/api/agent-sets/:setId', async (req) => {
     const { setId } = req.params as { setId: string };
-    return agents.updateSet(setId, parseBody(updateAgentSetBody, req.body));
+    return agents.updateSet(userOf(req), setId, parseBody(updateAgentSetBody, req.body));
   });
 
   app.delete('/api/agent-sets/:setId', async (req, reply) => {
     const { setId } = req.params as { setId: string };
-    agents.deleteSet(setId);
+    agents.deleteSet(userOf(req), setId);
     return reply.code(204).send();
   });
 
   /** Creates a skill, or replaces the one already under that name. */
   app.put('/api/agent-sets/:setId/items', async (req) => {
     const { setId } = req.params as { setId: string };
-    return agents.putItem(setId, parseBody(agentItemBody, req.body));
+    return agents.putItem(userOf(req), setId, parseBody(agentItemBody, req.body));
   });
 
   app.delete('/api/agent-sets/:setId/items', async (req) => {
     const { setId } = req.params as { setId: string };
     const { name } = req.query as { name?: string };
-    return agents.deleteItem(setId, name);
+    return agents.deleteItem(userOf(req), setId, name);
   });
 
   /** Adds a repository to take skills from, and pulls it. */
   app.post('/api/agent-sets/:setId/repos', async (req, reply) => {
     const { setId } = req.params as { setId: string };
-    return reply.code(201).send(await agents.addRepo(setId, parseBody(agentRepoBody, req.body)));
+    const body = parseBody(agentRepoBody, req.body);
+    return reply.code(201).send(await agents.addRepo(userOf(req), setId, body));
   });
 
   app.delete('/api/agent-sets/:setId/repos/:repoId', async (req) => {
     const { setId, repoId } = req.params as { setId: string; repoId: string };
-    return agents.deleteRepo(setId, repoId);
+    return agents.deleteRepo(userOf(req), setId, repoId);
   });
 
   /** Pulls one repository now, before its daily pull. */
   app.post('/api/agent-sets/:setId/repos/:repoId/pull', async (req) => {
     const { setId, repoId } = req.params as { setId: string; repoId: string };
-    return agents.refreshRepo(setId, repoId);
+    return agents.refreshRepo(userOf(req), setId, repoId);
   });
 
   /** The merged set, with the global set, for a box with this set. The editor shows it. */
   app.get('/api/agent-sets/:setId/preview', async (req) => {
     const { setId } = req.params as { setId: string };
-    agents.getSet(setId);
-    return agents.bundle(setId);
+    const user = userOf(req);
+    agents.getSet(user, setId);
+    return agents.bundle(user, setId);
   });
 
   // --- Credentials and settings ------------------------------------------------
 
   /**
-   * Lists the credentials of the deployment, without the secrets. A secret
-   * goes in through PUT and never comes back out.
+   * Lists the credentials of the user, without the secrets. A secret goes in
+   * through PUT and never comes back out.
    */
   app.get(
     '/api/credentials',
-    async (): Promise<CredentialSummary[]> =>
-      credentials.list().map((row) => credentials.summarize(row)),
+    async (req): Promise<CredentialSummary[]> =>
+      credentials.list(userOf(req)).map((row) => credentials.summarize(row)),
   );
 
   app.put('/api/credentials/:id', async (req) => {
     const id = credentialId(req.params as { id: string });
     const { method, secret } = parseBody(putCredentialBody, req.body);
-    return credentials.summarize(credentials.put(id, method, secret));
+    return credentials.summarize(credentials.put(userOf(req), id, method, secret));
   });
 
   app.delete('/api/credentials/:id', async (req, reply) => {
-    credentials.remove(credentialId(req.params as { id: string }));
+    credentials.remove(userOf(req), credentialId(req.params as { id: string }));
     return reply.code(204).send();
   });
 
@@ -843,46 +942,47 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    */
   app.post('/api/credentials/:id/login', async (req) => {
     const id = credentialId(req.params as { id: string });
-    return { loginId: logins.start(id) };
+    return { loginId: logins.start(userOf(req), id) };
   });
 
   app.get('/api/credentials/:id/login/:loginId', async (req): Promise<LoginState> => {
     const { loginId } = req.params as { loginId: string };
-    return logins.state(credentialId(req.params as { id: string }), loginId);
+    return logins.state(userOf(req), credentialId(req.params as { id: string }), loginId);
   });
 
   app.post('/api/credentials/:id/login/:loginId/code', async (req, reply) => {
     const { loginId } = req.params as { loginId: string };
     const { code } = parseBody(loginCodeBody, req.body);
-    logins.submitCode(credentialId(req.params as { id: string }), loginId, code);
+    logins.submitCode(userOf(req), credentialId(req.params as { id: string }), loginId, code);
     // The state route above reports the next state of the login.
     return reply.code(204).send();
   });
 
   app.delete('/api/credentials/:id/login/:loginId', async (req, reply) => {
     const { loginId } = req.params as { loginId: string };
-    logins.cancel(credentialId(req.params as { id: string }), loginId);
+    logins.cancel(userOf(req), credentialId(req.params as { id: string }), loginId);
     return reply.code(204).send();
   });
 
   /**
-   * Lists the API keys, with the hosts and the last four characters of each
-   * key. A key goes in through PUT and never comes back out.
+   * Lists the API keys of the user, with the hosts and the last four
+   * characters of each key. A key goes in through PUT and never comes back out.
    */
   app.get(
     '/api/api-keys',
-    async (): Promise<ApiKeySummary[]> => apiKeys.list().map((row) => apiKeys.summarize(row)),
+    async (req): Promise<ApiKeySummary[]> =>
+      apiKeys.list(userOf(req)).map((row) => apiKeys.summarize(row)),
   );
 
   app.put('/api/api-keys/:name', async (req) => {
     const { name } = req.params as { name: string };
     const { hosts, secret } = parseBody(putApiKeyBody, req.body);
-    return apiKeys.summarize(apiKeys.put(name, hosts, secret));
+    return apiKeys.summarize(apiKeys.put(userOf(req), name, hosts, secret));
   });
 
   app.delete('/api/api-keys/:name', async (req, reply) => {
     const { name } = req.params as { name: string };
-    apiKeys.remove(name);
+    apiKeys.remove(userOf(req), name);
     return reply.code(204).send();
   });
 
@@ -900,12 +1000,13 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return params.id;
   }
 
-  app.get('/api/settings', async (): Promise<Settings> => readSettings(db));
+  app.get('/api/settings', async (req): Promise<Settings> => readSettings(db, userOf(req)));
 
-  /** Writes the settings in the body and answers with all settings. */
+  /** Writes the settings in the body for the user, and answers with all settings of the user. */
   app.patch(
     '/api/settings',
-    async (req): Promise<Settings> => patchSettings(db, parseBody(patchSettingsBody, req.body)),
+    async (req): Promise<Settings> =>
+      patchSettings(db, userOf(req), parseBody(patchSettingsBody, req.body)),
   );
 
   // --- Web Push --------------------------------------------------------------
@@ -969,8 +1070,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   /**
    * Registers a browser for push, or refreshes what is stored for it.
    *
-   * Boxes has no accounts, so a subscription belongs to the deployment. The
-   * authentication in front of `/api` decides who can add one.
+   * The subscription belongs to the user of the request. A browser that
+   * subscribes again for another user moves to that user.
    */
   app.post('/api/push/subscribe', async (req, reply) => {
     const body = parseBody(pushSubscribeBody, req.body);
@@ -981,15 +1082,15 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
     // The row keeps the current VAPID key, because after a key rotation the
     // subscription cannot get messages.
-    upsertPushSubscription(db, endpoint, p256dh, auth, label, notifier.publicKey);
+    upsertPushSubscription(db, userOf(req), endpoint, p256dh, auth, label, notifier.publicKey);
     log.info('registered a push subscription', { endpoint: new URL(endpoint).origin });
     return reply.code(204).send();
   });
 
-  /** Removes the subscription of a browser, when the browser unsubscribes. */
+  /** Removes the subscription of a browser of the user, when the browser unsubscribes. */
   app.delete('/api/push/subscribe', async (req, reply) => {
     const { endpoint } = parseBody(pushUnsubscribeBody, req.body);
-    deletePushSubscription(db, endpoint);
+    deleteOwnPushSubscription(db, userOf(req), endpoint);
     return reply.code(204).send();
   });
 

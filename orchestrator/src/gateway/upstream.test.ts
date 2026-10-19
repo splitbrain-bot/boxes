@@ -2209,7 +2209,7 @@ test('the box list says which thread is holding the box awake', async () => {
   processes = [...processes, ['200', '100', shell('npm run build')]];
   await up.refreshBackgroundForTests();
 
-  const [box] = await manager.list();
+  const [box] = await manager.list(null);
   assert.equal(box?.backgroundBusy, true);
   assert.deepEqual(
     box?.threads.map((t) => [t.id, t.backgroundBusy]),
@@ -2234,7 +2234,7 @@ test('a box busy with work no thread claims is still busy', async () => {
   processes = [...processes, ['200', '100', shell('npm run build')]];
   await up.refreshBackgroundForTests();
 
-  const [box] = await manager.list();
+  const [box] = await manager.list(null);
   assert.equal(box?.backgroundBusy, true);
   assert.deepEqual(
     box?.threads.map((t) => t.backgroundBusy),
@@ -2276,7 +2276,7 @@ test('a box that is not up has nothing running in it, and says so', async () => 
   containerRunning = false;
   await up.refreshBackgroundForTests();
   assert.equal(up.backgroundActive, false);
-  const [box] = await manager.list();
+  const [box] = await manager.list(null);
   assert.equal(box?.backgroundBusy, false);
 });
 

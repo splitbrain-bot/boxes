@@ -31,6 +31,7 @@ These variables are read by the orchestrator container.
 | `HOST_DATA_DIR` | empty | Path | Host-side path corresponding to `DATA_DIR`. Usually leave this unset so Boxes discovers the Docker volume mount. Set it for rootless or nested Docker, or when `/data` is a host bind mount. Docker only. |
 | `PORT` | `3000` | Positive integer | Port on which the orchestrator listens inside its container. The shipped Compose file publishes port 3000, so changing this also requires a matching Compose change. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` | Lowest severity written to standard error. `debug` logs every forwarded ACP message. |
+| `AUTH_USER_HEADER` | empty | Empty or an HTTP header name, for example `Remote-User` | The header in which the reverse proxy sends the username. Empty is single user mode. See [Users](users.md). |
 | `BOX_IMAGE` | `ghcr.io/splitbrain/boxes/box:latest` | Non-empty image reference | Image used to create boxes. |
 | `BOX_UID` | `1020` | Positive integer | User ID used inside boxes and for workspace files. |
 | `BOX_GID` | `1020` | Positive integer | Group ID used inside boxes and for workspace files, on the same terms as `BOX_UID`. |

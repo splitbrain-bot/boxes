@@ -44,6 +44,7 @@ work on the same checkout.
 - [Kubernetes setup](doc/kubernetes.md): Run Boxes in a Kubernetes cluster in place of Docker Compose
 - [Environment variables](doc/environment.md): Every variable the orchestrator reads, and its default
 - [Credentials](doc/credentials.md): The credentials Boxes uses, how to enter them, and their path into a box
+- [Users](doc/users.md): Multiple users on one deployment, with a username passed from the reverse proxy
 - [Custom box images](doc/custom-images.md): Build a box image from the base image, with the tools of a project
 
 ### Use Boxes

@@ -31,6 +31,11 @@ let db: Db;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'boxes-tunnels-'));
   db = openDb(dir);
+  // The reconciler reads the boxes only while the owner of a box has a token.
+  db.prepare(
+    `INSERT INTO boxes (id, name, status, created_at, last_active_at)
+     VALUES ('box1', 'one', 'running', 0, 0)`,
+  ).run();
 });
 
 afterEach(() => {
@@ -60,14 +65,14 @@ function fakeApi(tunnels: RemoteTunnel[]): {
     removed,
     api: {
       available: () => true,
-      get: async (ref: TunnelRef) => {
+      get: async (_owner: string, ref: TunnelRef) => {
         reads.push(ref.id);
         return store.get(ref.id) ?? null;
       },
-      setLabels: async (ref, labels) => {
+      setLabels: async (_owner, ref, labels) => {
         labelled.push({ id: ref.id, labels });
       },
-      remove: async (ref) => {
+      remove: async (_owner, ref) => {
         removed.push(ref.id);
         store.delete(ref.id);
       },
@@ -146,7 +151,7 @@ test('a host process is read by its id and region, and nothing else counts', () 
 test('a newly served tunnel is read and labelled once, then remembered', async () => {
   const fake = fakeApi([tunnel('abc123', ['someone-elses'])]);
   const reconciler = reconcilerFor(fake.api, () => [
-    { boxId: 'box1', commands: [hostCommand('abc123')] },
+    { boxId: 'box1', owner: '', commands: [hostCommand('abc123')] },
   ]);
 
   await reconciler.tick();
@@ -200,7 +205,7 @@ test('an unserved tunnel is deleted after the grace period, and forgotten', asyn
   let commands = [hostCommand('abc123')];
   const reconciler = reconcilerFor(
     fake.api,
-    () => [{ boxId: 'box1', commands }],
+    () => [{ boxId: 'box1', owner: '', commands }],
     () => now,
   );
 
@@ -225,7 +230,7 @@ test('a host process that comes back in time keeps the tunnel', async () => {
   let commands = [hostCommand('abc123')];
   const reconciler = reconcilerFor(
     fake.api,
-    () => [{ boxId: 'box1', commands }],
+    () => [{ boxId: 'box1', owner: '', commands }],
     () => now,
   );
 
@@ -248,7 +253,7 @@ test('a host process that comes back in time keeps the tunnel', async () => {
 test('a box that cannot be read keeps its tunnels', async () => {
   const fake = fakeApi([tunnel('abc123')]);
   let now = T0;
-  let reading: BoxReading = { boxId: 'box1', commands: [hostCommand('abc123')] };
+  let reading: BoxReading = { boxId: 'box1', owner: '', commands: [hostCommand('abc123')] };
   const reconciler = reconcilerFor(
     fake.api,
     () => [reading],
@@ -256,7 +261,7 @@ test('a box that cannot be read keeps its tunnels', async () => {
   );
 
   await reconciler.tick();
-  reading = { boxId: 'box1', commands: null };
+  reading = { boxId: 'box1', owner: '', commands: null };
   now += 2 * TUNNEL_GRACE_MS;
   await reconciler.tick();
   await reconciler.tick();
@@ -268,7 +273,7 @@ test('a box that cannot be read keeps its tunnels', async () => {
 test('a deleted box no longer read still has its tunnel deleted', async () => {
   const fake = fakeApi([tunnel('abc123')]);
   let now = T0;
-  let readings: BoxReading[] = [{ boxId: 'box1', commands: [hostCommand('abc123')] }];
+  let readings: BoxReading[] = [{ boxId: 'box1', owner: '', commands: [hostCommand('abc123')] }];
   const reconciler = reconcilerFor(
     fake.api,
     () => readings,
@@ -276,6 +281,7 @@ test('a deleted box no longer read still has its tunnel deleted', async () => {
   );
 
   await reconciler.tick();
+  db.prepare("UPDATE boxes SET status = 'deleted' WHERE id = 'box1'").run();
   readings = [];
   await reconciler.tick();
   now += TUNNEL_GRACE_MS;
@@ -287,7 +293,7 @@ test('a deleted box no longer read still has its tunnel deleted', async () => {
 test('a tunnel a box hosts that the service does not know is not remembered', async () => {
   const fake = fakeApi([]);
   const reconciler = reconcilerFor(fake.api, () => [
-    { boxId: 'box1', commands: [hostCommand('gone123')] },
+    { boxId: 'box1', owner: '', commands: [hostCommand('gone123')] },
   ]);
 
   await reconciler.tick();
@@ -313,4 +319,42 @@ test('without a stored login nothing is read and nothing changes', async () => {
 
   assert.equal(read, 0);
   assert.deepEqual(fake.reads, []);
+});
+
+test('each call uses the token of the owner of the box, and a box whose owner has none is left alone', async () => {
+  db.prepare("UPDATE boxes SET owner = 'alice' WHERE id = 'box1'").run();
+  db.prepare(
+    `INSERT INTO boxes (id, name, owner, status, created_at, last_active_at)
+     VALUES ('box2', 'two', 'bob', 'running', 0, 0)`,
+  ).run();
+  const fake = fakeApi([tunnel('abc123'), tunnel('def456')]);
+  const owners: string[] = [];
+  const read: string[] = [];
+  const reconciler = new TunnelReconciler(
+    db,
+    {
+      ...fake.api,
+      available: (owner) => owner === 'alice',
+      get: async (owner, ref) => {
+        owners.push(owner);
+        return fake.api.get(owner, ref);
+      },
+    },
+    DEPLOYMENT,
+    async (readable) => {
+      read.push(...readable);
+      return [
+        { boxId: 'box1', owner: 'alice', commands: [hostCommand('abc123')] },
+        { boxId: 'box2', owner: 'bob', commands: [hostCommand('def456')] },
+      ].filter((reading) => readable.has(reading.owner));
+    },
+  );
+
+  await reconciler.tick();
+
+  // Only the boxes of an owner with a token are read.
+  assert.deepEqual(read, ['alice']);
+  assert.deepEqual(owners, ['alice']);
+  assert.deepEqual(fake.reads, ['abc123']);
+  assert.equal(tunnelCount(), 1);
 });

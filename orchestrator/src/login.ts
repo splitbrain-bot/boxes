@@ -216,6 +216,8 @@ export const gitHubClient: GitHubClient = {
 interface Flow {
   /** The login id the page polls with. */
   id: string;
+  /** The user who started the login, and who gets the credential. */
+  owner: string;
   /** The credential the login is for. */
   credentialId: CredentialId;
   /** Where the login has got to. */
@@ -235,12 +237,24 @@ interface Flow {
 }
 
 /**
- * Runs the logins, one per credential at a time. Two logins for one
- * credential would race to write the same row, so a new one cancels the old.
+ * Gives the key of the flows map for a credential of a user.
+ *
+ * @param owner The user.
+ * @param credentialId The credential.
+ * @returns The key.
+ */
+function flowKey(owner: string, credentialId: CredentialId): string {
+  return `${owner}\n${credentialId}`;
+}
+
+/**
+ * Runs the logins, one for each user and credential at a time. Two logins for
+ * one credential of a user would race to write the same row, so a new one
+ * cancels the old.
  */
 export class LoginManager {
-  /** The current flow of each credential. */
-  private readonly flows = new Map<CredentialId, Flow>();
+  /** The current flow of each credential of each user, by {@link flowKey}. */
+  private readonly flows = new Map<string, Flow>();
 
   /**
    * @param credentials The store that a finished login writes its credential to.
@@ -259,24 +273,26 @@ export class LoginManager {
   /**
    * Starts a login. It returns before the container starts, and the page
    * shows the `starting` state meanwhile. A new login cancels the current login
-   * of the same credential.
+   * of the same user and credential.
    *
+   * @param owner The user who gets the credential.
    * @param credentialId The credential to log in for.
    * @returns The login id that the page polls with.
    * @throws HttpError with status 400 when the credential has no login flow.
    */
-  start(credentialId: CredentialId): string {
+  start(owner: string, credentialId: CredentialId): string {
     if (!hasLoginFlow(credentialId)) {
       throw new HttpError(
         400,
         `${credentialId} has no login flow: paste its token on the settings page instead`,
       );
     }
-    const previous = this.flows.get(credentialId);
+    const previous = this.flows.get(flowKey(owner, credentialId));
     if (previous) this.abort(previous, 'a newer login replaced this one');
 
     const flow: Flow = {
       id: randomUUID(),
+      owner,
       credentialId,
       state: { state: 'starting' },
       login: null,
@@ -292,7 +308,7 @@ export class LoginManager {
       this.fail(flow, `the login was not finished in ${limit}`);
     }, this.timeoutMs);
     flow.timer.unref?.();
-    this.flows.set(credentialId, flow);
+    this.flows.set(flowKey(owner, credentialId), flow);
 
     void this.run(flow);
     return flow.id;
@@ -301,13 +317,14 @@ export class LoginManager {
   /**
    * Returns the state of a login.
    *
+   * @param owner The user of the login.
    * @param credentialId The credential of the login.
    * @param loginId The login id.
    * @returns The state.
    * @throws HttpError with status 404 when the login is not the current one.
    */
-  state(credentialId: CredentialId, loginId: string): LoginState {
-    return this.flow(credentialId, loginId).state;
+  state(owner: string, credentialId: CredentialId, loginId: string): LoginState {
+    return this.flow(owner, credentialId, loginId).state;
   }
 
   /**
@@ -320,14 +337,15 @@ export class LoginManager {
    * a newline into Enter. The return is written ENTER_DELAY_MS later, as a
    * separate keypress.
    *
+   * @param owner The user of the login.
    * @param credentialId The credential of the login.
    * @param loginId The login id.
    * @param code The code that the person pasted.
    * @throws HttpError with status 404 when the login is not the current one, 400 for an empty code, and 409 when
    *   the login does not wait for a code or has no stdin, such as the Codex flow.
    */
-  submitCode(credentialId: CredentialId, loginId: string, code: string): void {
-    const flow = this.flow(credentialId, loginId);
+  submitCode(owner: string, credentialId: CredentialId, loginId: string, code: string): void {
+    const flow = this.flow(owner, credentialId, loginId);
     const trimmed = code.trim();
     if (trimmed === '') throw new HttpError(400, 'code is required');
     const waiting = flow.state.state === 'awaiting_code' || flow.state.state === 'awaiting_browser';
@@ -352,12 +370,13 @@ export class LoginManager {
   /**
    * Gives up on a login and removes its container.
    *
+   * @param owner The user of the login.
    * @param credentialId The credential of the login.
    * @param loginId The login id.
    * @throws HttpError with status 404 when the login is not the current one.
    */
-  cancel(credentialId: CredentialId, loginId: string): void {
-    const flow = this.flow(credentialId, loginId);
+  cancel(owner: string, credentialId: CredentialId, loginId: string): void {
+    const flow = this.flow(owner, credentialId, loginId);
     this.abort(flow, 'the login was cancelled');
   }
 
@@ -371,13 +390,14 @@ export class LoginManager {
   /**
    * Returns the named flow.
    *
+   * @param owner The user of the login.
    * @param credentialId The credential of the login.
    * @param loginId The login id.
    * @returns The flow.
    * @throws HttpError with status 404 when the flow is not the current one.
    */
-  private flow(credentialId: CredentialId, loginId: string): Flow {
-    const flow = this.flows.get(credentialId);
+  private flow(owner: string, credentialId: CredentialId, loginId: string): Flow {
+    const flow = this.flows.get(flowKey(owner, credentialId));
     if (!flow || flow.id !== loginId) {
       throw new HttpError(404, 'no such login: it finished, was cancelled, or was replaced');
     }
@@ -480,7 +500,7 @@ export class LoginManager {
       this.fail(flow, 'codex wrote an auth.json this does not understand');
       return;
     }
-    this.credentials.put('openai', 'oauth', document.trim(), {
+    this.credentials.put(flow.owner, 'openai', 'oauth', document.trim(), {
       account: parsed.account,
       expires_at: parsed.expiresAt,
       refreshed_at: parsed.lastRefresh,
@@ -558,6 +578,7 @@ export class LoginManager {
     if (flow.settled) return;
     const now = Date.now();
     this.credentials.put(
+      flow.owner,
       'devtunnels',
       'oauth',
       JSON.stringify({ access_token: accessToken, refresh_token: answer.refresh_token ?? '' }),
@@ -660,7 +681,7 @@ export class LoginManager {
    * @param token The token.
    */
   private storeClaudeToken(flow: Flow, token: string): void {
-    this.credentials.put('claude', 'token', token, {
+    this.credentials.put(flow.owner, 'claude', 'token', token, {
       expires_at: Date.now() + CLAUDE_TOKEN_DAYS * 24 * 60 * 60 * 1000,
     });
     this.settle(flow, { state: 'done' });
@@ -707,7 +728,8 @@ export class LoginManager {
     const login = flow.login;
     flow.login = null;
     if (login) void login.remove();
-    if (this.flows.get(flow.credentialId) === flow) this.flows.delete(flow.credentialId);
+    const key = flowKey(flow.owner, flow.credentialId);
+    if (this.flows.get(key) === flow) this.flows.delete(key);
   }
 
   /**

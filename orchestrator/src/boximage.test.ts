@@ -689,8 +689,8 @@ describe('one operation per box at a time', () => {
 describe('making a box ready', () => {
   it('writes its files, runs the setup and installs the agent set after a start, once', async () => {
     insertBox('a1', 'sha256:one');
-    orchestrator.agents.putItem('global', { name: 'ship', content: 'Open a PR.' });
-    patchSettings(db, { gitName: 'Some "One"', gitEmail: 'one@example.com' });
+    orchestrator.agents.putItem('', 'global', { name: 'ship', content: 'Open a PR.' });
+    patchSettings(db, '', { gitName: 'Some "One"', gitEmail: 'one@example.com' });
 
     await orchestrator.manager.start('a1');
 

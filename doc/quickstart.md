@@ -97,6 +97,9 @@ requirements:
 - The proxy must forward WebSocket upgrades for the paths under `/ws`. The dashboard uses these paths to attach to
   threads and terminals.
 
+For multi-user mode, the proxy must also send the username in a header, so that each user has their own boxes and
+credentials. See [Users](users.md).
+
 A proxy on the Docker host reaches the orchestrator on the published loopback port. A proxy in a container reaches it
 over a shared Docker network instead; the published port can then go.
 

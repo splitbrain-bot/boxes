@@ -10,14 +10,13 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { type Pack, pack } from 'tar-stream';
-import {
-  type AgentBundlePreview,
-  type AgentItem,
-  type AgentItemBody,
-  type AgentRepoBody,
-  type AgentSetDetail,
-  type AgentSetSummary,
-  GLOBAL_AGENT_SET,
+import type {
+  AgentBundlePreview,
+  AgentItem,
+  AgentItemBody,
+  AgentRepoBody,
+  AgentSetDetail,
+  AgentSetSummary,
 } from '../../shared/types.ts';
 import type { BuiltinSkill } from './builtin-skills.ts';
 import type { AgentItemRow, AgentRepoRow, AgentSetRow, Db } from './db.ts';
@@ -83,54 +82,95 @@ interface Bundle {
   overrides: string[];
 }
 
+/** The display name of the global set of a user. */
+const GLOBAL_SET_NAME = 'Global';
+
 /**
  * The store of agent sets, with their skills and repositories.
  *
- * Each change returns the whole set, so a client needs one request per screen.
+ * Each set belongs to one user. Each user has one global set. Each change
+ * returns the whole set, so a client needs one request per screen.
  */
 export class AgentStore {
   /**
    * @param db The database that stores the sets.
    * @param dataDir The DATA_DIR that holds the repository checkouts.
-   * @param fetcher The function that fetches a repository into its checkout.
-   * @param builtins The function that returns the built-in skills of the orchestrator.
+   * @param fetcher The function that fetches a repository into its checkout for the owner of its set.
+   * @param builtins The function that returns the built-in skills of the orchestrator for a user.
    */
   constructor(
     /** Where the sets are stored. */
     private readonly db: Db,
     /** The DATA_DIR the repository checkouts are written under. */
     private readonly dataDir: string,
-    /** Fetches a repository into its checkout. */
-    private readonly fetcher: RepoFetcher = (dir, url, ref, keep) =>
+    /** Fetches a repository into its checkout, for the owner of its set. */
+    private readonly fetcher: OwnedRepoFetcher = (dir, url, ref, keep) =>
       fetchRepo(dir, url, ref, null, keep),
-    /** Returns the built-in skills of the orchestrator. */
-    private readonly builtins: () => BuiltinSkill[] = () => [],
+    /** Returns the built-in skills of the orchestrator for a user. */
+    private readonly builtins: (owner: string) => BuiltinSkill[] = () => [],
   ) {}
 
   /** The pulls running now, by repository id. */
   private readonly pulls = new Map<string, Promise<void>>();
 
   /**
-   * Lists every set.
+   * Lists the sets of a user.
    *
+   * @param owner The user.
    * @returns The summaries of the sets, the global set first and the rest by name.
    */
-  listSets(): AgentSetSummary[] {
+  listSets(owner: string): AgentSetSummary[] {
+    this.globalId(owner);
     const rows = this.db
-      .prepare('SELECT * FROM agent_sets ORDER BY (id = ?) DESC, name COLLATE NOCASE ASC')
-      .all(GLOBAL_AGENT_SET) as AgentSetRow[];
+      .prepare(
+        'SELECT * FROM agent_sets WHERE owner = ? ORDER BY global DESC, name COLLATE NOCASE ASC',
+      )
+      .all(owner) as AgentSetRow[];
     return rows.map((row) => this.summarize(row));
   }
 
   /**
-   * Gives one set with its AGENTS.md, skills and repositories.
+   * Gives the id of the global set of a user, and makes the set when the user has none.
    *
+   * @param owner The user.
+   * @returns The id of the global set.
+   */
+  globalId(owner: string): string {
+    const row = this.globalRow(owner);
+    if (row) return row.id;
+    const id = `as${randomBytes(5).toString('hex')}`;
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO agent_sets (id, owner, global, name, agents_md, created_at, updated_at)
+         VALUES (?, ?, 1, ?, '', ?, ?)`,
+      )
+      .run(id, owner, GLOBAL_SET_NAME, now, now);
+    return id;
+  }
+
+  /**
+   * Gives the row of the global set of a user.
+   *
+   * @param owner The user.
+   * @returns The row, or undefined when the user has no global set yet.
+   */
+  private globalRow(owner: string): AgentSetRow | undefined {
+    return this.db.prepare('SELECT * FROM agent_sets WHERE owner = ? AND global = 1').get(owner) as
+      | AgentSetRow
+      | undefined;
+  }
+
+  /**
+   * Gives one set of a user with its AGENTS.md, skills and repositories.
+   *
+   * @param owner The user.
    * @param id The id of the set.
    * @returns The set.
-   * @throws {HttpError} A 404 when the set does not exist.
+   * @throws {HttpError} A 404 when the user has no set with this id.
    */
-  getSet(id: string): AgentSetDetail {
-    const row = this.mustGet(id);
+  getSet(owner: string, id: string): AgentSetDetail {
+    const row = this.mustGet(owner, id);
     return {
       ...this.summarize(row),
       agentsMd: row.agents_md,
@@ -148,16 +188,17 @@ export class AgentStore {
   }
 
   /**
-   * Gives the stored row of a set.
+   * Gives the stored row of a set of a user.
    *
+   * @param owner The user.
    * @param id The id of the set.
    * @returns The row.
-   * @throws {HttpError} A 404 when the set does not exist.
+   * @throws {HttpError} A 404 when the user has no set with this id.
    */
-  private mustGet(id: string): AgentSetRow {
-    const row = this.db.prepare('SELECT * FROM agent_sets WHERE id = ?').get(id) as
-      | AgentSetRow
-      | undefined;
+  private mustGet(owner: string, id: string): AgentSetRow {
+    const row = this.db
+      .prepare('SELECT * FROM agent_sets WHERE id = ? AND owner = ?')
+      .get(id, owner) as AgentSetRow | undefined;
     if (!row) throw new HttpError(404, 'Agent set not found');
     return row;
   }
@@ -222,7 +263,7 @@ export class AgentStore {
     return {
       id: row.id,
       name: row.name,
-      global: row.id === GLOBAL_AGENT_SET,
+      global: row.global === 1,
       hasAgentsMd: row.agents_md.trim() !== '',
       skillCount: counts.skills,
       repoCount: repos.n,
@@ -233,13 +274,17 @@ export class AgentStore {
   }
 
   /**
-   * Checks if a set exists.
+   * Checks if a user has a set.
    *
+   * @param owner The user.
    * @param id The id of the set.
-   * @returns True when the set exists.
+   * @returns True when the set exists and belongs to the user.
    */
-  has(id: string): boolean {
-    return this.db.prepare('SELECT 1 FROM agent_sets WHERE id = ?').get(id) !== undefined;
+  has(owner: string, id: string): boolean {
+    return (
+      this.db.prepare('SELECT 1 FROM agent_sets WHERE id = ? AND owner = ?').get(id, owner) !==
+      undefined
+    );
   }
 
   /**
@@ -257,58 +302,68 @@ export class AgentStore {
   }
 
   /**
-   * Adds a set. The orchestrator makes the id, so user input never names a path.
+   * Adds a set for a user. The orchestrator makes the id, so user input never names a path.
    *
+   * @param owner The user.
    * @param name The display name of the set.
    * @returns The new set.
    * @throws {HttpError} A 400 when the name is empty or too long.
    */
-  createSet(name: string): AgentSetDetail {
+  createSet(owner: string, name: string): AgentSetDetail {
     const clean = validSetName(name);
     const now = Date.now();
     const id = `as${randomBytes(5).toString('hex')}`;
     this.db
       .prepare(
-        `INSERT INTO agent_sets (id, name, agents_md, created_at, updated_at)
-         VALUES (?, ?, '', ?, ?)`,
+        `INSERT INTO agent_sets (id, owner, name, agents_md, created_at, updated_at)
+         VALUES (?, ?, ?, '', ?, ?)`,
       )
-      .run(id, clean, now, now);
-    return this.getSet(id);
+      .run(id, owner, clean, now, now);
+    return this.getSet(owner, id);
   }
 
   /**
    * Renames a set, or replaces its AGENTS.md. A field that is absent stays the same.
    *
+   * @param owner The user.
    * @param id The id of the set.
    * @param body The new name, the new AGENTS.md, or both.
    * @returns The changed set.
-   * @throws {HttpError} A 404 when the set does not exist, or a 400 when a field is not valid.
+   * @throws {HttpError} A 404 when the user has no such set, or a 400 when a field is not valid.
    */
-  updateSet(id: string, body: { name?: unknown; agentsMd?: unknown }): AgentSetDetail {
-    const row = this.mustGet(id);
+  updateSet(
+    owner: string,
+    id: string,
+    body: { name?: unknown; agentsMd?: unknown },
+  ): AgentSetDetail {
+    const row = this.mustGet(owner, id);
     const name = body.name === undefined ? row.name : validSetName(body.name);
     const agentsMd =
       body.agentsMd === undefined ? row.agents_md : validContent(body.agentsMd, 'agentsMd');
     this.db
       .prepare('UPDATE agent_sets SET name = ?, agents_md = ?, updated_at = ? WHERE id = ?')
       .run(name, agentsMd, Date.now(), id);
-    return this.getSet(id);
+    return this.getSet(owner, id);
   }
 
   /**
    * Removes a set and the checkouts of its repositories. The global set cannot
-   * be removed, because every box gets it.
+   * be removed, because every box of its owner gets it.
    *
    * The database clears the set from each box that uses it. At its next
    * start, such a box gets only the global set.
    *
+   * @param owner The user.
    * @param id The id of the set.
-   * @throws {HttpError} A 404 when the set does not exist, or a 400 for the global set.
+   * @throws {HttpError} A 404 when the user has no such set, or a 400 for the global set.
    */
-  deleteSet(id: string): void {
-    this.mustGet(id);
-    if (id === GLOBAL_AGENT_SET) {
-      throw new HttpError(400, 'The global set is applied to every box and cannot be deleted');
+  deleteSet(owner: string, id: string): void {
+    const row = this.mustGet(owner, id);
+    if (row.global === 1) {
+      throw new HttpError(
+        400,
+        'The global set is applied to every box of its owner and cannot be deleted',
+      );
     }
     const repos = this.repoRows(id);
     this.db.prepare('DELETE FROM agent_sets WHERE id = ?').run(id);
@@ -319,14 +374,15 @@ export class AgentStore {
   /**
    * Creates a skill, or replaces the skill with the same name.
    *
+   * @param owner The user.
    * @param id The id of the set.
    * @param body The name and the content of the skill.
    * @returns The changed set.
-   * @throws {HttpError} A 404 when the set does not exist, or a 400 when a field is not valid or the
-   *   set is full.
+   * @throws {HttpError} A 404 when the user has no such set, or a 400 when a field is not valid or
+   *   the set is full.
    */
-  putItem(id: string, body: AgentItemBody | undefined): AgentSetDetail {
-    this.mustGet(id);
+  putItem(owner: string, id: string, body: AgentItemBody | undefined): AgentSetDetail {
+    this.mustGet(owner, id);
     const name = validItemName(body?.name);
     const content = validContent(body?.content, 'content');
     const now = Date.now();
@@ -354,40 +410,46 @@ export class AgentStore {
         .run(id, name, content, now, now);
       this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(now, id);
     })();
-    return this.getSet(id);
+    return this.getSet(owner, id);
   }
 
   /**
    * Removes one skill.
    *
+   * @param owner The user.
    * @param id The id of the set.
    * @param name The name of the skill.
    * @returns The changed set.
-   * @throws {HttpError} A 404 when the set or the skill does not exist, or a 400 for a name that is
-   *   not valid.
+   * @throws {HttpError} A 404 when the user has no such set or the skill does not exist, or a 400
+   *   for a name that is not valid.
    */
-  deleteItem(id: string, name: unknown): AgentSetDetail {
-    this.mustGet(id);
+  deleteItem(owner: string, id: string, name: unknown): AgentSetDetail {
+    this.mustGet(owner, id);
     const info = this.db
       .prepare('DELETE FROM agent_items WHERE set_id = ? AND name = ?')
       .run(id, validItemName(name));
     if (info.changes === 0) throw new HttpError(404, 'No such skill');
     this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(Date.now(), id);
-    return this.getSet(id);
+    return this.getSet(owner, id);
   }
 
   /**
    * Adds a repository to a set and pulls it. A failed pull is recorded on the
    * repository, which stays in the set.
    *
+   * @param owner The user.
    * @param setId The id of the set.
    * @param body The URL and the ref of the repository.
    * @returns The changed set.
-   * @throws {HttpError} A 404 when the set does not exist, or a 400 when a field is not valid or the
-   *   set has the maximum number of repositories.
+   * @throws {HttpError} A 404 when the user has no such set, or a 400 when a field is not valid or
+   *   the set has the maximum number of repositories.
    */
-  async addRepo(setId: string, body: AgentRepoBody | undefined): Promise<AgentSetDetail> {
-    this.mustGet(setId);
+  async addRepo(
+    owner: string,
+    setId: string,
+    body: AgentRepoBody | undefined,
+  ): Promise<AgentSetDetail> {
+    this.mustGet(owner, setId);
     const url = validRepoUrl(body?.url);
     const ref = validRef(body?.ref);
     const count = this.db
@@ -409,41 +471,43 @@ export class AgentStore {
       this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(now, setId);
     })();
     await this.pullRepo(id);
-    return this.getSet(setId);
+    return this.getSet(owner, setId);
   }
 
   /**
    * Removes a repository from a set, with its checkout.
    *
+   * @param owner The user.
    * @param setId The id of the set.
    * @param repoId The id of the repository.
    * @returns The changed set.
-   * @throws {HttpError} A 404 when the set or the repository does not exist.
+   * @throws {HttpError} A 404 when the user has no such set or the repository does not exist.
    */
-  deleteRepo(setId: string, repoId: string): AgentSetDetail {
-    this.mustGet(setId);
+  deleteRepo(owner: string, setId: string, repoId: string): AgentSetDetail {
+    this.mustGet(owner, setId);
     const info = this.db
       .prepare('DELETE FROM agent_repos WHERE id = ? AND set_id = ?')
       .run(repoId, setId);
     if (info.changes === 0) throw new HttpError(404, 'No such repository');
     rmSync(repoDir(this.dataDir, repoId), { recursive: true, force: true });
     this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(Date.now(), setId);
-    return this.getSet(setId);
+    return this.getSet(owner, setId);
   }
 
   /**
    * Pulls one repository of a set now.
    *
+   * @param owner The user.
    * @param setId The id of the set.
    * @param repoId The id of the repository.
    * @returns The set after the pull.
-   * @throws {HttpError} A 404 when the set does not exist or does not have the repository.
+   * @throws {HttpError} A 404 when the user has no such set or the set does not have the repository.
    */
-  async refreshRepo(setId: string, repoId: string): Promise<AgentSetDetail> {
-    this.mustGet(setId);
+  async refreshRepo(owner: string, setId: string, repoId: string): Promise<AgentSetDetail> {
+    this.mustGet(owner, setId);
     if (this.repoRow(repoId)?.set_id !== setId) throw new HttpError(404, 'No such repository');
     await this.pullRepo(repoId);
-    return this.getSet(setId);
+    return this.getSet(owner, setId);
   }
 
   /**
@@ -484,7 +548,8 @@ export class AgentStore {
 
   /**
    * Fetches one repository and records its commit and skills. A failed fetch
-   * is recorded, not thrown, and the last good checkout stays in use.
+   * is recorded, not thrown, and the last good checkout stays in use. The
+   * fetcher gets the owner of the set.
    *
    * @param repoId The id of the repository.
    */
@@ -492,10 +557,20 @@ export class AgentStore {
     const row = this.repoRow(repoId);
     if (!row) return;
     const exists = (): boolean => this.repoRow(repoId) !== undefined;
+    const set = this.db.prepare('SELECT owner FROM agent_sets WHERE id = ?').get(row.set_id) as
+      | { owner: string }
+      | undefined;
+    if (!set) return;
 
     let commit: string;
     try {
-      commit = await this.fetcher(repoDir(this.dataDir, repoId), row.url, row.ref, exists);
+      commit = await this.fetcher(
+        repoDir(this.dataDir, repoId),
+        row.url,
+        row.ref,
+        exists,
+        set.owner,
+      );
     } catch (err) {
       const error = (err as Error).message;
       log.warn('could not pull a skill repository', { url: row.url, ref: row.ref, error });
@@ -523,11 +598,12 @@ export class AgentStore {
   /**
    * Gives the merged set for a box, in the form that the editor shows.
    *
+   * @param owner The owner of the box.
    * @param setId The id of the set that the box selected, or null for only the global set.
    * @returns The merged AGENTS.md, the skills with their sources, and the overridden skill names.
    */
-  bundle(setId: string | null): AgentBundlePreview {
-    const { agentsMd, skills, overrides } = this.merge(setId);
+  bundle(owner: string, setId: string | null): AgentBundlePreview {
+    const { agentsMd, skills, overrides } = this.merge(owner, setId);
     return {
       agentsMd,
       skills: skills.map((skill) => ({ name: skill.name, repo: skill.repo })),
@@ -536,25 +612,24 @@ export class AgentStore {
   }
 
   /**
-   * Merges the selected set over the global set.
+   * Merges the selected set over the global set of the owner.
    *
    * The merged AGENTS.md is the global AGENTS.md, then a blank line, then the
    * AGENTS.md of the selected set. A skill of the selected set replaces a
-   * skill of the global set with the same name.
+   * skill of the global set with the same name. A selected set of another user
+   * counts as no selection.
    *
+   * @param owner The owner of the box.
    * @param setId The id of the selected set, or null for only the global set.
    * @returns The merged set.
    */
-  private merge(setId: string | null): Bundle {
-    const global = this.db.prepare('SELECT * FROM agent_sets WHERE id = ?').get(GLOBAL_AGENT_SET) as
-      | AgentSetRow
-      | undefined;
-    const extra =
-      setId && setId !== GLOBAL_AGENT_SET
-        ? (this.db.prepare('SELECT * FROM agent_sets WHERE id = ?').get(setId) as
-            | AgentSetRow
-            | undefined)
-        : undefined;
+  private merge(owner: string, setId: string | null): Bundle {
+    const global = this.globalRow(owner);
+    const extra = setId
+      ? (this.db
+          .prepare('SELECT * FROM agent_sets WHERE id = ? AND owner = ? AND global = 0')
+          .get(setId, owner) as AgentSetRow | undefined)
+      : undefined;
 
     const agentsMd = [global?.agents_md ?? '', extra?.agents_md ?? '']
       .map((part) => part.trim())
@@ -604,13 +679,14 @@ export class AgentStore {
    * holds the built-in skills of the orchestrator, except where the set has a
    * skill with the same name.
    *
+   * @param owner The owner of the box.
    * @param setId The id of the set that the box selected, or null for only the global set.
    * @returns The tar stream.
    */
-  pack(setId: string | null): Readable {
-    const bundle = this.merge(setId);
+  pack(owner: string, setId: string | null): Readable {
+    const bundle = this.merge(owner, setId);
     const names = new Set(bundle.skills.map((skill) => skill.name));
-    for (const skill of this.builtins()) {
+    for (const skill of this.builtins(owner)) {
       if (!names.has(skill.name))
         bundle.skills.push({ name: skill.name, repo: null, content: skill.content });
     }
@@ -631,6 +707,15 @@ export class AgentStore {
     return Readable.from(tar);
   }
 }
+
+/**
+ * Fetches a repository into its checkout, like {@link RepoFetcher}, with the
+ * owner of the set of the repository as the last argument. The owner selects
+ * the credential of the fetch.
+ */
+export type OwnedRepoFetcher = (
+  ...args: [...Parameters<RepoFetcher>, owner: string]
+) => ReturnType<RepoFetcher>;
 
 /**
  * Gives the skills that the last good pull of a repository found.

@@ -66,7 +66,8 @@ on a node with free memory.
 The orchestrator has no authentication of its own. The Ingress in `k8s/ingress.yaml` has a placeholder for the
 authentication of the ingress controller, and it is not safe until you fill it in. The network policy
 `boxes-orchestrator` lets only the namespace `ingress-nginx` connect to the orchestrator. Change it to the namespace of
-your ingress controller.
+your ingress controller. For multi-user mode, the authentication of the ingress controller must send the username in a
+header. See [Users](users.md).
 
 Without an Ingress, a port forward connects to the orchestrator:
 

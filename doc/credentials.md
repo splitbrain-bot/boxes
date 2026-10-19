@@ -1,7 +1,8 @@
 # Credentials
 
 Credentials authenticate the services the processes in a box talk to. They are entered on the settings page of the
-dashboard and stored in the [orchestrator database](storage.md).
+dashboard and stored in the [orchestrator database](storage.md). In multi-user mode, each user has their own
+credentials, and a box uses the credentials of its owner. See [Users](users.md).
 
 ## The path of a credential into a box
 
@@ -107,13 +108,13 @@ Each credential carries a status:
 - **failing** — the last refresh failed. The reason is stored with the credential and shown on the settings page. The
   credential is kept, and the next refresh retries it.
 
-Removing a credential on the settings page deletes it from the database; the proxy then stops intercepting its hosts.
+Removing a credential on the settings page deletes it from the database, and the proxy then stops using its secret.
 
 ## Git identity
 
 The settings page also sets the identity git commits as. The orchestrator writes it to `~/.config/git/config` in every
-box at each start. Git reads that file as global configuration, and `~/.gitconfig` of the agent wins over it. Both are
-settings, not credentials: they authenticate nothing.
+box of the user at each start. Git reads that file as global configuration, and `~/.gitconfig` of the agent wins over
+it. Both are settings, not credentials: they authenticate nothing.
 
 ## Technical internals
 

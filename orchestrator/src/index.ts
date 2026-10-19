@@ -20,6 +20,7 @@ import {
   startTunnelReconciler,
 } from './reaper.ts';
 import { runtime } from './runtime/runtime.ts';
+import { boxScope, requestUser } from './users.ts';
 
 /**
  * Claims DATA_DIR, or logs that another orchestrator holds it and exits.
@@ -126,11 +127,20 @@ app.server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) =>
   }
   const threadId = match?.[2] ?? null;
 
-  // A token opens only the box the path names. A missing or deleted box has
-  // no token and is refused like a wrong token, so the handshake does not
-  // reveal which boxes exist. The ACP and terminal endpoints share the token.
-  const row = manager.getRow(boxId);
-  const live = row && row.status !== 'deleted' ? row : null;
+  // The reverse proxy sends the username on an upgrade as on each other request.
+  const user = requestUser(req.headers, cfg.AUTH_USER_HEADER);
+  if (user === null) {
+    log.warn('rejected WS upgrade without a username', { boxId });
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  // A token opens only the box the path names. A missing or deleted box and a
+  // box of another user have no token and are refused like a wrong token, so
+  // the handshake does not reveal which boxes exist. The ACP and terminal
+  // endpoints share the token.
+  const live = manager.visibleRow(boxId, boxScope(cfg, user)) ?? null;
 
   const check = checkUpgrade(
     req.headers['sec-websocket-protocol'],
