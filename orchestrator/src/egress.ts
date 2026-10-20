@@ -115,7 +115,6 @@ export function composePolicy(
         id: policyId(row.owner, spec.id),
         hosts: [...spec.hosts],
         headers: [...spec.headers],
-        ...(spec.passthroughSchemes ? { passthroughSchemes: [...spec.passthroughSchemes] } : {}),
         placeholder: row.placeholder,
         secret,
       });

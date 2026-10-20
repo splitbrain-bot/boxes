@@ -25,7 +25,7 @@ export type DenialCategory =
   | 'allowlist'
   | 'blocked-address'
   | 'dns'
-  | 'foreign-credential'
+  | 'credential-upgrade'
   | 'plaintext-credential-host'
   | 'no-policy';
 

@@ -185,9 +185,8 @@ test('the credential set describes where each credential travels', () => {
     assert.equal(gitlab?.placeholderPrefix, 'glpat-');
 
     const devtunnels = credentialSet.find((c) => c.id === 'devtunnels');
-    // The control planes and the relays, whose tunnel tokens pass unchanged.
+    // The control planes and the relays.
     assert.deepEqual(devtunnels?.hosts, ['*.rel.tunnels.api.visualstudio.com']);
-    assert.deepEqual(devtunnels?.passthroughSchemes, ['tunnel']);
     assert.equal(devtunnels?.placeholderPrefix, 'ghu_');
   });
 });

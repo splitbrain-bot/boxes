@@ -231,7 +231,7 @@ export class Interceptor {
   private upgradeAllowed(req: CompletedRequest): boolean {
     const { host, verdict } = this.screen(req);
     if (verdict.action === 'pass') return true;
-    const category = verdict.action === 'refuse' ? verdict.category : 'foreign-credential';
+    const category = verdict.action === 'refuse' ? verdict.category : 'credential-upgrade';
     const reason =
       verdict.action === 'refuse'
         ? verdict.reason
@@ -243,8 +243,8 @@ export class Interceptor {
 
   /**
    * Runs the checks that requests and upgrades share. The request must come
-   * from the front door over loopback, must use TLS to a credential host, and
-   * must pass decideCredentials.
+   * from the front door over loopback and must use TLS to a credential host.
+   * decideCredentials then decides the swap.
    *
    * @param req The intercepted request or upgrade.
    * @returns The hostname of the request and the result of the checks.
@@ -289,14 +289,7 @@ export class Interceptor {
       };
     }
 
-    const verdict = decideCredentials(host, req.headers, policy);
-    if (verdict.action === 'deny') {
-      return {
-        host,
-        verdict: { action: 'refuse', category: 'foreign-credential', reason: verdict.reason },
-      };
-    }
-    return { host, verdict };
+    return { host, verdict: decideCredentials(host, req.headers, policy) };
   }
 
   /**

@@ -381,16 +381,16 @@ describe('the interception engine', () => {
     expect(received).toHaveLength(0);
   }, 30_000);
 
-  it('refuses an upgrade with a foreign credential', async () => {
+  it('forwards an upgrade that carries no placeholder unchanged', async () => {
+    const tunnelToken = 'tunnel eyJhbGciOiJFUzI1NiJ9.e30.sig';
     policy = githubPolicy();
     await interceptor.apply();
 
-    const res = await upgradeThroughEngine(interceptor.port()!, {
-      authorization: 'Bearer ghp_someoneelse',
-    });
+    const res = await upgradeThroughEngine(interceptor.port()!, { authorization: tunnelToken });
 
-    expect(res.status).toBe(403);
-    expect(received).toHaveLength(0);
+    expect(res.status).toBe(101);
+    expect(received).toHaveLength(1);
+    expect(received[0]?.headers.authorization).toBe(tunnelToken);
   }, 30_000);
 
   it('forwards an upgrade that carries no credential, as it would a request', async () => {
@@ -402,34 +402,6 @@ describe('the interception engine', () => {
     expect(res.status).toBe(101);
     expect(received).toHaveLength(1);
     expect(received[0]?.headers.authorization).toBeUndefined();
-  }, 30_000);
-
-  it('forwards an upgrade under a pass-through scheme unchanged', async () => {
-    const tunnelToken = 'tunnel eyJhbGciOiJFUzI1NiJ9.e30.sig';
-    policy = githubPolicy({
-      credentials: [
-        {
-          id: 'devtunnels',
-          hosts: ['euw-data.rel.tunnels.api.visualstudio.com'],
-          headers: ['authorization'],
-          passthroughSchemes: ['tunnel'],
-          placeholder: 'ghu_PLACEHOLDERPLACEHOLDER',
-          secret: 'ghu_therealsecretvalue',
-        },
-      ],
-    });
-    await interceptor.apply();
-
-    const res = await upgradeThroughEngine(
-      interceptor.port()!,
-      { authorization: tunnelToken },
-      'euw-data.rel.tunnels.api.visualstudio.com',
-      '/api/v1/Host/Connect/abc',
-    );
-
-    expect(res.status).toBe(101);
-    expect(received).toHaveLength(1);
-    expect(received[0]?.headers.authorization).toBe(tunnelToken);
   }, 30_000);
 
   it('refuses a caller that did not come through the front door', async ({ skip }) => {
@@ -455,7 +427,7 @@ describe('the interception engine', () => {
     expect(received).toHaveLength(0);
   }, 30_000);
 
-  it('refuses a foreign credential here instead of forwarding it', async () => {
+  it('forwards a credential without a placeholder unchanged', async () => {
     policy = githubPolicy();
     await interceptor.apply();
 
@@ -463,9 +435,9 @@ describe('the interception engine', () => {
       authorization: 'Bearer ghp_someoneElsesToken',
     });
 
-    expect(res.status).toBe(403);
-    expect(res.body).toMatch(/foreign credential/);
-    expect(received).toHaveLength(0);
+    expect(res.status).toBe(200);
+    expect(received).toHaveLength(1);
+    expect(received[0]?.headers.authorization).toBe('Bearer ghp_someoneElsesToken');
   }, 30_000);
 
   it('leaves an unauthenticated request alone', async () => {
@@ -507,7 +479,7 @@ describe('the interception engine', () => {
     expect(received[0]?.headers.authorization).toBe('Bearer whatever');
   }, 30_000);
 
-  it('presents the deployment CA to an intercepted TLS client, and still refuses', async () => {
+  it('presents the deployment CA to an intercepted TLS client, and still swaps', async () => {
     policy = githubPolicy();
     await interceptor.apply();
 
@@ -522,15 +494,16 @@ describe('the interception engine', () => {
     expect(secure.getPeerCertificate().subject.CN).toBe('api.github.com');
 
     secure.write(
-      'GET /user HTTP/1.1\r\nHost: api.github.com\r\nAuthorization: Bearer nope\r\nConnection: close\r\n\r\n',
+      `GET /user HTTP/1.1\r\nHost: api.github.com\r\nAuthorization: Bearer ${PLACEHOLDER}\r\nConnection: close\r\n\r\n`,
     );
     const answer = await new Promise<string>((resolve) => {
       let body = '';
       secure.on('data', (c) => (body += c));
       secure.on('end', () => resolve(body));
     });
-    expect(answer).toMatch(/^HTTP\/1\.1 403/);
-    expect(received).toHaveLength(0);
+    expect(answer).toMatch(/^HTTP\/1\.1 200/);
+    expect(received).toHaveLength(1);
+    expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
     secure.destroy();
   }, 30_000);
 

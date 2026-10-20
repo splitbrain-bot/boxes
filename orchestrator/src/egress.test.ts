@@ -169,7 +169,7 @@ describe('composePolicy', () => {
     );
   }, 30_000);
 
-  it('carries a Dev Tunnels login as its access token, with the tunnel scheme passed', async () => {
+  it('carries a Dev Tunnels login as its access token', async () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg);
     store.put(
@@ -183,7 +183,6 @@ describe('composePolicy', () => {
 
     expect(policy.credentials).toHaveLength(1);
     expect(policy.credentials[0]?.secret).toBe('ghu_theaccesstoken');
-    expect(policy.credentials[0]?.passthroughSchemes).toEqual(['tunnel']);
   }, 30_000);
 
   it('carries an API key a user added, on its hosts and in any header', async () => {
