@@ -54,23 +54,17 @@ short allowlist thus cannot prevent an agent from reaching its API, or `git` fro
 ## Credentials
 
 The orchestrator puts only a placeholder for each credential into the environment of a box container. The real
-credentials stay in the credential store and in the memory of the proxy.
+credentials stay in the credential store and in the memory of the proxy. Thus an agent cannot leak a real credential by
+accident, for example in a commit or in a log.
 
 When a user saves a [credential](credentials.md) on the settings page, the proxy intercepts the TLS connections to the
 hosts that accept this credential. It decrypts each request, examines the credential header, and sends the request on:
 
 - If the header has the placeholder, the proxy rewrites it with the real credential.
-- If the header has a different value, the proxy refuses the request.
-- If the request has no credential header, the proxy sends it unchanged.
+- If the header has a different value, or the request has no credential header, the proxy sends it unchanged.
 
-The Dev Tunnels credential is an exception to the second rule. The `devtunnel` CLI in a box sends the placeholder to the
-Dev Tunnels API, and the proxy rewrites it with the saved credential as it does for every other credential. The API
-answers with a token for that one tunnel, and the CLI then sends this token under the `tunnel` scheme. The proxy lets
-such a token through unchanged, because the service issued it to the box. It is short-lived, it is valid for one tunnel
-only, and it cannot give access to the account.
-
-For the [other API keys](credentials.md#other-api-keys), the proxy examines every header of the request. It rewrites
-each header that has the placeholder of a key, and it sends all other headers unchanged.
+For the [other API keys](credentials.md#other-api-keys), the proxy applies these rules to every header of the request,
+not only to the credential header.
 
 The proxy does not intercept any other host. It only sends that traffic through, and does not read it.
 
@@ -194,8 +188,8 @@ the other API keys, which a user sets on the settings page.
 
 The OpenAI entry is the special case. Codex authenticates with an API key to `api.openai.com` or with a subscription
 login to `chatgpt.com`, and the two endpoints reject each other's credential. The proxy intercepts only
-`api.openai.com`: `chatgpt.com` is allowed but never intercepted, because an intercepted subscription request would be
-refused as a foreign credential. This lets an API key and a subscription login coexist in one box.
+`api.openai.com`, because only there an API key is valid. `chatgpt.com` is allowed but never intercepted, so the
+subscription login goes through unchanged. This lets an API key and a subscription login coexist in one box.
 
 ### Interception
 

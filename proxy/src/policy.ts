@@ -134,51 +134,34 @@ export type CredentialVerdict =
   /** Forward the request unchanged, because no header of it holds a placeholder. */
   | { action: 'pass' }
   /** Forward the request with the values in headers. credentialIds names the credentials that were swapped in. */
-  | { action: 'swap'; headers: Record<string, string>; credentialIds: string[] }
-  /** Refuse the request, so a foreign credential does not reach the host. reason says why. */
-  | { action: 'deny'; reason: string };
+  | { action: 'swap'; headers: Record<string, string>; credentialIds: string[] };
 
 /**
- * Finds all values of a header, blank values included.
+ * Finds the first value of a header.
  * Names are compared in lower case, so the capitalisation of a client cannot hide a header.
  *
  * @param headers The request headers.
  * @param name The header name.
- * @returns The values in the order of the headers, or an empty list when the header is missing.
+ * @returns The first value, or undefined when the header is missing.
  */
-function headerValues(
+function firstHeaderValue(
   headers: Readonly<Record<string, string | string[] | undefined>>,
   name: string,
-): string[] {
+): string | undefined {
   const wanted = name.toLowerCase();
   return Object.entries(headers)
     .filter(([key]) => key.toLowerCase() === wanted)
-    .flatMap(([, raw]) => raw ?? []);
+    .flatMap(([, raw]) => raw ?? [])[0];
 }
 
 /**
- * Finds the authorization scheme that a header value starts with.
+ * Decides which headers of a request to an intercepted host get a real credential.
  *
- * @param value The header value.
- * @returns The scheme in lower case, or null when the value is not a scheme followed by a credential.
- */
-function schemeOf(value: string): string | null {
-  return /^\s*([A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*)\s+\S/.exec(value)?.[1]?.toLowerCase() ?? null;
-}
-
-/**
- * Decides what a request to an intercepted host may carry.
- *
- * The function reads each header that a credential of the host names. When a
- * credential names no header, the function reads every header. A header with a
- * placeholder gets the real credential. A named header under a pass-through
- * scheme of its credential stays unchanged, because the host issued that value.
- * A named header with any other value refuses the request, so no foreign
- * credential reaches the host. A named header that occurs more than one time
- * also refuses the request. All other headers stay unchanged.
- *
- * A request without these headers passes, so an agent can still log in with a
- * session cookie.
+ * The function reads the first value of each header that a credential of the
+ * host names. When a credential names no header, the function reads every
+ * header. A value with the placeholder of a credential gets the real
+ * credential. All other values stay unchanged, and the host decides if it
+ * accepts them.
  *
  * @param host The hostname of the request.
  * @param headers The request headers.
@@ -204,40 +187,21 @@ export function decideCredentials(
   const used: string[] = [];
 
   for (const name of names) {
-    const values = headerValues(headers, name);
-    // Only the first value would be checked, so a repeated named header is refused.
-    if (values.length > 1 && credentials.some((c) => c.headers.includes(name))) {
-      return { action: 'deny', reason: `repeated credential header ${name} for ${host}` };
-    }
-    const present = values[0];
+    const present = firstHeaderValue(headers, name);
     if (present === undefined || present.trim() === '') continue;
 
-    // Credentials that may travel in this header, in policy order. The first
-    // credential with its placeholder in the value is swapped in.
+    // Credentials that may travel in this header, in policy order.
     const candidates = credentials.filter(
       (c) => c.headers.length === 0 || c.headers.includes(name),
     );
-    let swapped: string | null = null;
     for (const credential of candidates) {
-      swapped = swapCredentialValue(present, credential.placeholder, credential.secret);
+      const swapped = swapCredentialValue(present, credential.placeholder, credential.secret);
       if (swapped !== null) {
+        replacements[name] = swapped;
         used.push(credential.id);
         break;
       }
     }
-    if (swapped === null) {
-      const named = candidates.filter((c) => c.headers.includes(name));
-      if (named.length === 0) continue;
-      const scheme = schemeOf(present);
-      if (scheme !== null && named.some((c) => c.passthroughSchemes?.includes(scheme))) {
-        continue;
-      }
-      return {
-        action: 'deny',
-        reason: `foreign credential in ${name} for ${named[0]?.id ?? host}`,
-      };
-    }
-    replacements[name] = swapped;
   }
 
   if (used.length === 0) return { action: 'pass' };
@@ -261,7 +225,6 @@ export function policyHash(policy: EgressPolicy): string {
         id: c.id,
         hosts: [...c.hosts].map((h) => h.toLowerCase()).sort(),
         headers: [...c.headers].sort(),
-        passthroughSchemes: [...(c.passthroughSchemes ?? [])].sort(),
         placeholder: createHash('sha256').update(c.placeholder).digest('hex'),
         secret: createHash('sha256').update(c.secret).digest('hex'),
       }))
@@ -331,15 +294,7 @@ export function parsePolicy(input: unknown): EgressPolicy {
     const hosts = stringArray(c.hosts, `credential ${id} hosts`);
     if (hosts.length === 0) return fail(`credential ${id} needs at least one host`);
     const headers = stringArray(c.headers, `credential ${id} headers`).map((h) => h.toLowerCase());
-    if (c.passthroughSchemes === undefined) return { id, hosts, headers, placeholder, secret };
-    const passthroughSchemes = stringArray(
-      c.passthroughSchemes,
-      `credential ${id} passthroughSchemes`,
-    ).map((scheme) => scheme.toLowerCase());
-    for (const scheme of passthroughSchemes) {
-      if (/\s/.test(scheme)) return fail(`credential ${id} has a pass-through scheme with a space`);
-    }
-    return { id, hosts, headers, passthroughSchemes, placeholder, secret };
+    return { id, hosts, headers, placeholder, secret };
   });
 
   if (credentials.length > 0 && ca === null) {

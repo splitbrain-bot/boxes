@@ -302,12 +302,6 @@ export interface CredentialSpec {
    * of its token accepts the placeholder at startup.
    */
   placeholderPrefix: string;
-  /**
-   * The authorization schemes for tokens that the hosts issued. The proxy lets
-   * values with these schemes through unchanged.
-   * Absent means none.
-   */
-  passthroughSchemes?: readonly string[];
 }
 
 /**
@@ -356,7 +350,7 @@ const FIXED_CREDENTIALS: readonly CredentialSpec[] = [
  *
  * git sends the token as the password of an HTTP Basic pair. glab sends a
  * personal access token in PRIVATE-TOKEN and an OAuth token as a bearer.
- * The proxy reads both headers, so it replaces or refuses each form.
+ * The proxy reads both headers, so it replaces the placeholder in each form.
  *
  * @param host The GitLab host.
  * @returns The credential spec.
@@ -376,10 +370,7 @@ function gitlabCredential(host: string): CredentialSpec {
  * app. The share-app skill uses it to create tunnels.
  *
  * The pattern covers the global and regional control planes and the regional
- * relays. Only a control plane gets the GitHub token. While a tunnel is
- * hosted, the CLI sends a token for that tunnel to a control plane and to a
- * relay, with the `tunnel` scheme. The service issued that token, so it
- * passes unchanged.
+ * relays. Only a control plane gets the GitHub token.
  */
 const DEVTUNNELS_CREDENTIAL: CredentialSpec = {
   id: 'devtunnels',
@@ -387,7 +378,6 @@ const DEVTUNNELS_CREDENTIAL: CredentialSpec = {
   headers: ['authorization'],
   alsoAllow: [],
   placeholderPrefix: 'ghu_',
-  passthroughSchemes: ['tunnel'],
 };
 
 /**

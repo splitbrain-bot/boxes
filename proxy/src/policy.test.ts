@@ -43,19 +43,6 @@ const GITHUB = {
   secret: 'ghp_realrealreal',
 };
 
-/**
- * The Dev Tunnels credential. Its hosts also get tokens that the service issued
- * for one tunnel, under the tunnel scheme.
- */
-const DEVTUNNELS = {
-  id: 'devtunnels',
-  hosts: ['*.rel.tunnels.api.visualstudio.com'],
-  headers: ['authorization'],
-  passthroughSchemes: ['tunnel'],
-  placeholder: 'ghu_PLACEHOLDER',
-  secret: 'ghu_realrealreal',
-};
-
 /** A user's own API key, which names no header and so may travel in any. */
 const OPENROUTER = {
   id: 'openrouter',
@@ -205,30 +192,39 @@ describe('decideCredentials', () => {
     });
   });
 
-  it('refuses a foreign credential rather than forwarding it', () => {
-    const verdict = decideCredentials(
-      'api.github.com',
-      { authorization: 'Bearer ghp_someoneElsesToken' },
-      policy(),
-    );
-    expect(verdict.action).toBe('deny');
+  it('forwards every value without a placeholder unchanged', () => {
+    const basicJwt = `Basic ${Buffer.from('someone:eyJhbGciOi.x.y').toString('base64')}`;
+    for (const authorization of [
+      'Bearer ghp_someoneElsesToken',
+      'tunnel eyJhbGciOi.x.y',
+      'RemoteAuth abc',
+      basicJwt,
+    ]) {
+      expect(decideCredentials('api.github.com', { authorization }, policy())).toEqual({
+        action: 'pass',
+      });
+    }
   });
 
-  it('refuses a named header that occurs more than one time', () => {
-    for (const authorization of [
-      ['', 'Bearer ghp_someoneElsesToken'],
-      ['Bearer ghp_someoneElsesToken', ''],
-      [`Bearer ${GITHUB.placeholder}`, `Bearer ${GITHUB.placeholder}`],
-    ]) {
-      expect(decideCredentials('api.github.com', { authorization }, policy()).action).toBe('deny');
-    }
+  it('reads only the first value of a repeated header', () => {
     expect(
       decideCredentials(
         'api.github.com',
-        { authorization: 'Bearer ghp_someoneElsesToken', Authorization: '' },
+        { authorization: [`Bearer ${GITHUB.placeholder}`, 'Bearer ghp_someoneElsesToken'] },
         policy(),
-      ).action,
-    ).toBe('deny');
+      ),
+    ).toEqual({
+      action: 'swap',
+      headers: { authorization: `Bearer ${GITHUB.secret}` },
+      credentialIds: ['github'],
+    });
+    expect(
+      decideCredentials(
+        'api.github.com',
+        { authorization: ['Bearer ghp_someoneElsesToken', `Bearer ${GITHUB.placeholder}`] },
+        policy(),
+      ),
+    ).toEqual({ action: 'pass' });
   });
 
   it('swaps a credential that names no header in whatever header carries it', () => {
@@ -253,13 +249,13 @@ describe('decideCredentials', () => {
     ).toEqual({ action: 'pass' });
   });
 
-  it("refuses another credential host's placeholder, so hosts do not share", () => {
+  it("does not swap another credential host's placeholder, so hosts do not share", () => {
     const verdict = decideCredentials(
       'api.github.com',
       { authorization: `Bearer ${CLAUDE.placeholder}` },
       policy(),
     );
-    expect(verdict.action).toBe('deny');
+    expect(verdict).toEqual({ action: 'pass' });
   });
 
   it('swaps the key Codex sends at api.openai.com', () => {
@@ -274,18 +270,16 @@ describe('decideCredentials', () => {
       headers: { authorization: `Bearer ${OPENAI.secret}` },
       credentialIds: ['openai'],
     });
-    // A foreign key and the Claude placeholder are both refused here.
     expect(
-      decideCredentials('api.openai.com', { authorization: 'Bearer sk-somebodyelses' }, policy())
-        .action,
-    ).toBe('deny');
+      decideCredentials('api.openai.com', { authorization: 'Bearer sk-somebodyelses' }, policy()),
+    ).toEqual({ action: 'pass' });
     expect(
       decideCredentials(
         'api.openai.com',
         { authorization: `Bearer ${CLAUDE.placeholder}` },
         policy(),
-      ).action,
-    ).toBe('deny');
+      ),
+    ).toEqual({ action: 'pass' });
     // chatgpt.com, the subscription endpoint, has no credential, so any value passes there.
     expect(isInjectionHost('chatgpt.com', policy())).toBe(false);
     expect(
@@ -302,46 +296,8 @@ describe('decideCredentials', () => {
       credentialIds: ['claude'],
     });
     expect(
-      decideCredentials('api.anthropic.com', { 'x-api-key': 'sk-ant-someoneelse' }, policy())
-        .action,
-    ).toBe('deny');
-  });
-
-  it('passes a value under a pass-through scheme unchanged, and swaps the placeholder', () => {
-    const tunnels = policy({ credentials: [DEVTUNNELS] });
-    const host = 'euw-data.rel.tunnels.api.visualstudio.com';
-    // A token that the service issued for one tunnel.
-    expect(decideCredentials(host, { authorization: 'tunnel eyJhbGciOi.x.y' }, tunnels)).toEqual({
-      action: 'pass',
-    });
-    expect(decideCredentials(host, { authorization: 'Tunnel eyJhbGciOi.x.y' }, tunnels)).toEqual({
-      action: 'pass',
-    });
-    expect(
-      decideCredentials(host, { authorization: `github ${DEVTUNNELS.placeholder}` }, tunnels),
-    ).toEqual({
-      action: 'swap',
-      headers: { authorization: `github ${DEVTUNNELS.secret}` },
-      credentialIds: ['devtunnels'],
-    });
-  });
-
-  it('still refuses a foreign value under any other scheme, or under none', () => {
-    const tunnels = policy({ credentials: [DEVTUNNELS] });
-    const host = 'global.rel.tunnels.api.visualstudio.com';
-    for (const value of [
-      'github ghu_someoneelse',
-      'Bearer ghu_someoneelse',
-      'tunnel',
-      'tunnelx y',
-    ]) {
-      expect(decideCredentials(host, { authorization: value }, tunnels).action).toBe('deny');
-    }
-    // A pass-through scheme belongs to its own credential's hosts only.
-    expect(
-      decideCredentials('api.github.com', { authorization: 'tunnel eyJhbGciOi.x.y' }, policy())
-        .action,
-    ).toBe('deny');
+      decideCredentials('api.anthropic.com', { 'x-api-key': 'sk-ant-someoneelse' }, policy()),
+    ).toEqual({ action: 'pass' });
   });
 });
 
@@ -352,9 +308,6 @@ describe('policyHash', () => {
     expect(policyHash(a)).toBe(policyHash(b));
     expect(policyHash(policy({ credentials: [{ ...GITHUB, secret: 'other' }, CLAUDE] }))).not.toBe(
       policyHash(a),
-    );
-    expect(policyHash(policy({ credentials: [DEVTUNNELS] }))).not.toBe(
-      policyHash(policy({ credentials: [{ ...DEVTUNNELS, passthroughSchemes: [] }] })),
     );
   });
 
@@ -380,18 +333,6 @@ describe('parsePolicy', () => {
     });
     expect(parsed.credentials[0]?.headers).toEqual(['authorization']);
     expect(parsed.allowedHosts).toEqual(['github.com', '*.github.com']);
-  });
-
-  it('accepts pass-through schemes, lowercased, and refuses one with a space', () => {
-    const parsed = parsePolicy({
-      ...valid,
-      credentials: [{ ...DEVTUNNELS, passthroughSchemes: ['Tunnel'] }],
-    });
-    expect(parsed.credentials[0]?.passthroughSchemes).toEqual(['tunnel']);
-    expect(parsePolicy(valid).credentials[0]?.passthroughSchemes).toBeUndefined();
-    expect(() =>
-      parsePolicy({ ...valid, credentials: [{ ...DEVTUNNELS, passthroughSchemes: ['a b'] }] }),
-    ).toThrow(/space/);
   });
 
   it('accepts the empty policy the proxy boots with', () => {

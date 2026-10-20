@@ -654,9 +654,8 @@ export interface StoredAttachment {
  *
  * A box holds `placeholder`. Only the orchestrator and the proxy hold
  * `secret`. The proxy rewrites a request to one of `hosts` that carries
- * `placeholder` in one of `headers` to carry `secret`. It refuses a request
- * that carries any other value there, unless that value uses one of
- * `passthroughSchemes`.
+ * `placeholder` in one of `headers` to carry `secret`. It sends all other
+ * values unchanged.
  */
 export interface EgressCredential {
   /** A stable id for logs and status. It is not secret. */
@@ -668,19 +667,10 @@ export interface EgressCredential {
    */
   hosts: string[];
   /**
-   * The lowercase names of the headers that can carry the credential. When a
-   * header in this list holds another value, the proxy refuses the request.
-   * Empty means that any header can carry it, and the proxy refuses no header
-   * value.
+   * The lowercase names of the headers that can carry the credential. Empty
+   * means that any header can carry it.
    */
   headers: string[];
-  /**
-   * The lowercase authorization schemes whose values the host issues itself,
-   * such as a token for one resource. A header value with one of these
-   * schemes passes unchanged and does not count as a foreign credential.
-   * Absent means none.
-   */
-  passthroughSchemes?: string[];
   /** The value in the box. It has the format of the real credential but gives no access. */
   placeholder: string;
   /** The real credential. */

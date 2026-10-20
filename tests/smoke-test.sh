@@ -399,19 +399,19 @@ else
     # The placeholder authenticates as the bot only if the proxy swapped it.
     must_output "curl api.github.com/user with the placeholder is the bot" '"login"' \
       sh -c 'curl -fsS -m 15 -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user'
-    # The proxy must refuse an invented token and must not send it to GitHub.
-    must_output "an invented GitHub token is refused by the proxy" 'egress denied' \
+    # The proxy sends a value without a placeholder unchanged, so the error comes from GitHub.
+    must_output "an invented GitHub token reaches GitHub unchanged" 'Bad credentials' \
       sh -c 'curl -sS -m 15 -H "Authorization: Bearer ghp_notTheDeploymentsToken" https://api.github.com/user'
   fi
   if [ -n "$REAL_CLAUDE" ]; then
-    must_output "an invented Anthropic token is refused by the proxy" 'egress denied' \
+    must_output "an invented Anthropic token reaches Anthropic unchanged" '"type": ?"error"' \
       sh -c 'curl -sS -m 15 -H "Authorization: Bearer sk-ant-oat01-notTheDeploymentsToken" https://api.anthropic.com/v1/messages'
   fi
   if [ -n "$REAL_OPENAI" ]; then
     # An answer from OpenAI proves the proxy swapped the placeholder.
     must_output "the OpenAI placeholder is swapped and OpenAI answers" '"object"' \
       sh -c 'curl -sS -m 15 -H "Authorization: Bearer $CODEX_API_KEY" https://api.openai.com/v1/models'
-    must_output "an invented OpenAI key is refused by the proxy" 'egress denied' \
+    must_output "an invented OpenAI key reaches OpenAI unchanged" 'invalid_api_key' \
       sh -c 'curl -sS -m 15 -H "Authorization: Bearer sk-notTheDeploymentsKey" https://api.openai.com/v1/models'
     # The proxy never intercepts the host where Codex logs in.
     must_output "the login host presents its own certificate chain" 'issuer:' \
