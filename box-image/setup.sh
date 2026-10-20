@@ -87,6 +87,13 @@ if [ -n "${GH_TOKEN:-}" ]; then
 fi
 
 # --- gitlab auth ------------------------------------------------------------
+# glab clones over ssh by default, and the box network has no route for ssh.
+if glab config set --global git_protocol https >/dev/null 2>&1; then
+  log "set the git protocol of glab to https"
+else
+  log "WARNING: could not set the git protocol of glab; glab clones may use ssh and fail"
+fi
+
 # glab reads GITLAB_TOKEN and GITLAB_HOST from the environment. git uses
 # glab's credential helper for that one host.
 if [ -n "${GITLAB_TOKEN:-}" ] && [ -n "${GITLAB_HOST:-}" ]; then
