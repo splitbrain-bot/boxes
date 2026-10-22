@@ -1045,7 +1045,8 @@ export class AdapterConnection {
   }
 
   /**
-   * Logs once that this adapter has no credential to run under.
+   * Logs once that this adapter has no credential to run under. For a harness
+   * that runs on the API keys of the user, the log names those keys.
    *
    * @param err The adapter's refusal.
    */
@@ -1053,7 +1054,7 @@ export class AdapterConnection {
     if (this.unauthenticated) return;
     this.unauthenticated = true;
     this.slog.warn('the adapter has no credential to run under', {
-      credential: this.harness.credentialId,
+      credential: this.harness.credentialId ?? 'api keys',
       error: (err as Error).message,
     });
   }

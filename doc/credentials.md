@@ -96,6 +96,8 @@ start.
 
 The proxy replaces the placeholder in any header of a request to one of the hosts.
 
+The opencode harness has no credential of its own and runs on these keys. It can always run, because some of its models need no key.
+
 ## Statuses and refresh
 
 The orchestrator keeps account logins valid: it checks them once a minute and refreshes a login against its service

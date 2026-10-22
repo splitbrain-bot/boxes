@@ -559,7 +559,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    *
    * The list holds only the harnesses with a credential in the credential set
    * of the config, because the orchestrator gives a box a placeholder only for
-   * those credentials.
+   * those credentials. A harness without a credential is always in the list,
+   * and it can always run, because it has models that need no key.
    *
    * @param user The user.
    * @returns The state of each harness.
@@ -567,8 +568,16 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   function harnessHealth(user: string): HarnessHealth[] {
     const deliverable = new Set(cfg.credentialSet.map((spec) => spec.id));
     return Object.values(HARNESSES)
-      .filter((h) => deliverable.has(h.credentialId))
+      .filter((h) => h.credentialId === null || deliverable.has(h.credentialId))
       .map((h) => {
+        if (h.credentialId === null) {
+          return {
+            id: h.id,
+            label: h.label,
+            credential: null,
+            runnable: true,
+          };
+        }
         const row = credentials.get(user, h.credentialId);
         // A valid credential can fail to reach a box, because a subscription from
         // a login is a document and not a header value. The reason goes in the

@@ -14,12 +14,13 @@ test('every harness fills in every field, in the right shape', () => {
   for (const h of all) {
     assert.ok(h.label.length > 0, `${h.id}: label`);
     assert.ok(h.cmd.length > 0, `${h.id}: cmd`);
-    // The adapter is found in the process table by this token, and the
-    // adapter runs as cmd[0].
-    assert.equal(h.processToken, h.cmd[0], `${h.id}: processToken`);
+    // The orchestrator finds the adapter in the process table by this token,
+    // and the adapter runs as cmd.
+    assert.equal(h.processToken, h.cmd.join(' '), `${h.id}: processToken`);
     assert.ok(Array.isArray(h.residentProcesses), `${h.id}: residentProcesses`);
     for (const re of h.residentProcesses)
       assert.ok(re instanceof RegExp, `${h.id}: resident entry`);
+    assert.equal(typeof h.separateAgent, 'boolean', `${h.id}: separateAgent`);
     assert.ok(h.defaultModeId.length > 0, `${h.id}: defaultModeId`);
     assert.ok(h.forkModeId.length > 0, `${h.id}: forkModeId`);
     // A fork asks questions about work the original is still doing, so it
@@ -33,7 +34,10 @@ test('every harness fills in every field, in the right shape', () => {
       assert.equal(typeof h.threadMeta, 'object', `${h.id}: threadMeta`);
       assert.notEqual(h.threadMeta, null, `${h.id}: threadMeta`);
     }
-    assert.ok(['claude', 'openai', 'github'].includes(h.credentialId), `${h.id}: credentialId`);
+    assert.ok(
+      h.credentialId === null || ['claude', 'openai', 'github'].includes(h.credentialId),
+      `${h.id}: credentialId`,
+    );
     assert.equal(typeof h.env, 'function', `${h.id}: env`);
     assert.ok(h.layout.agentsMd.length > 0, `${h.id}: layout.agentsMd`);
     assert.ok(h.layout.skills.length > 0, `${h.id}: layout.skills`);
@@ -52,6 +56,8 @@ test('every layout path is relative, so it can be resolved against a home', () =
 
 test('env() puts the placeholder in one of its values', () => {
   for (const h of all) {
+    // A harness without a credential gets no placeholder.
+    if (h.credentialId === null) continue;
     const env = h.env('placeholder-value', 'token');
     const values = Object.values(env);
     assert.ok(values.includes('placeholder-value'), `${h.id}: placeholder unused`);
@@ -84,16 +90,14 @@ test('the CA variables stay out of the registry: they belong to the deployment',
   }
 });
 
-test('no two harnesses share a layout path', () => {
-  // Both layouts are installed into the same home, and a shared path would
-  // have one harness's agent set overwrite the other's.
+test('no two harnesses share an instructions file', () => {
+  // The file service installs all layouts into the same home. Harnesses can
+  // share a skill folder, because each skill is the same for every harness.
   const seen = new Map<string, string>();
   for (const h of all) {
-    for (const path of Object.values(h.layout)) {
-      const owner = seen.get(path);
-      assert.equal(owner, undefined, `${path} is claimed by both ${owner} and ${h.id}`);
-      seen.set(path, h.id);
-    }
+    const owner = seen.get(h.layout.agentsMd);
+    assert.equal(owner, undefined, `${h.layout.agentsMd} is claimed by both ${owner} and ${h.id}`);
+    seen.set(h.layout.agentsMd, h.id);
   }
 });
 
@@ -138,6 +142,26 @@ test('the Codex entry matches what codex-acp reads', () => {
   });
   // The adapter's start mode and the mode of a new thread must match.
   assert.equal(h.env('key', 'api_key').INITIAL_AGENT_MODE, h.defaultModeId);
+  assert.equal(h.alwaysBackground.size, 0);
+});
+
+test('the opencode entry runs on the API keys of the user', () => {
+  const h = HARNESSES.opencode;
+  assert.deepEqual([...h.cmd], ['opencode', 'acp']);
+  assert.equal(h.processToken, 'opencode acp');
+  assert.deepEqual(h.residentProcesses, []);
+  assert.equal(h.separateAgent, false);
+  assert.equal(h.defaultModeId, 'build');
+  assert.equal(h.forkModeId, 'plan');
+  assert.deepEqual(h.defaultConfig, {});
+  assert.equal(h.threadMeta, undefined);
+  assert.equal(h.credentialId, null);
+  assert.deepEqual(h.env('', null), {
+    OPENCODE_DISABLE_AUTOUPDATE: '1',
+    OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
+    OPENCODE_DISABLE_CLAUDE_CODE: '1',
+  });
+  assert.deepEqual(h.layout, { agentsMd: '.config/opencode/AGENTS.md', skills: '.agents/skills' });
   assert.equal(h.alwaysBackground.size, 0);
 });
 

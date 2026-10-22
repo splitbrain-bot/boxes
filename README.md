@@ -2,12 +2,13 @@
 
 <img src="dashboard/public/icon-512.png" alt="Boxes logo" width="120" align="right">
 
-Boxes is a web-based orchestrator for AI coding agents, similar to Claude Code on the web. It runs Claude Code and
-OpenAI Codex over the [Agent Client Protocol](https://agentclientprotocol.com/) (ACP).
+Boxes is a web-based orchestrator for AI coding agents, similar to Claude Code on the web. It runs Claude Code,
+OpenAI Codex and opencode over the [Agent Client Protocol](https://agentclientprotocol.com/) (ACP). With opencode, an
+agent can use the models of many providers, for example OpenRouter.
 
 Each box is a Docker container with a workspace, a home directory and a Nix store. It contains one or more threads, and
-each thread is one conversation with one agent. Threads of the same box share the workspace, so Claude and Codex can
-work on the same checkout.
+each thread is one conversation with one agent. Threads of the same box share the workspace, so Claude, Codex and
+opencode can work on the same checkout.
 
 > [!NOTE]
 > This project is mostly vibe coded. I know what I am doing and have a good general idea of the architecture - but

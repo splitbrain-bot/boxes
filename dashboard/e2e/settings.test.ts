@@ -74,15 +74,6 @@ test('a pasted credential is stored and comes back as its last four characters',
     await expect.poll(() => page.getByLabel('Claude secret').inputValue()).toBe('');
     expect(await page.content()).not.toContain('sk-ant-oat01-pastedtoken9876');
     expect((await stub.credentials()).find((c) => c.id === 'claude')?.account).toBe('9876');
-
-    // And the box list no longer warns about a missing credential.
-    const list = await openPage(stub.url, '/');
-    try {
-      await expect.poll(() => list.page.getByText('refactor auth').isVisible()).toBe(true);
-      expect(await list.page.getByText(/No credential is set for Claude Code/).count()).toBe(0);
-    } finally {
-      await list.close();
-    }
     expect(errors).toEqual([]);
   } finally {
     await close();

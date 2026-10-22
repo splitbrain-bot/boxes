@@ -1359,17 +1359,20 @@ test('the health probe says which harness can run, and on what', async () => {
     harnesses: Array<{ id: string; runnable: boolean; credential: unknown }>;
     credentials: unknown[];
   };
-  // The list has both harnesses, because a box can get a placeholder for each
-  // credential. No harness can run yet, because no credential is stored.
+  // The list has each harness, because a box can get a placeholder for each
+  // credential. Claude and Codex cannot run yet, because no credential is stored.
+  // opencode can always run, because it has models that need no key.
   assert.deepEqual(
     empty.harnesses.map((h) => [h.id, h.runnable]),
     [
       ['claude', false],
       ['codex', false],
+      ['opencode', true],
     ],
   );
   assert.equal(empty.harnesses[0]!.credential, null);
   assert.equal(empty.harnesses[1]!.credential, null);
+  assert.equal(empty.harnesses[2]!.credential, null);
   assert.deepEqual(empty.credentials, []);
 
   await orchestrator.app.inject({
@@ -1420,6 +1423,7 @@ test('an OpenAI key entered on the settings page is what makes Codex runnable', 
     [
       ['claude', false],
       ['codex', true],
+      ['opencode', true],
     ],
   );
 
@@ -1428,6 +1432,17 @@ test('an OpenAI key entered on the settings page is what makes Codex runnable', 
     runnable: boolean;
   }>;
   assert.equal(harnesses.find((h) => h.id === 'codex')?.runnable, true);
+});
+
+test('opencode can run without a credential and without an API key', async () => {
+  const health = (await orchestrator.app.inject({ url: '/healthz' })).json() as {
+    harnesses: Array<{ id: string; runnable: boolean; credential: unknown }>;
+  };
+  // opencode has models that need no key, so it does not wait for a key of the user.
+  assert.deepEqual(
+    health.harnesses.find((h) => h.id === 'opencode'),
+    { id: 'opencode', label: 'opencode', credential: null, runnable: true },
+  );
 });
 
 test('a credential that is failing is still offered, and says it is not runnable', async () => {
@@ -1457,11 +1472,11 @@ test('the harness list carries the registry, the catalogue and the health', asyn
     defaultConfig: Record<string, string>;
     catalog: unknown;
   }>;
-  // The list has both harnesses, by the same rule as the health probe. It offers
+  // The list has each harness, by the same rule as the health probe. It offers
   // each harness that can get a credential in this deployment, stored or not.
   assert.deepEqual(
     fresh.map((h) => h.id),
-    ['claude', 'codex'],
+    ['claude', 'codex', 'opencode'],
   );
   assert.equal(fresh[0]!.defaultModeId, 'auto');
   assert.equal(fresh[0]!.forkModeId, 'plan');

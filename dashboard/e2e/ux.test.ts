@@ -727,12 +727,21 @@ test('the model selector lists the advertised models and sets one', async () => 
     await page.getByLabel('Agent settings').click();
     const models = page.getByRole('combobox', { name: 'Model' });
     await expect.poll(() => models.isVisible()).toBe(true);
+    expect(await models.inputValue()).toBe('Opus');
     // Nothing is hardcoded. The list shows what the adapter advertises.
-    expect(await models.locator('option').allInnerTexts()).toEqual(['Opus', 'Sonnet', 'Haiku']);
-    expect(await models.inputValue()).toBe('opus');
+    const options = page.getByRole('listbox', { name: 'Model' }).getByRole('option');
+    await models.click();
+    await expect.poll(() => options.count()).toBe(3);
+    expect(await options.allInnerTexts()).toEqual(['Opus', 'Sonnet', 'Haiku']);
 
-    await models.selectOption('haiku');
-    await expect.poll(() => models.inputValue()).toBe('haiku');
+    await options.filter({ hasText: 'Haiku' }).click();
+    await expect.poll(() => models.inputValue()).toBe('Haiku');
+    // The adapter got the change.
+    await expect
+      .poll(() => stub.gateway.script.configOptions.find((o) => o.id === 'model')?.currentValue)
+      .toBe('haiku');
+    // The settings overlay stays open.
+    expect(await page.getByLabel('Agent settings').getAttribute('aria-expanded')).toBe('true');
     expect(errors).toEqual([]);
   } finally {
     await close();
@@ -924,56 +933,6 @@ test("the adapter's other settings are reachable, and setting one is sent", asyn
     // And the model is in the overlay, not in the header row.
     expect(await page.getByRole('combobox', { name: 'Model' }).count()).toBe(1);
     expect(errors).toEqual([]);
-  } finally {
-    await close();
-  }
-});
-
-// The warning per harness shows one line for each agent that cannot run a turn.
-test('a harness with no credential is warned about in the list and the thread', async () => {
-  await start();
-  stub.state.claudeCredential = null;
-  const warning = /No credential is set for Claude Code/;
-
-  const list = await openPage(stub.url, '/');
-  try {
-    await expect.poll(() => list.page.getByText(warning).isVisible()).toBe(true);
-  } finally {
-    await list.close();
-  }
-
-  const thread = await openPage(stub.url, `/boxes/${BOX.id}/threads/${BOX.threadId}`);
-  try {
-    await expect.poll(() => thread.page.getByText(warning).isVisible()).toBe(true);
-    expect(thread.errors).toEqual([]);
-  } finally {
-    await thread.close();
-  }
-});
-
-test('a harness whose credential has expired is named, with the reason', async () => {
-  await start();
-  stub.state.claudeCredential = 'expired';
-
-  const { page, close } = await openPage(stub.url, '/');
-  try {
-    // Named and not only missing, because the fix for an expired credential
-    // differs from the fix for a credential that nobody entered.
-    await expect
-      .poll(() => page.getByText(/Claude Code's credential has expired/).isVisible())
-      .toBe(true);
-  } finally {
-    await close();
-  }
-});
-
-test('a deployment whose harnesses can all run is not warned about', async () => {
-  await start();
-  const { page, close } = await openPage(stub.url, '/');
-  try {
-    await expect.poll(() => page.getByText('refactor auth').isVisible()).toBe(true);
-    expect(await page.getByText(/cannot run/).count()).toBe(0);
-    expect(await page.getByText(/No credential is set/).count()).toBe(0);
   } finally {
     await close();
   }

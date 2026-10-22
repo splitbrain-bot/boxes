@@ -6,7 +6,7 @@
  */
 
 import { afterAll, afterEach, expect, test } from 'vitest';
-import { closeBrowser, openPage, shoot } from './browser.ts';
+import { closeBrowser, openPage, pickModel, shoot } from './browser.ts';
 import { type BoxSpec, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /** The box the tests drive. */
@@ -57,7 +57,7 @@ test('the new-thread dialog posts the agent, mode and model it was set to', asyn
     await expect
       .poll(() => page.getByText('May be unavailable in this deployment.').isVisible())
       .toBe(true);
-    await page.getByLabel('Model').selectOption('gpt-5.6');
+    await pickModel(page, 'gpt', 'GPT-5.6');
     await page.getByLabel('Reasoning effort').selectOption('high');
 
     await page.getByRole('button', { name: 'Start thread' }).click();
@@ -89,7 +89,16 @@ test('the new-box form creates the box and its first thread in one request', asy
     await page.getByLabel('Name').fill('second box');
     await expect.poll(() => page.getByRole('button', { name: 'Codex' }).isVisible()).toBe(true);
     await page.getByRole('button', { name: 'Codex' }).click();
-    await page.getByLabel('Model').selectOption('gpt-5.6');
+    await pickModel(page, 'gpt', 'GPT-5.6');
+
+    // Enter on the closed model list opens the list and does not submit the form.
+    const model = page.getByRole('combobox', { name: 'Model' });
+    await model.press('Escape');
+    await expect.poll(() => page.getByRole('listbox').count()).toBe(0);
+    await model.press('Enter');
+    await expect.poll(() => page.getByRole('listbox', { name: 'Model' }).isVisible()).toBe(true);
+    expect(stub.boxCalls).toEqual([]);
+    await model.press('Escape');
 
     await page.getByRole('button', { name: 'Create' }).click();
 
@@ -124,18 +133,8 @@ test('an agent with no credential is offered greyed out, with the reason', async
     await expect.poll(() => codex.isVisible()).toBe(true);
     expect(await codex.isDisabled()).toBe(true);
     await expect.poll(() => codex.textContent()).toContain('no credential');
-
-    // And a link to where the credential is entered.
-    await expect
-      .poll(() =>
-        dialog
-          .getByText('Codex cannot run a turn until a working credential is entered.')
-          .isVisible(),
-      )
-      .toBe(true);
-    expect(await dialog.getByRole('link', { name: 'Settings' }).getAttribute('href')).toBe(
-      '/settings',
-    );
+    // opencode has models that need no key, so it can run without any credential.
+    expect(await dialog.getByRole('button', { name: 'opencode' }).isEnabled()).toBe(true);
 
     // The one that can run is the one it opened on.
     expect(
@@ -183,7 +182,7 @@ test('the dialog opens on what the last one chose, from the deployment', async (
     await page.getByRole('button', { name: 'New thread' }).click();
     await expect.poll(() => page.getByLabel('Agent mode').isVisible()).toBe(true);
     await page.getByLabel('Agent mode').selectOption('plan');
-    await page.getByLabel('Model').selectOption('sonnet');
+    await pickModel(page, 'son', 'Sonnet');
     await page.getByRole('button', { name: 'Start thread' }).click();
 
     // Stored in the deployment per harness, so any device opens on it.
@@ -201,7 +200,70 @@ test('the dialog opens on what the last one chose, from the deployment', async (
     await page.getByRole('button', { name: 'New thread' }).click();
 
     await expect.poll(() => page.getByLabel('Agent mode').inputValue()).toBe('plan');
-    expect(await page.getByLabel('Model').inputValue()).toBe('sonnet');
+    expect(await page.getByRole('combobox', { name: 'Model' }).inputValue()).toBe('Sonnet');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('the model combobox filters a long list and takes only an entry of it', async () => {
+  await twoHarnesses();
+  stub.state.catalogued = ['claude', 'codex', 'opencode'];
+
+  const { page, errors, close } = await openPage(stub.url, '/');
+  try {
+    await page.getByRole('button', { name: 'New thread' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect
+      .poll(() => dialog.getByRole('button', { name: 'opencode' }).isEnabled())
+      .toBe(true);
+    await dialog.getByRole('button', { name: 'opencode' }).click();
+
+    const model = dialog.getByRole('combobox', { name: 'Model' });
+    const options = page.getByRole('listbox', { name: 'Model' }).getByRole('option');
+    await expect.poll(() => model.inputValue()).toBe('OpenCode Zen/Big Pickle');
+
+    // The list opens with each model, and the typed words filter it.
+    await model.click();
+    await expect.poll(() => options.count()).toBe(303);
+    await model.fill('sonnet');
+    expect(await options.allInnerTexts()).toEqual(['OpenRouter/Claude Sonnet 4.5']);
+
+    // The arrow keys move through the matches, and Enter selects one.
+    await model.fill('model-12');
+    await expect.poll(() => options.count()).toBe(11);
+    await model.press('ArrowDown');
+    await model.press('ArrowDown');
+    await model.press('ArrowUp');
+    await model.press('Enter');
+    await expect.poll(() => model.inputValue()).toBe('OpenRouter/Vendor 12 Model 120');
+    await expect.poll(() => page.getByRole('listbox').count()).toBe(0);
+
+    // Escape closes the list and keeps the model, and the dialog stays open.
+    await model.fill('gpt');
+    await expect.poll(() => options.count()).toBe(1);
+    await model.press('Escape');
+    await expect.poll(() => page.getByRole('listbox').count()).toBe(0);
+    expect(await dialog.isVisible()).toBe(true);
+    expect(await model.inputValue()).toBe('OpenRouter/Vendor 12 Model 120');
+
+    // Text that names no model changes nothing, also with Enter.
+    await model.fill('no such model');
+    await expect.poll(() => page.getByText('No match').isVisible()).toBe(true);
+    await model.press('Enter');
+    await dialog.getByText('New thread').first().click();
+    await expect.poll(() => model.inputValue()).toBe('OpenRouter/Vendor 12 Model 120');
+
+    await page.getByRole('button', { name: 'Start thread' }).click();
+    await expect.poll(() => stub.threadCalls.length).toBe(1);
+    expect(stub.threadCalls[0]?.body).toEqual({
+      options: {
+        harness: 'opencode',
+        modeId: 'build',
+        config: { model: 'openrouter/vendor-12/model-120' },
+      },
+    });
     expect(errors).toEqual([]);
   } finally {
     await close();

@@ -70,6 +70,21 @@ const LOGIN_DOCUMENT =
   '{"tokens": {"access_token": "eyJhbGciOiAibm9uZSJ9.eyJleHAiOiA0MTAyNDQ0ODAwfQ.", "id_token": "eyJhbGciOiAibm9uZSJ9.eyJlbWFpbCI6ICJhZ2VudEBleGFtcGxlLmNvbSIsICJodHRwczovL2FwaS5vcGVuYWkuY29tL3Byb2ZpbGUiOiB7ImVtYWlsIjogImFnZW50QGV4YW1wbGUuY29tIn19.", "refresh_token": "r"}, "last_refresh": "2026-09-12T10:00:00Z"}';
 
 /**
+ * The long model list of opencode, with the models of OpenRouter in front and
+ * a free model of Zen at the end. The value is the provider and the model id, as opencode
+ * sends it.
+ */
+const OPENCODE_MODELS = [
+  ...Array.from({ length: 300 }, (_, i) => ({
+    value: `openrouter/vendor-${Math.floor(i / 10)}/model-${i}`,
+    name: `OpenRouter/Vendor ${Math.floor(i / 10)} Model ${i}`,
+  })),
+  { value: 'openrouter/anthropic/claude-sonnet-4.5', name: 'OpenRouter/Claude Sonnet 4.5' },
+  { value: 'openrouter/openai/gpt-5.6', name: 'OpenRouter/GPT-5.6' },
+  { value: 'opencode/big-pickle', name: 'OpenCode Zen/Big Pickle' },
+];
+
+/**
  * The modes and settings each adapter advertises, as the harness catalogue
  * stores them. The dialogs read these without asking an adapter.
  */
@@ -153,6 +168,24 @@ const CATALOG: Record<
       },
     ],
   },
+  opencode: {
+    modes: {
+      currentModeId: 'build',
+      availableModes: [
+        { id: 'build', name: 'build', description: 'Uses all tools.' },
+        { id: 'plan', name: 'plan', description: 'Edits no files.' },
+      ],
+    },
+    configOptions: [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        currentValue: 'opencode/big-pickle',
+        options: OPENCODE_MODELS,
+      },
+    ],
+  },
 };
 
 /** Marks a setup request from the tests, so the recorded calls leave it out. */
@@ -228,7 +261,7 @@ export interface DeploymentState {
    * page would show for it, or null where nobody has entered one.
    *
    * With anything but `ok`, the health probe reports Claude as unable to run,
-   * and the dashboard shows a warning.
+   * and the agent picker offers Claude disabled.
    */
   claudeCredential: CredentialStatus | null;
   /** The OpenAI key, by the same status. Null when nobody has entered one. */

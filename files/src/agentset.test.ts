@@ -95,6 +95,7 @@ function managed(): string[] {
 test('a path maps to its unit: the instructions file, or the skill directory', () => {
   assert.equal(unitOf('.claude/CLAUDE.md'), '.claude/CLAUDE.md');
   assert.equal(unitOf('.codex/AGENTS.md'), '.codex/AGENTS.md');
+  assert.equal(unitOf('.config/opencode/AGENTS.md'), '.config/opencode/AGENTS.md');
   assert.equal(unitOf('.claude/skills/pdf/SKILL.md'), '.claude/skills/pdf');
   assert.equal(unitOf('.agents/skills/pdf/scripts/run.sh'), '.agents/skills/pdf');
   assert.equal(unitOf('.claude/skills/pdf'), '.claude/skills/pdf');
@@ -102,6 +103,8 @@ test('a path maps to its unit: the instructions file, or the skill directory', (
   assert.equal(unitOf('.claude'), null);
   assert.equal(unitOf('.claude/skills'), null);
   assert.equal(unitOf('.claude/settings.json'), null);
+  assert.equal(unitOf('.config/opencode/opencode.json'), null);
+  assert.equal(unitOf('.config/opencode'), null);
   assert.equal(unitOf('.ssh/authorized_keys'), null);
   assert.equal(unitOf('.claude/skills/../../.ssh'), null);
   assert.equal(unitOf('/etc/passwd'), null);

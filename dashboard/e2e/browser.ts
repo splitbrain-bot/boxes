@@ -146,6 +146,23 @@ export async function openPage(
 }
 
 /**
+ * Selects a model in the model combobox. It types a part of the name and clicks the entry.
+ *
+ * @param page The page with the combobox.
+ * @param typed The text to type into the combobox.
+ * @param name The full name of the entry to click.
+ */
+export async function pickModel(page: Page, typed: string, name: string): Promise<void> {
+  const input = page.getByRole('combobox', { name: 'Model' });
+  await input.click();
+  await input.fill(typed);
+  await page
+    .getByRole('listbox', { name: 'Model' })
+    .getByRole('option', { name, exact: true })
+    .click();
+}
+
+/**
  * Saves a screenshot under e2e/screenshots.
  *
  * @param page The page to capture.

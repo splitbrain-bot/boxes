@@ -203,4 +203,27 @@ describe('boxEnv', () => {
     // A variable of Boxes has priority over a key with the same name.
     expect(env.GH_TOKEN).toBe('ghp_placeholder');
   });
+
+  it('carries the variables of a harness without a credential, and asks for no placeholder', () => {
+    const asked: string[] = [];
+    const env = boxEnv({
+      placeholderFor: (id) => {
+        asked.push(id);
+        return 'placeholder';
+      },
+      methodFor: () => 'token',
+      gitlabHost: 'gitlab.com',
+      proxyUrl: 'http://proxy:3128',
+      hasCa: true,
+      apiKeys: { OPENROUTER_API_KEY: 'sk-or-v1-placeholder' },
+    });
+
+    // opencode runs on the API keys, which keep their own names.
+    expect(env.OPENROUTER_API_KEY).toBe('sk-or-v1-placeholder');
+    expect(env.OPENCODE_DISABLE_AUTOUPDATE).toBe('1');
+    expect(env.OPENCODE_DISABLE_LSP_DOWNLOAD).toBe('1');
+    expect(env.OPENCODE_DISABLE_CLAUDE_CODE).toBe('1');
+    expect(asked).not.toContain(null);
+    expect(asked).toEqual(expect.arrayContaining(['claude', 'openai']));
+  });
 });

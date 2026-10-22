@@ -14,7 +14,6 @@ import { Shelf } from '@/components/Shelf';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
 import { ThreadHeader } from '@/components/ThreadHeader';
 import { ThreadLoading } from '@/components/ThreadLoading';
-import { TokenWarning } from '@/components/TokenWarning';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useBox } from '@/hooks/use-box';
 import { useDocumentTitle } from '@/hooks/use-document-title';
@@ -150,7 +149,7 @@ export function BoxThread() {
    */
   const loadError: LoadError | null = box || !readError ? null : describeLoadError(readError);
 
-  // Reads the harness health once for the credential warning.
+  // Reads the harness health once for the harness label in the header.
   useEffect(() => {
     void refreshHealth();
   }, []);
@@ -331,7 +330,6 @@ export function BoxThread() {
                 }
               />
             </Shelf>
-            <TokenWarning className="border-b px-4 py-2" />
             {forked ? (
               <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
                 <span>

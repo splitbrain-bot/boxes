@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router';
 import {
   ConfigSelect,
   currentModeDescription,
@@ -10,6 +9,7 @@ import {
 } from '@/components/AgentSettings';
 import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
+import { Combobox } from '@/components/ui/combobox';
 import { unavailableReason } from '@/lib/harness';
 import type {
   HarnessId,
@@ -210,7 +210,6 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
     ...options.filter((option) => option.category === 'model'),
     ...options.filter((option) => option.category !== 'model'),
   ];
-  const blocked = harnesses.filter((harness) => !harness.runnable);
 
   return (
     <div className="flex flex-col gap-3">
@@ -236,16 +235,6 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
             );
           })}
         </fieldset>
-        {blocked.length > 0 ? (
-          <p className="text-muted-foreground">
-            {blocked.map((harness) => harness.label).join(' and ')} cannot run a turn until a
-            working credential is entered. Enter one in{' '}
-            <Link to="/settings" className="underline hover:text-foreground">
-              Settings
-            </Link>
-            .
-          </p>
-        ) : null}
       </div>
 
       {/* The mode comes next, because it decides what the agent may do without asking. */}
@@ -261,15 +250,26 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
       ) : null}
 
       {/* Codex advertises its efforts per model, so these show what was last
-          seen, which can differ from what the chosen model supports. */}
+          seen, which can differ from what the chosen model supports. The model
+          list can be long, so a combobox filters it. */}
       {ordered.map((option) => (
         <Setting key={option.id} name={optionName(option)} description={option.description}>
-          <ConfigSelect
-            option={option}
-            value={selectedValue(option, config)}
-            className="mt-0.5 py-1.5"
-            onSet={(value) => state.setConfig(option.id, value)}
-          />
+          {option.category === 'model' ? (
+            <Combobox
+              label={optionName(option)}
+              options={option.options ?? []}
+              value={selectedValue(option, config)}
+              className="mt-0.5 py-1.5"
+              onSelect={(value) => state.setConfig(option.id, value)}
+            />
+          ) : (
+            <ConfigSelect
+              option={option}
+              value={selectedValue(option, config)}
+              className="mt-0.5 py-1.5"
+              onSet={(value) => state.setConfig(option.id, value)}
+            />
+          )}
         </Setting>
       ))}
 

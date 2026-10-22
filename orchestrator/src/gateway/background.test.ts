@@ -362,6 +362,28 @@ test('an agent an adapter left behind is still the harness, not work', () => {
   );
 });
 
+test('a shell under opencode is work, because opencode is its own adapter', () => {
+  // Under Claude and Codex the direct child of the adapter is the agent. The
+  // direct child of `opencode acp` is already a command of the agent.
+  const procs = table(
+    ...BOTH_IDLE,
+    [40001, 0, '/usr/local/bin/opencode acp'],
+    [40010, 40001, '/bin/sh -c npm run build'],
+    [40011, 40010, 'npm run build'],
+  );
+  const all = Object.values(HARNESSES);
+  assert.deepEqual(
+    readBox(procs, all).work.map((found) => found.pid),
+    [40010, 40011],
+  );
+  assert.deepEqual(workPids(procs, all), [40011, 40010]);
+  // The adapter alone is idle.
+  assert.equal(
+    readBox(table(...BOTH_IDLE, [40001, 0, '/usr/local/bin/opencode acp']), all).busy,
+    false,
+  );
+});
+
 test('the pids to kill are the work, leaves before what spawned them', () => {
   const procs = table(
     ...BOTH_IDLE,
