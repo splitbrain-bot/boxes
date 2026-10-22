@@ -29,21 +29,30 @@ function gitFlags(): string[] {
   return ['-c', 'core.quotepath=false'];
 }
 
+/** The options of one git invocation. */
+export interface GitOptions {
+  /**
+   * True to let git save the refreshed index. Git then takes the index lock
+   * while it refreshes, and a write command of the agent fails while git holds it.
+   */
+  saveIndex?: boolean;
+}
+
 /**
  * Returns the variables that every git invocation adds to the environment of the container.
  *
- * Every invocation only reads. `GIT_OPTIONAL_LOCKS=0` stops git from refreshing
- * the index, which takes a lock that the git of the agent would wait for.
- * `GIT_LITERAL_PATHSPECS=1` makes a pathspec a literal path, so a name holding
+ * `GIT_OPTIONAL_LOCKS=0` stops git from saving the refreshed index, unless
+ * `saveIndex` is set. `GIT_LITERAL_PATHSPECS=1` makes a pathspec a literal path, so a name holding
  * `*`, `?` or `[` matches only itself. `GIT_TERMINAL_PROMPT=0` makes git fail
  * at a credential prompt. `LC_ALL=C` sets one language for the
  * output of git.
  *
+ * @param options The options of the invocation.
  * @returns The variables by name.
  */
-export function gitEnv(): Record<string, string> {
+export function gitEnv(options: GitOptions = {}): Record<string, string> {
   return {
-    GIT_OPTIONAL_LOCKS: '0',
+    ...(options.saveIndex ? {} : { GIT_OPTIONAL_LOCKS: '0' }),
     GIT_LITERAL_PATHSPECS: '1',
     GIT_TERMINAL_PROMPT: '0',
     LC_ALL: 'C',
@@ -154,11 +163,16 @@ export function setGitRunnerForTests(next: GitRunner | null): void {
  *
  * @param target The box and the directory to run git in.
  * @param args The subcommand and its own arguments.
+ * @param options The options of the invocation.
  * @returns The result of git.
  */
-export async function git(target: GitTarget, args: string[]): Promise<GitResult> {
+export async function git(
+  target: GitTarget,
+  args: string[],
+  options: GitOptions = {},
+): Promise<GitResult> {
   try {
-    return await runner(target, gitArgv(args), gitEnv());
+    return await runner(target, gitArgv(args), gitEnv(options));
   } catch (err) {
     log.warn('git invocation failed', { args: args[0], error: (err as Error).message });
     return { ok: false, stdout: '', stderr: '', code: null };
