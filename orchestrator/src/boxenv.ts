@@ -60,7 +60,9 @@ export function boxEnv(inputs: BoxEnvInputs): Record<string, string> {
   const env: Record<string, string> = { ...inputs.apiKeys };
   for (const harness of Object.values(HARNESSES)) {
     const id = harness.credentialId;
-    Object.assign(env, harness.env(inputs.placeholderFor(id), inputs.methodFor(id)));
+    // A harness without a credential runs on the API keys above.
+    if (id === null) Object.assign(env, harness.env('', null));
+    else Object.assign(env, harness.env(inputs.placeholderFor(id), inputs.methodFor(id)));
   }
   env.GH_TOKEN = inputs.placeholderFor('github');
   env.GITLAB_TOKEN = inputs.placeholderFor('gitlab');

@@ -59,6 +59,9 @@ terminal.
 An adapter is the process that makes one [harness](glossary.md) available over ACP. It starts the agent, and it
 translates between the protocol and that agent. It runs inside the [box container](boxes.md).
 
+Claude Code and Codex each have a separate adapter program, `claude-agent-acp` and `codex-acp`. opencode speaks ACP
+itself, so the orchestrator starts `opencode acp`, and the adapter and the agent are one process.
+
 The orchestrator starts an adapter with `docker exec` when a thread needs it for the first time. The adapter reads and
 writes JSON-RPC messages on the standard input and output of that exec. Its standard error carries log messages.
 

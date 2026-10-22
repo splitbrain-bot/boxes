@@ -31,8 +31,8 @@ starts.
 
 **Harness**
 
-An agent integration available in a box, such as Claude or Codex. A harness is what actually runs the agent and talks to
-the LLM.
+An agent integration available in a box, such as Claude, Codex or opencode. A harness is what actually runs the agent
+and talks to the LLM.
 
 **[Thread](threads.md)**
 

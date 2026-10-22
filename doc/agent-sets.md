@@ -94,13 +94,17 @@ configuration is read, and submodules are not fetched.
 ### Installation
 
 `AgentStore.pack` packs the merged set as a tar stream, with one copy for each layout of the harness registry
-(`orchestrator/src/harness.ts`). A box can have threads of both harnesses, and each agent reads only its own
+(`orchestrator/src/harness.ts`). A box can have threads of each harness, and each agent reads only its own
 directories:
 
-| Content | Claude | Codex |
-| --- | --- | --- |
-| Instructions | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` |
-| Skills | `~/.claude/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
+| Content | Claude | Codex | opencode |
+| --- | --- | --- | --- |
+| Instructions | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | `~/.config/opencode/AGENTS.md` |
+| Skills | `~/.claude/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
+
+Codex and opencode read the same skill directory, so the tar holds each skill in it only once. opencode can also read
+the instructions and skills of Claude Code. The orchestrator turns this off with `OPENCODE_DISABLE_CLAUDE_CODE`, so
+opencode does not read the Claude Code copy of the set in addition to its own copy.
 
 The file service (`files/src/agentset.ts`) unpacks the stream into a stage directory first, so a refused path changes
 nothing.

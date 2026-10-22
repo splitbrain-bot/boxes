@@ -68,7 +68,7 @@ afterEach(() => {
 });
 
 /**
- * Packs a set and reads the tar back.
+ * Packs a set and reads the tar back. It fails when the tar holds a path more than once.
  *
  * @param setId The id of the selected set, or null for only the global set.
  * @returns The content and the mode of each file, by its path relative to the home.
@@ -77,8 +77,10 @@ async function packed(
   setId: string | null,
 ): Promise<Map<string, { content: string; mode: number }>> {
   const files = new Map<string, { content: string; mode: number }>();
+  const twice: string[] = [];
   const entries = extract();
   entries.on('entry', (header, stream, next) => {
+    if (files.has(header.name)) twice.push(header.name);
     const chunks: Buffer[] = [];
     stream.on('data', (c) => chunks.push(c as Buffer));
     stream.on('end', () => {
@@ -94,6 +96,7 @@ async function packed(
     entries.on('error', reject);
     store.pack('', setId).pipe(entries);
   });
+  assert.deepEqual(twice, [], 'paths packed more than once');
   return files;
 }
 
@@ -197,10 +200,12 @@ test('a merged set is packed in every harness layout', async () => {
     '.claude/skills/bench/SKILL.md',
     '.claude/skills/review/SKILL.md',
     '.codex/AGENTS.md',
+    '.config/opencode/AGENTS.md',
   ]);
   // The AGENTS.md of the set becomes the user instructions file of each harness.
   assert.equal(files.get('.claude/CLAUDE.md')?.content, 'House rules.\n');
   assert.equal(files.get('.codex/AGENTS.md')?.content, 'House rules.\n');
+  assert.equal(files.get('.config/opencode/AGENTS.md')?.content, 'House rules.\n');
   // In both layouts, a skill is a directory with a SKILL.md.
   assert.equal(files.get('.claude/skills/review/SKILL.md')?.content, '---\nname: review\n---\n');
   assert.equal(files.get('.agents/skills/review/SKILL.md')?.content, '---\nname: review\n---\n');
@@ -209,14 +214,14 @@ test('a merged set is packed in every harness layout', async () => {
 
 test('every packed path is home-relative and inside a layout', async () => {
   // The file service installs each path relative to the home.
-  // It refuses a path outside the four prefixes below.
+  // It refuses a path outside the five prefixes below.
   store.updateSet('', 'global', { agentsMd: 'House rules.' });
   store.putItem('', 'global', { name: 'review', content: 'x' });
 
   for (const rel of await paths(null)) {
     assert.match(
       rel,
-      /^(\.claude\/(CLAUDE\.md|skills\/)|\.codex\/AGENTS\.md|\.agents\/skills\/)/,
+      /^(\.claude\/(CLAUDE\.md|skills\/)|\.codex\/AGENTS\.md|\.config\/opencode\/AGENTS\.md|\.agents\/skills\/)/,
       `${rel} is not in a layout the file service accepts`,
     );
   }

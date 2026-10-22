@@ -16,6 +16,7 @@ import {
   Setting,
 } from '@/components/AgentSettings';
 import { Button } from '@/components/ui/button';
+import { Combobox } from '@/components/ui/combobox';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import type { Up } from '@/hooks/use-up';
 import { cn } from '@/lib/utils';
@@ -179,13 +180,15 @@ export function ThreadHeader({
                 </Setting>
               ) : null}
 
+              {/* The model list can be long, so a combobox filters it. */}
               {model && hasModel ? (
                 <Setting name={optionName(model)} description={model.description}>
-                  <ConfigSelect
-                    option={model}
+                  <Combobox
                     label="Model"
+                    options={model.options ?? []}
+                    value={model.currentValue ?? ''}
                     className="mt-0.5 py-1.5"
-                    onSet={(value) => onSetConfigOption(model.id, value)}
+                    onSelect={(value) => onSetConfigOption(model.id, value)}
                   />
                 </Setting>
               ) : null}

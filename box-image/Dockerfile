@@ -25,6 +25,7 @@
 ARG NODE_MAJOR=26
 ARG NIX_VERSION=2.34.8
 ARG CODEX_VERSION=0.156.1
+ARG OPENCODE_VERSION=1.19.3
 
 # The agent's own account, and the defaults of the orchestrator's BOX_UID and
 # BOX_GID. 1020 keeps clear of the ubuntu user at 1000, which is often a
@@ -173,6 +174,23 @@ ENV CODEX_PATH=/usr/local/bin/codex
 # Codex's system configuration.
 COPY box-image/codex-config.toml /etc/codex/config.toml
 
+# opencode, pinned exactly. It is its own ACP adapter.
+#
+# The postinstall script of opencode-ai selects the platform binary by the CPU
+# of the build host. The install skips the script. The start script selects
+# the binary by the CPU of the host that runs the box.
+#
+# opencode installs @opencode-ai/plugin in its own version into
+# ~/.config/opencode at its start, when the folder has no node_modules. The
+# home seed holds that install, so a new box does not download it.
+ARG OPENCODE_VERSION
+RUN npm install -g --prefix /usr/local --ignore-scripts opencode-ai@${OPENCODE_VERSION} \
+ && npm install --prefix /usr/local/share/boxes/home/.config/opencode --ignore-scripts --save-exact \
+      @opencode-ai/plugin@${OPENCODE_VERSION} \
+ && npm cache clean --force
+COPY box-image/opencode.sh /usr/local/bin/opencode
+RUN chmod 0755 /usr/local/bin/opencode
+
 # Skills for the tools of the image, which the file service installs into the
 # home with each agent set. The full image and a custom image add theirs here.
 RUN mkdir -p /usr/local/share/boxes/skills
@@ -254,6 +272,7 @@ FROM base-image AS base-test
 ARG AGENT_UID
 ARG AGENT_GID
 ARG CODEX_VERSION
+ARG OPENCODE_VERSION
 ARG NODE_MAJOR
 
 # Checks the user, the writable directories, the npm prefix and the tool
@@ -262,6 +281,10 @@ ARG NODE_MAJOR
 #
 # codex --version runs the platform binary, so it fails if --omit=optional
 # left none. The match against CODEX_VERSION catches a followed range.
+# opencode --version runs the binary that the start script selects, so it
+# fails when that binary is missing. On amd64, the baseline binary must also
+# run, because the start script selects it on a CPU without AVX2. opencode
+# writes into the home, so its check comes after the seed checks.
 #
 # The file service ends with exit code 0 when its input closes, so the run
 # with an empty input proves that node loads the bundle through the link.
@@ -290,6 +313,12 @@ RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(command -v codex-acp)" = "/usr/local/bin/codex-acp" \
  && test "$(command -v codex)" = "/usr/local/bin/codex" \
  && codex --version | grep -qF "${CODEX_VERSION}" \
+ && test "$(command -v opencode)" = "/usr/local/bin/opencode" \
+ && opencode --version | grep -qxF "${OPENCODE_VERSION}" \
+ && { test "$(dpkg --print-architecture)" != amd64 \
+      || /usr/local/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64-baseline/bin/opencode \
+           --version | grep -qxF "${OPENCODE_VERSION}"; } \
+ && test -f /home/agent/.config/opencode/node_modules/@opencode-ai/plugin/package.json \
  && test "$(command -v boxes-files)" = "/usr/local/bin/boxes-files" \
  && boxes-files </dev/null \
  && test -d /usr/local/share/boxes/skills \

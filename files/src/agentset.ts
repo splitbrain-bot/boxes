@@ -25,7 +25,7 @@ const STAGE_DIR = '.boxes/agent-set.new';
 const SKILL_DIRS = ['.claude/skills', '.agents/skills'];
 
 /** The instructions files of the harness layouts, relative to the home. */
-const INSTRUCTIONS_FILES = ['.claude/CLAUDE.md', '.codex/AGENTS.md'];
+const INSTRUCTIONS_FILES = ['.claude/CLAUDE.md', '.codex/AGENTS.md', '.config/opencode/AGENTS.md'];
 
 /**
  * Returns the unit of an installed path. The unit of an instructions file is the file itself. The unit of a file in a

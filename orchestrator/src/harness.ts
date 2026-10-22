@@ -30,6 +30,12 @@ export interface Harness {
    * Matched against the command line.
    */
   residentProcesses: readonly RegExp[];
+  /**
+   * True when the adapter starts the agent as its own child process. False
+   * when the adapter is the agent, so its children are the commands of the
+   * agent.
+   */
+  separateAgent: boolean;
   /** Mode a fresh thread is put in, when the adapter offers it. */
   defaultModeId: string;
   /** Mode a fork starts in. */
@@ -38,8 +44,11 @@ export interface Harness {
   defaultConfig: Readonly<Record<string, string>>;
   /** `_meta` sent with session/new, session/load and session/fork, or undefined. */
   threadMeta: Readonly<Record<string, unknown>> | undefined;
-  /** Which credential must be present before a thread can run. */
-  credentialId: CredentialId;
+  /**
+   * The credential that a thread needs before it can run, or null for a
+   * harness that runs on the API keys of the user.
+   */
+  credentialId: CredentialId | null;
   /**
    * Returns the container environment that this harness needs. The real secret never
    * enters a box, and the egress proxy swaps the placeholder for it on the way out.
@@ -69,6 +78,7 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     // path that ends in `claude`, and not a path such as `claude-agent-acp` that
     // only contains the word.
     residentProcesses: [/(^|\/)claude(\s|$)/],
+    separateAgent: true,
     defaultModeId: 'auto',
     forkModeId: 'plan',
     defaultConfig: { model: 'opus' },
@@ -114,6 +124,7 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     // image points CODEX_PATH to the npm launcher of Codex, and the command lines of
     // the launcher and of the native binary that it starts both hold `codex app-server`.
     residentProcesses: [/codex app-server/],
+    separateAgent: true,
     /**
      * `agent-full-access` replaces the `agent` default of the adapter. The
      * other modes run each command in the sandbox of Codex, which uses bubblewrap
@@ -155,6 +166,49 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
       skills: '.agents/skills',
     },
     /** Codex has no tool that backgrounds itself regardless of its input. */
+    alwaysBackground: new Set<string>(),
+  },
+  opencode: {
+    id: 'opencode',
+    label: 'opencode',
+    cmd: ['opencode', 'acp'],
+    processToken: 'opencode acp',
+    /** opencode runs as one process and starts no long-lived helper. */
+    residentProcesses: [],
+    /** `opencode acp` is the agent, and it starts the shells of its tools directly. */
+    separateAgent: false,
+    /**
+     * `build` allows all tools. It asks only before it reads `.env` files,
+     * before it uses paths outside the workspace, and when the agent repeats
+     * the same tool call many times.
+     */
+    defaultModeId: 'build',
+    /** `plan` does not edit files. */
+    forkModeId: 'plan',
+    /** Empty, so opencode selects the model of a fresh thread. */
+    defaultConfig: {},
+    threadMeta: undefined,
+    /**
+     * The API keys of the user go into each box with their own names, and
+     * opencode reads the key of each provider from these names.
+     */
+    credentialId: null,
+    /**
+     * Turns off the self-update and the download of language servers. opencode
+     * also stops reading the Claude Code instructions and skills, because the
+     * agent set has its own copy for opencode.
+     */
+    env: () => ({
+      OPENCODE_DISABLE_AUTOUPDATE: '1',
+      OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
+      OPENCODE_DISABLE_CLAUDE_CODE: '1',
+    }),
+    /** Skills go in the harness-neutral `~/.agents/skills`, the same folder as for Codex. */
+    layout: {
+      agentsMd: '.config/opencode/AGENTS.md',
+      skills: '.agents/skills',
+    },
+    /** opencode has no tool that backgrounds itself regardless of its input. */
     alwaysBackground: new Set<string>(),
   },
 };

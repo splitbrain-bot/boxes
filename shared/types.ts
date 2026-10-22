@@ -12,7 +12,7 @@ export type BoxStatus = 'creating' | 'running' | 'stopped' | 'error' | 'deleted'
 export type RuntimeState = 'running' | 'stopped' | 'unknown';
 
 /** An agent harness that the orchestrator can run in a box. */
-export type HarnessId = 'claude' | 'codex';
+export type HarnessId = 'claude' | 'codex' | 'opencode';
 
 /** A credential the deployment holds, named by the service it authenticates to. */
 export type CredentialId = 'claude' | 'openai' | 'github' | 'gitlab' | 'devtunnels';
@@ -68,9 +68,15 @@ export interface HarnessHealth {
   id: HarnessId;
   /** The name that the dashboard shows. */
   label: string;
-  /** The stored credential of the harness, or null when there is none. */
+  /**
+   * The stored credential of the harness, or null when there is none. Always null for a harness that runs on the API
+   * keys of the user.
+   */
   credential: CredentialSummary | null;
-  /** True when the stored credential of the harness has the status `ok` and the proxy can put it into a request. */
+  /**
+   * True when the stored credential of the harness has the status `ok` and the proxy can put it into a request. For a
+   * harness that runs on the API keys of the user, always true.
+   */
   runnable: boolean;
 }
 

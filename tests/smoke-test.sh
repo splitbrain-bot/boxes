@@ -264,6 +264,8 @@ must_pass "write to /nix" \
   sh -c 'echo ok > /nix/.smoke && rm /nix/.smoke'
 must_pass "nix --version" \
   nix --version
+must_pass "opencode --version" \
+  opencode --version
 must_pass "write to /tmp (tmpfs)" \
   sh -c 'echo ok > /tmp/.smoke && rm /tmp/.smoke'
 

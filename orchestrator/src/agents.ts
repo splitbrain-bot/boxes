@@ -675,7 +675,8 @@ export class AgentStore {
    * installs the tar into the home, so each path is relative to the home.
    *
    * The tar holds the set once for each harness, in the layout of that
-   * harness, because a box can hold threads of each harness. The tar also
+   * harness, because a box can hold threads of each harness. A skill folder
+   * that two harnesses share is in the tar only once. The tar also
    * holds the built-in skills of the orchestrator, except where the set has a
    * skill with the same name.
    *
@@ -691,8 +692,11 @@ export class AgentStore {
         bundle.skills.push({ name: skill.name, repo: null, content: skill.content });
     }
     const tar = pack();
+    const skillDirs = new Set<string>();
     for (const { layout } of Object.values(HARNESSES)) {
       if (bundle.agentsMd !== '') addText(tar, layout.agentsMd, bundle.agentsMd);
+      if (skillDirs.has(layout.skills)) continue;
+      skillDirs.add(layout.skills);
       for (const skill of bundle.skills) {
         const rel = `${layout.skills}/${skill.name}`;
         if (skill.repo === null) {

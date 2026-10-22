@@ -505,6 +505,10 @@ function ApiKeys({
         placeholder in each box, and the egress proxy replaces it with the key in requests to the
         given hosts. A change takes effect in a box at its next start.
       </p>
+      <p className="text-xs text-muted-foreground">
+        The opencode agent runs on these keys. It offers the models of each provider whose key it
+        finds under the usual variable name, e.g., <code>OPENROUTER_API_KEY</code>.
+      </p>
 
       {stored.map((key) => (
         <div key={key.name} className="flex flex-col gap-1 text-xs">

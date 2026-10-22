@@ -224,20 +224,20 @@ const INIT_PID = 1;
  * Work includes a build orphaned by an adapter that died, and the sandbox wrappers around a Codex command.
  *
  * @param process The process to check.
- * @param adapters The pids of the adapter processes.
+ * @param adapters The harness of each adapter process, by pid.
  * @param harnesses Every harness. With one missing, the adapter and the agent of that harness read as work.
  * @returns True when the process is resident.
  */
 function isResident(
   process: ContainerProcess,
-  adapters: ReadonlySet<number>,
+  adapters: ReadonlyMap<number, Harness>,
   harnesses: readonly Harness[],
 ): boolean {
   if (process.pid === INIT_PID) return true;
   if (process.ppid === INIT_PID && process.command.trim() === ENTRYPOINT_HOLD) return true;
   if (adapters.has(process.pid)) return true;
-  // The direct children of an adapter are the agent processes.
-  if (adapters.has(process.ppid)) return true;
+  // The direct children of an adapter with a separate agent are the agent processes.
+  if (adapters.get(process.ppid)?.separateAgent) return true;
   if (READING_ITSELF.test(process.command.trim())) return true;
   if (FILE_SERVICE.test(process.command.trim())) return true;
   return harnesses.some((h) =>
@@ -246,8 +246,7 @@ function isResident(
 }
 
 /**
- * The pids of every adapter process in a box, found by each harness's
- * `processToken`.
+ * Every adapter process in a box, found by each harness's `processToken`.
  *
  * The token also appears in the agent's path, because the Claude CLI lives
  * inside the `claude-agent-acp` package. A process is not an adapter when it
@@ -256,15 +255,17 @@ function isResident(
  *
  * @param processes The processes of the box.
  * @param harnesses Every harness.
- * @returns The pids of the adapters.
+ * @returns The harness of each adapter, by the pid of the adapter.
  */
 function adapterPids(
   processes: readonly ContainerProcess[],
   harnesses: readonly Harness[],
-): Set<number> {
+): Map<number, Harness> {
   const byPid = new Map(processes.map((p) => [p.pid, p]));
-  const carries = (p: ContainerProcess): boolean =>
-    harnesses.some((h) => p.command.includes(h.processToken));
+  /** The harness whose token a process carries, or undefined. */
+  const owner = (p: ContainerProcess): Harness | undefined =>
+    harnesses.find((h) => p.command.includes(h.processToken));
+  const carries = (p: ContainerProcess): boolean => owner(p) !== undefined;
   const named = (p: ContainerProcess): boolean =>
     harnesses.some((h) => h.residentProcesses.some((pattern) => pattern.test(p.command)));
   /** Checks if an ancestor of a process carries an adapter's token. */
@@ -278,7 +279,12 @@ function adapterPids(
     }
     return false;
   };
-  return new Set(processes.filter((p) => carries(p) && !named(p) && !under(p)).map((p) => p.pid));
+  const adapters = new Map<number, Harness>();
+  for (const p of processes) {
+    const harness = owner(p);
+    if (harness && !named(p) && !under(p)) adapters.set(p.pid, harness);
+  }
+  return adapters;
 }
 
 /**
