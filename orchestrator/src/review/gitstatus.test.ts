@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
@@ -264,6 +264,39 @@ describe('over a real repository', () => {
     } finally {
       rmSync(bare, { recursive: true, force: true });
     }
+  });
+
+  /** A time before every file of the test repository. */
+  const PAST = new Date(2000, 0, 1);
+
+  /**
+   * Gives the index a time before its files. Git then reads the content of every
+   * file on each status, until it saves the index again.
+   */
+  function makeIndexRacy(): void {
+    utimesSync(join(dir, '.git', 'index'), PAST, PAST);
+  }
+
+  /**
+   * Checks if git saved the index after {@link makeIndexRacy}.
+   *
+   * @returns True when the index is newer than the time that {@link makeIndexRacy} gave it.
+   */
+  function indexSaved(): boolean {
+    return statSync(join(dir, '.git', 'index')).mtimeMs > PAST.getTime();
+  }
+
+  test('a status saves the refreshed index', async () => {
+    makeIndexRacy();
+    assert.deepEqual(await fileStatuses(at(dir), NO_BASE), {});
+    assert.ok(indexSaved());
+  });
+
+  test('a status against a base saves the refreshed index', async () => {
+    makeIndexRacy();
+    const head = run('rev-parse', 'HEAD').trim();
+    assert.deepEqual(await fileStatuses(at(dir), { rev: head, commit: head }), {});
+    assert.ok(indexSaved());
   });
 });
 

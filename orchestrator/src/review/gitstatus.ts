@@ -158,6 +158,9 @@ function classifyStatus(x: string, y: string): FileStatus | null {
  * `--no-renames` reports a rename as a deletion and an addition, so the tree
  * can show the path the file moved away from.
  *
+ * Git saves the refreshed index, so the next status does not read the content of
+ * unchanged files again.
+ *
  * @param target The repository to run git in.
  * @param base The base to compare against.
  * @returns The statuses by path relative to the repository, or null when git fails, as it does outside a
@@ -166,7 +169,9 @@ function classifyStatus(x: string, y: string): FileStatus | null {
 export async function fileStatuses(target: GitTarget, base: Base): Promise<FileStatuses | null> {
   if (base.commit !== '') return statusesSince(target, base);
 
-  const result = await git(target, ['status', '--porcelain', '-z', '-uall', '--no-renames']);
+  const result = await git(target, ['status', '--porcelain', '-z', '-uall', '--no-renames'], {
+    saveIndex: true,
+  });
   if (!result.ok) return null;
   return parsePorcelain(result.stdout);
 }
@@ -176,11 +181,17 @@ export async function fileStatuses(target: GitTarget, base: Base): Promise<FileS
  * uncommitted changes. The result also lists untracked files, because they are
  * part of the review.
  *
+ * `git diff` does not save the refreshed index, so the function refreshes the
+ * index first. When the index is locked, the refresh fails and the diff reads the
+ * content of each file that the index marks as stale.
+ *
  * @param target The repository to run git in.
  * @param base The base to compare against. Its commit is set.
  * @returns The statuses by path relative to the repository, or null when git diff fails.
  */
 async function statusesSince(target: GitTarget, base: Base): Promise<FileStatuses | null> {
+  await git(target, ['update-index', '-q', '--refresh'], { saveIndex: true });
+
   const named = await git(target, ['diff', '--name-status', '--no-renames', base.commit]);
   if (!named.ok) return null;
   const result = parseNameStatus(named.stdout);

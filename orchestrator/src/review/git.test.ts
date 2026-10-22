@@ -113,9 +113,15 @@ describe('the command line', () => {
 describe('the environment', () => {
   const env = gitEnv();
 
-  test('reads, never writes, and never waits for a lock or a prompt', () => {
+  test('takes no optional lock and never waits for a prompt', () => {
     assert.equal(env.GIT_OPTIONAL_LOCKS, '0');
     assert.equal(env.GIT_TERMINAL_PROMPT, '0');
+  });
+
+  test('a call that saves the index may take the optional lock', () => {
+    const saving = gitEnv({ saveIndex: true });
+    assert.equal(saving.GIT_OPTIONAL_LOCKS, undefined);
+    assert.equal(saving.GIT_TERMINAL_PROMPT, '0');
   });
 
   test('a pathspec is a path, not a glob', () => {
