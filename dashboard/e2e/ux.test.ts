@@ -727,7 +727,7 @@ test('the model selector lists the advertised models and sets one', async () => 
     await page.getByLabel('Agent settings').click();
     const models = page.getByRole('combobox', { name: 'Model' });
     await expect.poll(() => models.isVisible()).toBe(true);
-    expect(await models.inputValue()).toBe('Opus');
+    expect(await models.textContent()).toBe('Opus');
     // Nothing is hardcoded. The list shows what the adapter advertises.
     const options = page.getByRole('listbox', { name: 'Model' }).getByRole('option');
     await models.click();
@@ -735,7 +735,7 @@ test('the model selector lists the advertised models and sets one', async () => 
     expect(await options.allInnerTexts()).toEqual(['Opus', 'Sonnet', 'Haiku']);
 
     await options.filter({ hasText: 'Haiku' }).click();
-    await expect.poll(() => models.inputValue()).toBe('Haiku');
+    await expect.poll(() => models.textContent()).toBe('Haiku');
     // The adapter got the change.
     await expect
       .poll(() => stub.gateway.script.configOptions.find((o) => o.id === 'model')?.currentValue)

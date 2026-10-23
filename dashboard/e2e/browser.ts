@@ -146,16 +146,16 @@ export async function openPage(
 }
 
 /**
- * Selects a model in the model combobox. It types a part of the name and clicks the entry.
+ * Selects a model in the model combobox. It opens the list, types a part of the name into the filter and clicks the
+ * entry.
  *
  * @param page The page with the combobox.
- * @param typed The text to type into the combobox.
+ * @param typed The text to type into the filter.
  * @param name The full name of the entry to click.
  */
 export async function pickModel(page: Page, typed: string, name: string): Promise<void> {
-  const input = page.getByRole('combobox', { name: 'Model' });
-  await input.click();
-  await input.fill(typed);
+  await page.getByRole('combobox', { name: 'Model' }).click();
+  await page.getByRole('textbox', { name: 'Filter' }).fill(typed);
   await page
     .getByRole('listbox', { name: 'Model' })
     .getByRole('option', { name, exact: true })
