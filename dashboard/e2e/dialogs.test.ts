@@ -291,7 +291,7 @@ test('the dialog shows the efforts of the selected model', async () => {
       .toBe(true);
     await dialog.getByRole('button', { name: 'opencode' }).click();
     const model = dialog.getByRole('combobox', { name: 'Model' });
-    await expect.poll(() => model.inputValue()).toBe('OpenCode Zen/Big Pickle');
+    await expect.poll(() => model.textContent()).toBe('OpenCode Zen/Big Pickle');
     const effort = dialog.getByLabel('Effort');
     expect(await effort.count()).toBe(0);
 
