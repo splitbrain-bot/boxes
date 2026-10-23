@@ -11,6 +11,7 @@ import {
   type Db,
   getThread,
   insertThread,
+  recordModelOptions,
   setThreadAcpId,
   setThreadConfig,
   type ThreadRow,
@@ -172,7 +173,31 @@ export function answeredOptions(res: unknown): ThreadConfigOption[] | undefined 
  * @returns The modes and options.
  */
 export function optionsOf(res: LoadAnswer): AdapterOptions {
-  return { modes: res?.modes ?? null, configOptions: res?.configOptions ?? [] };
+  return { modes: modesOf(res), configOptions: res?.configOptions ?? [] };
+}
+
+/**
+ * The modes from the adapter's answer to a `session/new`, `session/fork` or
+ * `session/load`.
+ *
+ * An adapter without a `modes` field can offer its modes as the config option
+ * in the `mode` category. The function then reads the modes from that option.
+ *
+ * @param res The adapter's answer.
+ * @returns The modes, or null when the answer offers none.
+ */
+export function modesOf(res: LoadAnswer): ThreadModeState | null {
+  if (res?.modes) return res.modes;
+  const option = res?.configOptions?.find((o) => o.category === 'mode');
+  if (!option?.currentValue || !option.options) return null;
+  return {
+    currentModeId: option.currentValue,
+    availableModes: option.options.map((o) => ({
+      id: o.value,
+      name: o.name,
+      description: o.description,
+    })),
+  };
 }
 
 /** The gateway state of the box that a connection belongs to, as the connection uses it. */
@@ -725,7 +750,7 @@ export class AdapterConnection {
     this.host.openLog(res.sessionId, optionsOf(res), from ?? undefined);
     this.noteCatalog(res);
     this.slog.info('acp session created', { method, acpSessionId: res.sessionId, from });
-    await this.applyMode(res.sessionId, res.modes ?? null, modeId);
+    await this.applyMode(res.sessionId, modesOf(res), modeId);
     await this.applyConfig(res.sessionId, res.configOptions ?? null, config);
     return res.sessionId;
   }
@@ -820,11 +845,7 @@ export class AdapterConnection {
   async restoreSettings(thread: ThreadRow, res: LoadAnswer): Promise<void> {
     const acpSessionId = thread.acp_session_id;
     if (!acpSessionId) return;
-    await this.applyMode(
-      acpSessionId,
-      res?.modes ?? null,
-      thread.mode_id ?? this.harness.defaultModeId,
-    );
+    await this.applyMode(acpSessionId, modesOf(res), thread.mode_id ?? this.harness.defaultModeId);
     await this.applyConfig(acpSessionId, res?.configOptions ?? null, threadConfig(thread));
   }
 
@@ -864,6 +885,10 @@ export class AdapterConnection {
    * The option in the `mode` category is skipped, because the mode goes
    * through `session/set_mode`. A value the adapter rejects is logged.
    *
+   * When the adapter answers a `set_config_option` with its options, the
+   * method takes the remaining options from that answer, because a new model
+   * can offer other options, such as other efforts.
+   *
    * @param acpSessionId The adapter's id for the thread.
    * @param configOptions The options the adapter advertised for the thread.
    * @param config The recorded settings, by option id.
@@ -874,7 +899,12 @@ export class AdapterConnection {
     config: Record<string, string>,
   ): Promise<void> {
     if (!configOptions) return;
-    for (const option of configOptions) {
+    const done = new Set<string>();
+    let offered = configOptions;
+    for (;;) {
+      const option = offered.find((o) => !done.has(o.id));
+      if (!option) return;
+      done.add(option.id);
       if (option.category === 'mode') continue;
       const value = this.wantedValue(option, config[option.id]);
       if (value === null || value === option.currentValue) continue;
@@ -884,7 +914,12 @@ export class AdapterConnection {
           configId: option.id,
           value,
         });
-        this.host.logConfig(acpSessionId, option.id, value, answeredOptions(res));
+        const answered = answeredOptions(res);
+        this.host.logConfig(acpSessionId, option.id, value, answered);
+        if (answered) {
+          offered = answered;
+          this.noteModelOptions(answered);
+        }
         this.slog.info('thread put back on a setting', {
           acpSessionId,
           configId: option.id,
@@ -921,8 +956,8 @@ export class AdapterConnection {
   }
 
   /**
-   * Merges the settings that the adapter reports for a thread into its row. The option in the `mode` category is
-   * skipped.
+   * Merges the settings that the adapter reports for a thread into its row, and caches the options of the selected
+   * model for the dialog. The option in the `mode` category is skipped.
    *
    * Called with the answer to a `session/set_config_option` and with a
    * `config_option_update`, because the adapter also changes settings by
@@ -932,6 +967,7 @@ export class AdapterConnection {
    * @param configOptions The options the adapter reported.
    */
   recordConfigOptions(acpSessionId: string, configOptions: ThreadConfigOption[]): void {
+    this.noteModelOptions(configOptions);
     const row = this.rowOf(acpSessionId);
     if (!row) return;
     const config = threadConfig(row);
@@ -1077,12 +1113,33 @@ export class AdapterConnection {
     modes?: ThreadModeState | null;
     configOptions?: ThreadConfigOption[] | null;
   }): void {
-    if (!res.modes && !res.configOptions) return;
+    const modes = modesOf(res);
+    if (!modes && !res.configOptions) return;
     for (const option of res.configOptions ?? []) {
       if (typeof option?.id === 'string') this.categories.set(option.id, option.category ?? null);
     }
     try {
-      upsertHarnessCatalog(this.host.db, this.harness.id, res.modes, res.configOptions);
+      upsertHarnessCatalog(this.host.db, this.harness.id, modes, res.configOptions);
+    } catch (err) {
+      this.slog.debug('harness catalogue write failed', { error: (err as Error).message });
+    }
+    this.noteModelOptions(res.configOptions);
+  }
+
+  /**
+   * Caches the options other than the model and the mode, for the model that
+   * the list selects.
+   *
+   * @param configOptions The options that the adapter sent, or nothing.
+   */
+  private noteModelOptions(configOptions: ThreadConfigOption[] | null | undefined): void {
+    const model = configOptions?.find((option) => option.category === 'model')?.currentValue;
+    if (!configOptions || typeof model !== 'string') return;
+    const others = configOptions.filter(
+      (option) => option.category !== 'model' && option.category !== 'mode',
+    );
+    try {
+      recordModelOptions(this.host.db, this.harness.id, model, others);
     } catch (err) {
       this.slog.debug('harness catalogue write failed', { error: (err as Error).message });
     }

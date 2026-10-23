@@ -270,6 +270,49 @@ test('the model combobox filters a long list and takes only an entry of it', asy
   }
 });
 
+test('the dialog shows the efforts of the selected model', async () => {
+  await twoHarnesses();
+  stub.state.catalogued = ['claude', 'codex', 'opencode'];
+
+  const { page, errors, close } = await openPage(stub.url, '/');
+  try {
+    await page.getByRole('button', { name: 'New thread' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect
+      .poll(() => dialog.getByRole('button', { name: 'opencode' }).isEnabled())
+      .toBe(true);
+    await dialog.getByRole('button', { name: 'opencode' }).click();
+    const model = dialog.getByRole('combobox', { name: 'Model' });
+    await expect.poll(() => model.inputValue()).toBe('OpenCode Zen/Big Pickle');
+    const effort = dialog.getByLabel('Effort');
+    expect(await effort.count()).toBe(0);
+
+    // A model that ran before shows its efforts.
+    await pickModel(page, 'sonnet', 'OpenRouter/Claude Sonnet 4.5');
+    await expect.poll(() => effort.count()).toBe(1);
+    expect(await effort.locator('option').allTextContents()).toEqual(['High', 'Max', 'Default']);
+    await effort.selectOption('max');
+
+    // A model that never ran shows no efforts.
+    await pickModel(page, 'model-120', 'OpenRouter/Vendor 12 Model 120');
+    await expect.poll(() => effort.count()).toBe(0);
+    await pickModel(page, 'sonnet', 'OpenRouter/Claude Sonnet 4.5');
+
+    await page.getByRole('button', { name: 'Start thread' }).click();
+    await expect.poll(() => stub.threadCalls.length).toBe(1);
+    expect(stub.threadCalls[0]?.body).toEqual({
+      options: {
+        harness: 'opencode',
+        modeId: 'build',
+        config: { model: 'openrouter/anthropic/claude-sonnet-4.5', effort: 'max' },
+      },
+    });
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a thread says which agent runs it, on its row and in its header', async () => {
   await twoHarnesses([{ threads: [{}, { id: 'th2', harness: 'codex' }] }]);
 

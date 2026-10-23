@@ -10,6 +10,7 @@ import {
   openDb,
   readAppKey,
   readHarnessCatalog,
+  recordModelOptions,
   touchBox,
   upsertHarnessCatalog,
 } from './db.ts';
@@ -565,6 +566,7 @@ test('a thread from before harnesses is Claude, on the model it was left on', ()
       'modes',
       'config_options',
       'seen_at',
+      'model_options',
     ]);
     const cached = upgraded.prepare('SELECT COUNT(*) AS n FROM harness_catalog').get() as {
       n: number;
@@ -589,6 +591,7 @@ test('the catalogue keeps the half an answer says nothing about', () => {
     assert.deepEqual(readHarnessCatalog(db, 'claude'), {
       modes: { currentModeId: 'auto', availableModes: [{ id: 'auto' }, { id: 'plan' }] },
       configOptions: [{ id: 'model', category: 'model', currentValue: 'opus' }],
+      modelOptions: {},
       seenAt: readHarnessCatalog(db, 'claude')!.seenAt,
     });
 
@@ -606,6 +609,38 @@ test('the catalogue keeps the half an answer says nothing about', () => {
     // A harness without an adapter answer has no cache. The dialog of a new
     // deployment works without it.
     assert.equal(readHarnessCatalog(db, 'codex'), null);
+  } finally {
+    db.close();
+  }
+});
+
+test('the catalogue keeps the options of each model', () => {
+  const db = openDb(dir);
+  const effort = (value: string) => ({
+    id: 'effort',
+    category: 'thought_level',
+    currentValue: value,
+  });
+  try {
+    // Without a catalogue, nothing is recorded.
+    recordModelOptions(db, 'claude', 'opus', [effort('high')]);
+    assert.equal(readHarnessCatalog(db, 'claude'), null);
+
+    upsertHarnessCatalog(db, 'claude', null, [{ id: 'model', category: 'model' }]);
+    recordModelOptions(db, 'claude', 'opus', [effort('high')]);
+    recordModelOptions(db, 'claude', 'haiku', []);
+    recordModelOptions(db, 'claude', 'opus', [effort('low')]);
+    assert.deepEqual(readHarnessCatalog(db, 'claude')?.modelOptions, {
+      opus: [effort('low')],
+      haiku: [],
+    });
+
+    // A new answer keeps the options of the models.
+    upsertHarnessCatalog(db, 'claude', null, [{ id: 'model', category: 'model' }]);
+    assert.deepEqual(Object.keys(readHarnessCatalog(db, 'claude')?.modelOptions ?? {}), [
+      'opus',
+      'haiku',
+    ]);
   } finally {
     db.close();
   }

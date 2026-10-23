@@ -128,6 +128,11 @@ export interface HarnessCatalog {
   modes: ThreadModeState | null;
   /** The config options of the last answer that held them, or empty when no answer held them. */
   configOptions: ThreadConfigOption[];
+  /**
+   * The options other than the model and the mode, by model value. Each list is the last one that the adapter sent
+   * while that model was selected.
+   */
+  modelOptions: Record<string, ThreadConfigOption[]>;
   /** The arrival time of the last answer, in epoch milliseconds. */
   seenAt: number;
 }

@@ -656,6 +656,11 @@ export const MIGRATIONS: string[] = [
 
   ALTER TABLE push_subscriptions ADD COLUMN owner TEXT NOT NULL DEFAULT '';
   `,
+  // Adds the options of each model of a harness, so the dialog of a new thread
+  // can show the options of the selected model.
+  `
+  ALTER TABLE harness_catalog ADD COLUMN model_options TEXT NOT NULL DEFAULT '{}';
+  `,
 ];
 
 /** An open database handle. */
@@ -1139,6 +1144,8 @@ export interface HarnessCatalogRow {
   modes: string;
   /** The `configOptions` of the last answer as JSON. */
   config_options: string;
+  /** The options of each model as JSON, by model value. */
+  model_options: string;
   /** Epoch milliseconds of the last answer. */
   seen_at: number;
 }
@@ -1162,7 +1169,7 @@ export function upsertHarnessCatalog(
   configOptions: ThreadConfigOption[] | null | undefined,
 ): void {
   const previous = readHarnessCatalog(db, harness);
-  const next: HarnessCatalog = {
+  const next: Omit<HarnessCatalog, 'modelOptions'> = {
     modes: modes ?? previous?.modes ?? null,
     configOptions: configOptions ?? previous?.configOptions ?? [],
     seenAt: Date.now(),
@@ -1173,6 +1180,32 @@ export function upsertHarnessCatalog(
      ON CONFLICT(harness) DO UPDATE SET modes = excluded.modes,
        config_options = excluded.config_options, seen_at = excluded.seen_at`,
   ).run(harness, JSON.stringify(next.modes), JSON.stringify(next.configOptions), next.seenAt);
+}
+
+/**
+ * Records the options that an adapter offers for one model of its harness.
+ *
+ * The list replaces the stored list of the model. The function does nothing
+ * for a harness that has no catalogue yet.
+ *
+ * @param db The database.
+ * @param harness The harness of the adapter.
+ * @param model The value of the model that was selected when the adapter sent the options.
+ * @param options The options other than the model and the mode.
+ */
+export function recordModelOptions(
+  db: Db,
+  harness: HarnessId,
+  model: string,
+  options: ThreadConfigOption[],
+): void {
+  const previous = readHarnessCatalog(db, harness);
+  if (!previous) return;
+  const modelOptions = { ...previous.modelOptions, [model]: options };
+  db.prepare('UPDATE harness_catalog SET model_options = ? WHERE harness = ?').run(
+    JSON.stringify(modelOptions),
+    harness,
+  );
 }
 
 /**
@@ -1194,6 +1227,7 @@ export function readHarnessCatalog(db: Db, harness: HarnessId): HarnessCatalog |
     return {
       modes: JSON.parse(row.modes) as ThreadModeState | null,
       configOptions: JSON.parse(row.config_options) as ThreadConfigOption[],
+      modelOptions: JSON.parse(row.model_options) as Record<string, ThreadConfigOption[]>,
       seenAt: row.seen_at,
     };
   } catch {
