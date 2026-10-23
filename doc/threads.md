@@ -22,6 +22,9 @@ Select **New thread** on a box card. The dialog asks for the agent, its mode, an
 is fixed for the life of the thread. The dialog shows the settings that the agent's adapter last advertised, and the
 last choice made for that agent.
 
+Some settings, such as the effort, depend on the model. The dialog shows them only for a model that this agent used
+before in this deployment. For another model, select them in the thread header after the thread starts.
+
 A new thread starts empty, on the same workspace as the other threads of the box.
 
 ## Thread names

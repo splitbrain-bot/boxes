@@ -601,10 +601,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    * has the registry data, the catalogue that its adapter last sent, and the
    * state of the harness.
    *
-   * The catalogue is a cache. The orchestrator writes it from the last answer
-   * of an adapter to `session/new`, `session/load` or `session/fork`. It is
-   * null until an adapter of that harness answers. While it is null, the dialog
-   * offers only the agent choice.
+   * The catalogue is a cache of what the adapter sent. It is null until an
+   * adapter of that harness answers. While it is null, the dialog offers only
+   * the agent choice.
    */
   app.get(
     '/api/harnesses',

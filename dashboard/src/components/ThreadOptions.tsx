@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Combobox } from '@/components/ui/combobox';
 import { unavailableReason } from '@/lib/harness';
 import type {
+  HarnessCatalog,
   HarnessId,
   HarnessInfo,
   ThreadConfigOption,
@@ -174,6 +175,35 @@ function selectedValue(option: ThreadConfigOption, config: Record<string, string
 }
 
 /**
+ * Returns the options that the block shows for a harness, the model first.
+ *
+ * The other options come from the options that the catalogue recorded for the
+ * selected model. Without a record, the cached options apply only to the model
+ * of the last answer. A harness without a model option shows the cached
+ * options.
+ *
+ * @param catalog The catalogue of the harness, or null when it has none.
+ * @param config The chosen values of the block.
+ * @returns The options to show.
+ */
+function shownOptions(
+  catalog: HarnessCatalog | null,
+  config: Record<string, string>,
+): ThreadConfigOption[] {
+  // The mode goes through session/set_mode, so the block leaves out its option.
+  const shown = (option: ThreadConfigOption): boolean =>
+    option.category !== 'mode' && option.category !== 'model' && isSelectable(option);
+  const cached = catalog?.configOptions ?? [];
+  // Each adapter picks its own option ids, so the block finds the model by its category.
+  const model = cached.find((option) => option.category === 'model' && isSelectable(option));
+  if (!model) return cached.filter(shown);
+  const selected = selectedValue(model, config);
+  const recorded = catalog?.modelOptions[selected];
+  const others = recorded ?? (selected === model.currentValue ? cached : []);
+  return [model, ...others.filter(shown)];
+}
+
+/**
  * Block that picks the agent and its settings for a new thread.
  *
  * The modes and options come from the harness catalogue. The orchestrator
@@ -199,17 +229,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
   const cached = chosen?.catalog?.modes ?? null;
   const modes = cached ? { ...cached, currentModeId: state.modeId ?? cached.currentModeId } : null;
   const hasModes = (modes?.availableModes.length ?? 0) > 1;
-  // The mode travels through `session/set_mode`, so its config option is left
-  // out. Setting both would set the mode twice.
-  const options = (chosen?.catalog?.configOptions ?? []).filter(
-    (option) => option.category !== 'mode' && isSelectable(option),
-  );
-  // The model comes first, found by category, because the protocol defines
-  // categories and each adapter picks its own ids.
-  const ordered = [
-    ...options.filter((option) => option.category === 'model'),
-    ...options.filter((option) => option.category !== 'model'),
-  ];
+  const ordered = shownOptions(chosen?.catalog ?? null, config);
 
   return (
     <div className="flex flex-col gap-3">
@@ -249,9 +269,7 @@ export function ThreadOptions({ state }: { state: ThreadOptionsState }) {
         </Setting>
       ) : null}
 
-      {/* Codex advertises its efforts per model, so these show what was last
-          seen, which can differ from what the chosen model supports. The model
-          list can be long, so a combobox filters it. */}
+      {/* The model list can be long, so a combobox filters it. */}
       {ordered.map((option) => (
         <Setting key={option.id} name={optionName(option)} description={option.description}>
           {option.category === 'model' ? (

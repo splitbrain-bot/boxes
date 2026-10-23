@@ -16,6 +16,7 @@ import {
   latestThread,
   listThreads,
   openDb,
+  recordModelOptions,
   setThreadAcpId,
   type ThreadRow,
   upsertHarnessCatalog,
@@ -84,15 +85,29 @@ const OPENCODE_MODELS = [
   { value: 'opencode/big-pickle', name: 'OpenCode Zen/Big Pickle' },
 ];
 
+/** The reasoning effort option that the fake Codex offers for each of its models. */
+const CODEX_EFFORT = {
+  id: 'reasoning_effort',
+  name: 'Reasoning effort',
+  category: 'thought_level',
+  currentValue: 'medium',
+  options: [
+    { value: 'low', name: 'Low' },
+    { value: 'medium', name: 'Medium' },
+    { value: 'high', name: 'High' },
+  ],
+};
+
 /**
- * The modes and settings each adapter advertises, as the harness catalogue
- * stores them. The dialogs read these without asking an adapter.
+ * The modes, the settings and the options of each model that each adapter
+ * advertises, as the harness catalogue stores them. The dialogs read these without asking an adapter.
  */
 const CATALOG: Record<
   HarnessId,
   {
     modes: Parameters<typeof upsertHarnessCatalog>[2];
     configOptions: Parameters<typeof upsertHarnessCatalog>[3];
+    modelOptions?: Record<string, Parameters<typeof recordModelOptions>[3]>;
   }
 > = {
   claude: {
@@ -155,18 +170,9 @@ const CATALOG: Record<
           { value: 'gpt-5.6', name: 'GPT-5.6' },
         ],
       },
-      {
-        id: 'reasoning_effort',
-        name: 'Reasoning effort',
-        category: 'thought_level',
-        currentValue: 'medium',
-        options: [
-          { value: 'low', name: 'Low' },
-          { value: 'medium', name: 'Medium' },
-          { value: 'high', name: 'High' },
-        ],
-      },
+      CODEX_EFFORT,
     ],
+    modelOptions: { 'gpt-5.6': [CODEX_EFFORT] },
   },
   opencode: {
     modes: {
@@ -185,6 +191,22 @@ const CATALOG: Record<
         options: OPENCODE_MODELS,
       },
     ],
+    // One model of OpenRouter ran before and offered its efforts.
+    modelOptions: {
+      'openrouter/anthropic/claude-sonnet-4.5': [
+        {
+          id: 'effort',
+          name: 'Effort',
+          category: 'thought_level',
+          currentValue: 'default',
+          options: [
+            { value: 'high', name: 'High' },
+            { value: 'max', name: 'Max' },
+            { value: 'default', name: 'Default' },
+          ],
+        },
+      ],
+    },
   },
 };
 
@@ -1146,6 +1168,9 @@ export async function startOrchestrator(
       db.prepare('DELETE FROM harness_catalog').run();
       for (const id of harnesses) {
         upsertHarnessCatalog(db, id, CATALOG[id].modes, CATALOG[id].configOptions);
+        for (const [model, options] of Object.entries(CATALOG[id].modelOptions ?? {})) {
+          recordModelOptions(db, id, model, options);
+        }
       }
     },
     requireCookie: null,

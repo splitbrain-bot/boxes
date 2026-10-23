@@ -991,6 +991,101 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
   ]);
 });
 
+test('modes offered only as the config option in the mode category are used', async () => {
+  const modeSet: Array<{ session: unknown; mode: unknown }> = [];
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') {
+      return {
+        protocolVersion: 1,
+        agentCapabilities: { sessionCapabilities: { fork: {} } },
+      };
+    }
+    const configOptions = [
+      {
+        id: 'mode',
+        category: 'mode',
+        currentValue: 'default',
+        options: [
+          { value: 'auto', name: 'Auto' },
+          { value: 'plan', name: 'Plan', description: 'Edits no files.' },
+          { value: 'default', name: 'Default' },
+        ],
+      },
+    ];
+    if (msg.method === 'session/new') return { sessionId: 'acp-fresh', configOptions };
+    if (msg.method === 'session/fork') return { sessionId: 'acp-branch', configOptions };
+    if (msg.method === 'session/set_mode') {
+      modeSet.push({ session: msg.params?.sessionId, mode: msg.params?.modeId });
+      return {};
+    }
+    return {};
+  });
+  fakeDocker(adapter);
+
+  await manager.createThread('s1', undefined);
+  await manager.createThread('s1', { from: 't2' });
+
+  assert.deepEqual(modeSet, [
+    { session: 'acp-fresh', mode: 'auto' },
+    { session: 'acp-branch', mode: 'plan' },
+  ]);
+  // The dialogs show the modes from the catalogue.
+  assert.deepEqual(readHarnessCatalog(db, 'claude')?.modes, {
+    currentModeId: 'default',
+    availableModes: [
+      { id: 'auto', name: 'Auto' },
+      { id: 'plan', name: 'Plan', description: 'Edits no files.' },
+      { id: 'default', name: 'Default' },
+    ],
+  });
+});
+
+test('an option that the chosen model brings is set on a new thread', async () => {
+  const asked: string[] = [];
+  const model = (currentValue: string) => ({
+    id: 'model',
+    category: 'model',
+    currentValue,
+    options: [{ value: 'small' }, { value: 'big' }],
+  });
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    // The model of a new thread has no efforts, so the answer offers none.
+    if (msg.method === 'session/new') {
+      return { sessionId: 'acp-fresh', configOptions: [model('small')] };
+    }
+    if (msg.method === 'session/set_config_option') {
+      asked.push(`${String(msg.params?.configId)} ${String(msg.params?.value)}`);
+      return {
+        configOptions: [
+          model('big'),
+          {
+            id: 'effort',
+            category: 'thought_level',
+            currentValue: 'default',
+            options: [{ value: 'default' }, { value: 'high' }],
+          },
+        ],
+      };
+    }
+    return {};
+  });
+  fakeDocker(adapter);
+
+  await manager.createThread('s1', {
+    options: { harness: 'claude', config: { model: 'big', effort: 'high' } },
+  });
+
+  assert.deepEqual(asked, ['model big', 'effort high']);
+  // The dialogs show the options of each model from the catalogue.
+  const recorded = readHarnessCatalog(db, 'claude')?.modelOptions;
+  assert.deepEqual(recorded?.small, []);
+  assert.deepEqual(
+    recorded?.big?.map((option) => option.id),
+    ['effort'],
+  );
+});
+
 /**
  * An adapter whose mode and model are per-process, the way a real one's are.
  *
