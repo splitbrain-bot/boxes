@@ -1,6 +1,7 @@
 import type {
   AgentBundlePreview,
   AgentItemBody,
+  AgentMcpServer,
   AgentRepoBody,
   AgentSetDetail,
   AgentSetSummary,
@@ -389,6 +390,30 @@ export const api = {
     request<AgentSetDetail>(`/api/agent-sets/${setId}/items?name=${encodeURIComponent(name)}`, {
       method: 'DELETE',
     }),
+  /**
+   * Adds or replaces one MCP server of a set.
+   *
+   * @param setId The id of the agent set.
+   * @param body The name, the URL and the headers of the server.
+   * @returns The whole set after the change.
+   */
+  putAgentMcpServer: (setId: string, body: AgentMcpServer) =>
+    request<AgentSetDetail>(`/api/agent-sets/${setId}/mcp-servers`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * Removes one MCP server of a set.
+   *
+   * @param setId The id of the agent set.
+   * @param name The name of the server.
+   * @returns The whole set after the change.
+   */
+  deleteAgentMcpServer: (setId: string, name: string) =>
+    request<AgentSetDetail>(
+      `/api/agent-sets/${setId}/mcp-servers?name=${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    ),
   /**
    * Adds a repository to take skills from, and pulls it.
    *

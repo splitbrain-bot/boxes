@@ -838,6 +838,49 @@ test('the preview shows the merge, overrides named', async () => {
   assert.deepEqual(preview.overrides, ['review']);
 });
 
+test('an MCP server is written, refused and removed over the API', async () => {
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/api-keys/GITHUB_MCP_TOKEN',
+    payload: { hosts: ['api.githubcopilot.com'], secret: 'ghp_0123456789abcdef' },
+  });
+  const server = {
+    name: 'github',
+    url: 'https://api.githubcopilot.com/mcp/',
+    headers: [{ name: 'Authorization', value: `Bearer \${GITHUB_MCP_TOKEN}` }],
+  };
+
+  const put = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/agent-sets/global/mcp-servers',
+    payload: server,
+  });
+  assert.equal(put.statusCode, 200);
+  assert.deepEqual((put.json() as { mcpServers: unknown[] }).mcpServers, [
+    { ...server, warning: null },
+  ]);
+
+  const literal = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/agent-sets/global/mcp-servers',
+    payload: { ...server, headers: [{ name: 'Authorization', value: 'Bearer ghp_literal' }] },
+  });
+  assert.equal(literal.statusCode, 400);
+
+  const preview = (
+    await orchestrator.app.inject({ url: '/api/agent-sets/global/preview' })
+  ).json() as { mcpServers: unknown[]; mcpOverrides: string[] };
+  assert.deepEqual(preview.mcpServers, [{ name: 'github', url: server.url }]);
+  assert.deepEqual(preview.mcpOverrides, []);
+
+  const removed = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: '/api/agent-sets/global/mcp-servers?name=github',
+  });
+  assert.equal(removed.statusCode, 200);
+  assert.deepEqual((removed.json() as { mcpServers: unknown[] }).mcpServers, []);
+});
+
 test('the global set is refused deletion, and an unknown set is a 404', async () => {
   const global = await orchestrator.app.inject({
     method: 'DELETE',
@@ -873,7 +916,25 @@ test('starting a container to reach into installs the current configuration firs
     payload: { name: 'ship', content: 'Open a PR.' },
   });
 
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/agent-sets/global/mcp-servers',
+    payload: { name: 'docs', url: 'https://docs.example.com/mcp', headers: [] },
+  });
+
   await orchestrator.manager.execTarget('abc123');
+
+  // The adapters read the MCP servers that the box got at this start.
+  assert.deepEqual(
+    JSON.parse(
+      (
+        db.prepare("SELECT mcp_servers FROM boxes WHERE id = 'abc123'").get() as {
+          mcp_servers: string;
+        }
+      ).mcp_servers,
+    ),
+    [{ name: 'docs', url: 'https://docs.example.com/mcp', headers: [] }],
+  );
 
   // config() is cached for the process, so the test uses the DATA_DIR of the
   // orchestrator and not `dir` of this test.
@@ -1733,6 +1794,21 @@ test('each user has their own credentials, settings and agent sets', async () =>
     headers: as('bob'),
   });
   assert.equal(foreign.statusCode, 404);
+
+  // A user cannot write or remove the MCP servers of the set of another user.
+  const foreignMcp = await orchestrator.app.inject({
+    method: 'PUT',
+    url: `/api/agent-sets/${aliceSets[0]?.id}/mcp-servers`,
+    headers: as('bob'),
+    payload: { name: 'docs', url: 'https://docs.example.com/mcp', headers: [] },
+  });
+  assert.equal(foreignMcp.statusCode, 404);
+  const foreignDelete = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: `/api/agent-sets/${aliceSets[0]?.id}/mcp-servers?name=docs`,
+    headers: as('bob'),
+  });
+  assert.equal(foreignDelete.statusCode, 404);
 });
 
 test('in single user mode every box is listed, whatever its owner', async () => {

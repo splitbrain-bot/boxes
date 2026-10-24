@@ -1,15 +1,17 @@
 # Agent sets
 
-An agent set is a named collection of agent configuration: an `AGENTS.md` file and skills. The orchestrator stores
-sets in its [database](storage.md). The agent in a box reads its configuration from files in its
-home directory. The orchestrator writes these files from the sets.
+An agent set is a named collection of agent configuration. It holds an `AGENTS.md` file, skills, and remote MCP
+servers. The orchestrator stores sets in its [database](storage.md). The agent in a box reads the `AGENTS.md` file and
+the skills from files in its home directory, and the orchestrator writes these files from the sets. The orchestrator
+gives the MCP servers to the agent through the [agent protocol](acp.md).
 
 ## The global set and named sets
 
 Each set belongs to one [user](users.md). Each user has one global set, which the orchestrator creates at the first
 use. The global set applies to every box of its owner, and the user cannot delete it.
 
-More sets can be added in the dashboard. A set has a display name, an optional `AGENTS.md`, and any number of skills.
+More sets can be added in the dashboard. A set has a display name, an optional `AGENTS.md`, any number of skills, and
+up to 20 MCP servers.
 
 A set is selected when a [box is created](boxes.md). The selection is stored with the box and cannot change later. A box
 that selects no set gets the global set alone. Naming the global set is the same as naming nothing.
@@ -26,6 +28,8 @@ content merge differently:
   2. a skill from a repository of the selected set, in the order of the repository list
   3. a skill of the global set
   4. a skill from a repository of the global set, in the order of the repository list
+- An MCP server is addressed by its name. A server of the selected set replaces a server of the global set with the
+  same name.
 
 The editor of a named set shows the merged result under "Merged result".
 
@@ -58,6 +62,32 @@ When a pull fails, the editor shows the error on the repository. The skills of t
 
 A set takes skills from at most 20 repositories, and the orchestrator takes at most 100 skills from one repository.
 
+## MCP servers
+
+An MCP server gives the agent more tools. MCP is the Model Context Protocol, and a remote MCP server answers it over
+HTTP. Boxes supports remote servers with the Streamable HTTP transport only. Boxes does not support servers that run as
+a local process in the box, servers with the older SSE transport, or servers that need an OAuth login.
+
+Each server has a name, a URL, and a list of HTTP headers. The name must be lowercase letters, digits, and dashes, and
+it can have at most 32 characters. The URL must use `https`, or `http` for a server without a secret. A server has at
+most 20 headers, and a header value can have at most 4096 characters.
+
+The agent reaches a server through the [egress proxy](egress.md), so the allowlist and the port rules of the proxy
+apply to the server. The orchestrator refuses a URL with a private IP address. How the agents get the servers is in
+[Agent communication](acp.md#mcp-servers).
+
+### Secrets in headers
+
+A secret, for example a token, goes into an [API key](credentials.md#other-api-keys), and never into the set. A header
+value refers to a key as `${NAME}`, where `NAME` is the environment variable name of the key. The orchestrator and the
+egress proxy put in the key on the way to the server, so the key never goes into a box. For a bearer token, the editor
+builds the header `Authorization: Bearer ${NAME}` from a selected key. Other headers can mix a key reference with
+literal text, and a literal value goes into the box as it is.
+
+The orchestrator refuses a server when a referenced key does not exist, or when the hosts of the key do not include the
+host and the port of the server. It also refuses an `Authorization` header without a key reference. For other header
+names, it cannot tell a secret from a literal value, so put each secret into an API key.
+
 ## File installation into a box
 
 At each box start, the [file service](files.md) in the box installs the merged set into the home, in the layout of each
@@ -65,7 +95,8 @@ At each box start, the [file service](files.md) in the box installs the merged s
 
 The practical effects:
 
-- Changes to a set reach a box the next time the box starts. A running box keeps what it has.
+- Changes to a set reach a box the next time the box starts. A running box keeps what it has. This also applies to the
+  MCP servers. A new placeholder of an API key, however, applies at the next session call of a thread.
 - An item deleted from a set is removed from the box at the next start. A built-in skill whose condition no longer
   holds is removed in the same way.
 - When a set is deleted, the boxes that selected it keep what is already installed, and get the global set alone at the
@@ -78,8 +109,8 @@ can be opened in its editor.
 
 ## Technical internals
 
-The implementation is `orchestrator/src/agents.ts`, over the `agent_sets`, `agent_items` and `agent_repos` tables. The
-database is the source of truth; the files are derived from it.
+The implementation is `orchestrator/src/agents.ts`, over the `agent_sets`, `agent_items`, `agent_repos` and
+`agent_mcp_servers` tables. The database is the source of truth; the files are derived from it.
 
 ### Repository checkouts
 
@@ -119,3 +150,10 @@ managed file cannot name `.ssh` or all of `.claude`.
 
 The box's `agent_set_id` column references the set with `ON DELETE SET NULL`, and the set's items and repositories are
 deleted with it, together with the repository checkouts.
+
+### MCP servers
+
+`orchestrator/src/mcp-servers.ts` checks a server at save and makes the `mcpServers` list for the
+[gateway](acp.md#mcp-servers). The `agent_mcp_servers` table stores the headers with the `${NAME}` references. At each
+box start, the orchestrator writes the merged servers into the `mcp_servers` column of the box, so the list survives a
+restart of the orchestrator.

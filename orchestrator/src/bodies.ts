@@ -121,6 +121,13 @@ export const agentRepoBody = z.object({
   ref: z.string().optional(),
 });
 
+/** The body of PUT /api/agent-sets/:setId/mcp-servers, with the MCP server to write. */
+export const agentMcpServerBody = z.object({
+  name: z.string(),
+  url: z.string(),
+  headers: z.array(z.object({ name: z.string(), value: z.string() })).default([]),
+});
+
 /** The body of PUT /api/agent-sets/:setId/items, with the skill to write. */
 export const agentItemBody = z.object({
   name: z.string(),

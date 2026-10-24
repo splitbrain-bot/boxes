@@ -1,6 +1,4 @@
-/**
- * Address checks of the egress proxy, which decide the addresses that an agent may connect to.
- */
+/** Address checks of the egress policy, which decide the addresses that an agent may connect to. */
 
 /** IPv4 ranges an agent must never reach through the proxy. */
 const V4_BLOCKED: ReadonlyArray<readonly [string, number]> = [

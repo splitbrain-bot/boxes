@@ -83,7 +83,7 @@ You can add API keys for other services, for example OpenRouter. Each key has th
   `PATH`.
 - **Hosts**: the hosts the proxy sends the key to. A host is an exact name, e.g., `openrouter.ai`, or a name that starts
   with `*.`. The name `*.example.com` includes `api.example.com`, but it does not include `example.com` or
-  `a.b.example.com`, as in the [allowlist](egress.md#allowlist).
+  `a.b.example.com`, and a host can end in a port, as in the [allowlist](egress.md#allowlist).
 - **Key**: the secret. To change only the hosts, leave it empty.
 
 The placeholder has the same prefix and the same length as the key, so a client that checks the format of its key
@@ -96,7 +96,8 @@ start.
 
 The proxy replaces the placeholder in any header of a request to one of the hosts.
 
-The opencode harness has no credential of its own and runs on these keys. It can always run, because some of its models need no key.
+The opencode harness has no credential of its own and runs on these keys. It can always run, because some of its models
+need no key. The [MCP servers](agent-sets.md#mcp-servers) of an agent set authenticate with these keys too.
 
 ## Statuses and refresh
 

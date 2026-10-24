@@ -3,12 +3,10 @@
 import dns from 'node:dns';
 import http from 'node:http';
 import net from 'node:net';
+import { allAddressesAllowed, isBlockedAddress } from '../../shared/cidr.ts';
+import { DEFAULT_PORTS } from '../../shared/hosts.ts';
 import type { EgressPolicy } from '../../shared/types.ts';
-import { allAddressesAllowed, isBlockedAddress } from './cidr.ts';
 import { hostAllowed, isInjectionHost } from './policy.ts';
-
-/** Destination ports an agent may reach. */
-export const ALLOWED_PORTS = new Set([80, 443]);
 
 /** Time limit to open the upstream connection of a CONNECT, in milliseconds. */
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -90,10 +88,14 @@ export type Verdict =
  * @returns The verdict, with the first resolved address when the target passes.
  */
 export async function vetTarget(target: Target, policy: EgressPolicy): Promise<Verdict> {
-  if (!ALLOWED_PORTS.has(target.port)) {
-    return { ok: false, category: 'port', reason: `port ${target.port} not allowed` };
-  }
-  if (!hostAllowed(target.host, policy)) {
+  if (!hostAllowed(target.host, target.port, policy)) {
+    if (!DEFAULT_PORTS.has(target.port)) {
+      return {
+        ok: false,
+        category: 'port',
+        reason: `port ${target.port} not allowed for this host`,
+      };
+    }
     return { ok: false, category: 'allowlist', reason: 'host is not on the egress allowlist' };
   }
 
@@ -254,7 +256,7 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
     }
 
     const policy = opts.policy();
-    if (opts.interceptPort() !== null && isInjectionHost(target.host, policy)) {
+    if (opts.interceptPort() !== null && isInjectionHost(target.host, target.port, policy)) {
       // In the clear, a credential host would get the placeholder, or the real
       // secret as plaintext.
       opts.denied('plaintext-credential-host');
@@ -352,10 +354,10 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       }
 
       const enginePort = opts.interceptPort();
-      if (enginePort !== null && isInjectionHost(target.host, policy)) {
-        if (target.port !== 443) {
-          // The proxy takes only port 443 as https. On another port, the engine
-          // could swap the real credential into plaintext.
+      if (enginePort !== null && isInjectionHost(target.host, target.port, policy)) {
+        if (target.port === 80) {
+          // The proxy takes port 80 as plain HTTP. There, the engine could swap
+          // the real credential into plaintext.
           opts.denied('plaintext-credential-host');
           opts.log('denied CONNECT', {
             host: target.host,

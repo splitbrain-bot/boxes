@@ -26,6 +26,7 @@ import { ApiKeyStore } from './api-keys.ts';
 import { ATTACHMENTS_DIR, servedTypeFor, storeAttachment } from './attachments.ts';
 import {
   agentItemBody,
+  agentMcpServerBody,
   agentRepoBody,
   backgroundStopBody,
   createAgentSetBody,
@@ -343,6 +344,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       return fetchRepo(dir, url, ref, row ? deliverableSecret(row) : null, keep);
     },
     (owner) => builtinSkills({ hasCredential: (id) => credentials.get(owner, id) !== undefined }),
+    (owner) => ({ keys: apiKeys.list(owner), allowedHosts: cfg.egressAllowedHosts }),
   );
   // The closure lets the reconciler be built before the manager it reads.
   const tunnels = new TunnelReconciler(
@@ -887,6 +889,18 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const { setId } = req.params as { setId: string };
     const { name } = req.query as { name?: string };
     return agents.deleteItem(userOf(req), setId, name);
+  });
+
+  /** Creates an MCP server, or replaces the one already under that name. */
+  app.put('/api/agent-sets/:setId/mcp-servers', async (req) => {
+    const { setId } = req.params as { setId: string };
+    return agents.putMcpServer(userOf(req), setId, parseBody(agentMcpServerBody, req.body));
+  });
+
+  app.delete('/api/agent-sets/:setId/mcp-servers', async (req) => {
+    const { setId } = req.params as { setId: string };
+    const { name } = req.query as { name?: string };
+    return agents.deleteMcpServer(userOf(req), setId, name);
   });
 
   /** Adds a repository to take skills from, and pulls it. */

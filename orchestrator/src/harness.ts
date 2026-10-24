@@ -45,6 +45,11 @@ export interface Harness {
   /** `_meta` sent with session/new, session/load and session/fork, or undefined. */
   threadMeta: Readonly<Record<string, unknown>> | undefined;
   /**
+   * True when the adapter needs a `session/load` right after `session/fork`,
+   * because it makes the fork live, and gives it the MCP servers, at the load.
+   */
+  loadAfterFork: boolean;
+  /**
    * The credential that a thread needs before it can run, or null for a
    * harness that runs on the API keys of the user.
    */
@@ -98,6 +103,7 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
         },
       },
     },
+    loadAfterFork: true,
     credentialId: 'claude',
     /**
      * Claude Code sends `ANTHROPIC_API_KEY` as `x-api-key` and
@@ -143,6 +149,7 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     /** Empty, so a fresh Codex thread stays on the default model of the adapter. */
     defaultConfig: {},
     threadMeta: undefined,
+    loadAfterFork: false,
     credentialId: 'openai',
     /**
      * The adapter reads `CODEX_API_KEY`. With `DEFAULT_AUTH_REQUEST` naming the
@@ -188,6 +195,7 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
     /** Empty, so opencode selects the model of a fresh thread. */
     defaultConfig: {},
     threadMeta: undefined,
+    loadAfterFork: false,
     /**
      * The API keys of the user go into each box with their own names, and
      * opencode reads the key of each provider from these names.

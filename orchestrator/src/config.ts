@@ -454,6 +454,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         `Invalid configuration:\n  EGRESS_ALLOWED_HOSTS: ${pattern} may only use a leading *. wildcard`,
       );
     }
+    const port = /:(\d+)$/.exec(pattern)?.[1];
+    if (port !== undefined && (Number(port) < 1 || Number(port) > 65535)) {
+      throw new Error(
+        `Invalid configuration:\n  EGRESS_ALLOWED_HOSTS: ${pattern} has no valid port`,
+      );
+    }
   }
 
   return {

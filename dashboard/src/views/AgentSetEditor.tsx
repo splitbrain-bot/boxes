@@ -4,6 +4,7 @@ import { useParams } from 'react-router';
 import { BackLink } from '@/components/BackLink';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Loading } from '@/components/Loading';
+import { McpDialog, McpSection } from '@/components/McpServers';
 import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -22,8 +23,10 @@ import { useUp } from '@/hooks/use-up';
 import type {
   AgentBundlePreview,
   AgentItem,
+  AgentMcpServer,
   AgentRepo,
   AgentSetDetail,
+  ApiKeySummary,
 } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 
@@ -50,9 +53,13 @@ export function AgentSetEditor() {
   const [editing, setEditing] = useState<{ item: AgentItem | null } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<AgentItem | null>(null);
   const [confirmRepo, setConfirmRepo] = useState<AgentRepo | null>(null);
+  const [editingMcp, setEditingMcp] = useState<{ server: AgentMcpServer | null } | null>(null);
+  const [confirmMcp, setConfirmMcp] = useState<AgentMcpServer | null>(null);
+  /** The API keys of the user, which an MCP server can refer to. */
+  const [keys, setKeys] = useState<ApiKeySummary[]>([]);
 
   /**
-   * Loads the set and, for a non-global set, the merged result.
+   * Loads the set, the API keys and, for a non-global set, the merged result.
    *
    * @param seed Fills the AGENTS.md and name buffers from the answer. Only the
    *   first load seeds them, so a reload after another save keeps unsaved text.
@@ -66,6 +73,7 @@ export function AgentSetEditor() {
           setAgentsMd(detail.agentsMd);
           setName(detail.name);
         }
+        setKeys(await api.listApiKeys());
         setPreview(detail.global ? null : await api.agentSetPreview(setId));
         setError(null);
       } catch (err) {
@@ -109,6 +117,7 @@ export function AgentSetEditor() {
   }
 
   const overridden = new Set(preview?.overrides ?? []);
+  const mcpOverridden = new Set(preview?.mcpOverrides ?? []);
 
   return (
     <div className="flex flex-col gap-4">
@@ -192,6 +201,15 @@ export function AgentSetEditor() {
         onDelete={setConfirmRepo}
       />
 
+      <McpSection
+        servers={set.mcpServers}
+        overridden={mcpOverridden}
+        busy={busy}
+        onAdd={() => setEditingMcp({ server: null })}
+        onEdit={(server) => setEditingMcp({ server })}
+        onDelete={setConfirmMcp}
+      />
+
       {preview ? <Merged preview={preview} /> : null}
 
       {editing ? (
@@ -202,6 +220,40 @@ export function AgentSetEditor() {
           onSave={async (body) => {
             if (await act(() => api.putAgentItem(setId, body))) setEditing(null);
           }}
+        />
+      ) : null}
+
+      {editingMcp ? (
+        <McpDialog
+          server={editingMcp.server}
+          keys={keys}
+          busy={busy}
+          error={error}
+          onCancel={() => {
+            setEditingMcp(null);
+            setError(null);
+          }}
+          onSave={async (body) => {
+            if (await act(() => api.putAgentMcpServer(setId, body))) setEditingMcp(null);
+          }}
+          onSaveKey={(name, hosts, secret) => act(() => api.putApiKey(name, hosts, secret))}
+        />
+      ) : null}
+
+      {confirmMcp ? (
+        <ConfirmDialog
+          title={`Delete MCP server ${confirmMcp.name}?`}
+          description="It is removed from this set, and from every box that uses the set at its next start."
+          confirmLabel="Delete"
+          danger
+          busy={busy}
+          onCancel={() => setConfirmMcp(null)}
+          onConfirm={() =>
+            void act(async () => {
+              await api.deleteAgentMcpServer(setId, confirmMcp.name);
+              setConfirmMcp(null);
+            })
+          }
         />
       ) : null}
 
@@ -443,7 +495,7 @@ function RepoSection({
 /**
  * Summary of the merged set that a box using this set gets.
  *
- * @param preview The merged AGENTS.md and skills.
+ * @param preview The merged AGENTS.md, skills and MCP servers.
  */
 function Merged({ preview }: { preview: AgentBundlePreview }) {
   return (
@@ -462,6 +514,12 @@ function Merged({ preview }: { preview: AgentBundlePreview }) {
         <dt className="text-xs text-muted-foreground">Skills</dt>
         <dd className="font-mono text-xs break-words">
           {preview.skills.length === 0 ? 'none' : preview.skills.map((s) => s.name).join(', ')}
+        </dd>
+        <dt className="text-xs text-muted-foreground">MCP servers</dt>
+        <dd className="font-mono text-xs break-words">
+          {preview.mcpServers.length === 0
+            ? 'none'
+            : preview.mcpServers.map((s) => s.name).join(', ')}
         </dd>
       </dl>
     </Card>

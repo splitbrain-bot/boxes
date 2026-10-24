@@ -1,5 +1,7 @@
 import { randomBytes } from 'node:crypto';
+import type { McpServer } from '@agentclientprotocol/sdk';
 import {
+  type AgentMcpServer,
   type BoxDetail,
   type BoxSummary,
   type BoxTunnel,
@@ -410,6 +412,18 @@ export class BoxManager {
   }
 
   /**
+   * Gives the MCP servers of a box for its adapters, from the list of its last
+   * start, with the current placeholders of the API keys.
+   *
+   * @param id The id of the box.
+   * @returns The `mcpServers` list for a session call.
+   */
+  private mcpServersOf(id: string): McpServer[] {
+    const row = this.mustGet(id);
+    return this.agents.mcpServersFor(row.owner, JSON.parse(row.mcp_servers) as AgentMcpServer[]);
+  }
+
+  /**
    * Gives the persistent upstream of a box, and creates it on first use.
    *
    * @param id The id of the box.
@@ -428,6 +442,7 @@ export class BoxManager {
         // Opening a thread starts a stopped box without start(), so the
         // repairs and the setup run here too, under the same slot.
         () => this.withSlot(id, () => this.bringUp(id)),
+        () => this.mcpServersOf(id),
       );
       this.upstreams.set(id, up);
     }
@@ -498,6 +513,7 @@ export class BoxManager {
       disk_bytes: null,
       disk_measured_at: null,
       ready_at: null,
+      mcp_servers: '[]',
     };
 
     this.db
@@ -646,6 +662,8 @@ export class BoxManager {
     if (this.mustGet(row.id).ready_at !== null) return;
     const slog = log.box(row.id);
     const settings = readSettings(this.db, row.owner);
+    // The adapters read the row, so a change to a set applies at the next start.
+    const mcpServers = this.agents.mcpSnapshot(row.owner, row.agent_set_id);
     try {
       await setUpBox(
         row.id,
@@ -665,7 +683,9 @@ export class BoxManager {
       slog.error('the box setup failed', { error: message });
       throw new HttpError(409, `This box cannot start: ${message}`);
     }
-    this.db.prepare('UPDATE boxes SET ready_at = ? WHERE id = ?').run(Date.now(), row.id);
+    this.db
+      .prepare('UPDATE boxes SET ready_at = ?, mcp_servers = ? WHERE id = ?')
+      .run(Date.now(), JSON.stringify(mcpServers), row.id);
     slog.info('box ready');
   }
 

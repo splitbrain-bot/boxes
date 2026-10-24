@@ -1,9 +1,11 @@
 /** Tests for host parsing and for vetting the port, host and address of a target. */
 
 import dns from 'node:dns';
+import http from 'node:http';
+import net from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EgressPolicy } from '../../shared/types.ts';
-import { parseHostPort, vetTarget } from './forward.ts';
+import { createForwardServer, type DenialCategory, parseHostPort, vetTarget } from './forward.ts';
 import { EMPTY_POLICY } from './policy.ts';
 
 /**
@@ -66,7 +68,7 @@ describe('parseHostPort', () => {
 });
 
 describe('vetTarget', () => {
-  it('allows only ports 80 and 443', async () => {
+  it('allows only ports 80 and 443 when no pattern names a port', async () => {
     resolvesTo('93.184.216.34');
     await expect(
       vetTarget({ host: 'example.com', port: 443 }, EMPTY_POLICY),
@@ -74,7 +76,25 @@ describe('vetTarget', () => {
     await expect(vetTarget({ host: 'example.com', port: 22 }, EMPTY_POLICY)).resolves.toEqual({
       ok: false,
       category: 'port',
-      reason: 'port 22 not allowed',
+      reason: 'port 22 not allowed for this host',
+    });
+  });
+
+  it('allows a port that a pattern names for the host', async () => {
+    resolvesTo('93.184.216.34');
+    const policy = allowing('mcp.example.com:8443');
+    await expect(vetTarget({ host: 'mcp.example.com', port: 8443 }, policy)).resolves.toMatchObject(
+      { ok: true },
+    );
+    await expect(vetTarget({ host: 'other.example.com', port: 8443 }, policy)).resolves.toEqual({
+      ok: false,
+      category: 'port',
+      reason: 'port 8443 not allowed for this host',
+    });
+    await expect(vetTarget({ host: 'mcp.example.com', port: 443 }, policy)).resolves.toEqual({
+      ok: false,
+      category: 'allowlist',
+      reason: 'host is not on the egress allowlist',
     });
   });
 
@@ -147,5 +167,103 @@ describe('vetTarget', () => {
       category: 'dns',
       reason: 'no addresses resolved',
     });
+  });
+});
+
+describe('the front door', () => {
+  /** The servers that a test started. */
+  const servers: net.Server[] = [];
+
+  afterEach(() => {
+    for (const server of servers.splice(0)) server.close();
+  });
+
+  /**
+   * Starts a server on loopback.
+   *
+   * @param server The server to start.
+   * @returns The port that the server listens on.
+   */
+  const listen = (server: net.Server): Promise<number> =>
+    new Promise((resolve) => {
+      servers.push(server);
+      server.listen(0, '127.0.0.1', () => resolve((server.address() as net.AddressInfo).port));
+    });
+
+  /**
+   * Sends a CONNECT to the front door and reads the status line of the answer.
+   *
+   * @param port The port of the front door.
+   * @param authority The host and port to send in the CONNECT.
+   * @returns The status line.
+   */
+  const connect = (port: number, authority: string): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const socket = net.connect({ host: '127.0.0.1', port }, () => {
+        socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
+      });
+      socket.once('data', (chunk) => {
+        resolve(String(chunk).split('\r\n')[0] ?? '');
+        socket.destroy();
+      });
+      socket.on('error', reject);
+    });
+
+  /**
+   * Starts a front door for a policy with a credential for mcp.example.com on
+   * port 8443, and a stand-in engine that records each CONNECT it gets.
+   *
+   * @returns The port of the front door, the CONNECT authorities of the engine, and the denials.
+   */
+  async function frontDoor(): Promise<{
+    port: number;
+    engine: string[];
+    denials: DenialCategory[];
+  }> {
+    resolvesTo('93.184.216.34');
+    const engine: string[] = [];
+    const denials: DenialCategory[] = [];
+    const fakeEngine = http.createServer();
+    fakeEngine.on('connect', (req, socket: net.Socket) => {
+      engine.push(req.url ?? '');
+      socket.end('HTTP/1.1 200 Connection Established\r\n\r\n');
+    });
+    const enginePort = await listen(fakeEngine);
+
+    const policy: EgressPolicy = {
+      allowedHosts: [],
+      ca: { key: 'K', cert: 'C' },
+      credentials: [
+        {
+          id: 'mcp',
+          hosts: ['mcp.example.com:8443', 'api.example.com'],
+          headers: [],
+          placeholder: 'PLACEHOLDER',
+          secret: 'SECRET',
+        },
+      ],
+    };
+    const front = createForwardServer({
+      policy: () => policy,
+      interceptPort: () => enginePort,
+      applied: () => true,
+      denied: (category) => denials.push(category),
+      log: () => {},
+    });
+    return { port: await listen(front), engine, denials };
+  }
+
+  it('hands a credential host on a named port to the engine', async () => {
+    const { port, engine } = await frontDoor();
+    expect(await connect(port, 'mcp.example.com:8443')).toBe('HTTP/1.1 200 Connection Established');
+    expect(engine).toEqual(['mcp.example.com:8443']);
+  });
+
+  it('refuses a credential host on port 80 and on a port that no pattern names', async () => {
+    const { port, engine, denials } = await frontDoor();
+    expect(await connect(port, 'api.example.com:80')).toBe('HTTP/1.1 403 Forbidden');
+    expect(await connect(port, 'mcp.example.com:9000')).toBe('HTTP/1.1 403 Forbidden');
+    expect(engine).toEqual([]);
+    expect(denials).toEqual(['plaintext-credential-host', 'port']);
   });
 });

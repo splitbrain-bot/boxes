@@ -506,6 +506,10 @@ function ApiKeys({
         given hosts. A change takes effect in a box at its next start.
       </p>
       <p className="text-xs text-muted-foreground">
+        A host without a port matches the ports 80 and 443. For a different port, add it to the
+        host, e.g., <code>mcp.example.com:8443</code>.
+      </p>
+      <p className="text-xs text-muted-foreground">
         The opencode agent runs on these keys. It offers the models of each provider whose key it
         finds under the usual variable name, e.g., <code>OPENROUTER_API_KEY</code>.
       </p>

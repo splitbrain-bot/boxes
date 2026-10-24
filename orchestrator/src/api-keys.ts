@@ -39,8 +39,12 @@ export interface ApiKeyRow {
 /** The pattern of a shell-safe environment variable name. */
 const NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** The pattern of an exact hostname, or of a hostname with a wildcard for the first label. */
-const HOST_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
+/**
+ * The pattern of an exact hostname, or of a hostname with a wildcard for the
+ * first label. An optional port follows the hostname, as in `mcp.example.com:8443`.
+ */
+const HOST_PATTERN =
+  /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[1-9][0-9]{0,4})?$/;
 
 /**
  * The pattern of the prefix of a key that a placeholder copies. The prefix is a
@@ -120,7 +124,8 @@ export class ApiKeyStore {
    *
    * @param owner The user.
    * @param name The environment variable name of the key.
-   * @param hosts The hosts of the key, as exact hostnames or `*.` wildcards.
+   * @param hosts The hosts of the key, as exact hostnames or `*.` wildcards, each with an
+   *   optional port.
    * @param secret The key, or undefined to keep the stored key.
    * @returns The stored row.
    * @throws {HttpError} A 400 when the name, a host or the secret is not valid.
@@ -140,7 +145,7 @@ export class ApiKeyStore {
     const patterns = [...new Set(hosts.map((h) => h.trim().toLowerCase()))].filter((h) => h);
     if (patterns.length === 0) throw new HttpError(400, 'hosts: name at least one host');
     for (const pattern of patterns) {
-      if (!HOST_PATTERN.test(pattern)) {
+      if (!HOST_PATTERN.test(pattern) || Number(pattern.split(':')[1] ?? 0) > 65535) {
         throw new HttpError(400, `hosts: ${pattern} is not a hostname or a *. wildcard`);
       }
     }

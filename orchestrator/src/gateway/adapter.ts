@@ -1,5 +1,5 @@
 import { PassThrough, Readable } from 'node:stream';
-import type { Stream } from '@agentclientprotocol/sdk';
+import type { McpServer, Stream } from '@agentclientprotocol/sdk';
 import { client as acpClient, type ClientConnection, ndJsonStream } from '@agentclientprotocol/sdk';
 import { ACP_METHOD } from '../../../shared/acp.ts';
 import type {
@@ -206,6 +206,11 @@ export interface AdapterHost {
   readonly boxId: string;
   /** The orchestrator's database. */
   readonly db: Db;
+  /**
+   * Gives the MCP servers of the box for a `session/new`, `session/load` or
+   * `session/fork` call, with the current placeholders of the API keys.
+   */
+  mcpServers(): McpServer[];
   /**
    * Starts the box and resolves when it is ready. Two adapters starting at
    * once start the box once.
@@ -724,6 +729,9 @@ export class AdapterConnection {
   /**
    * Mints an ACP thread and gives it the mode and settings it is meant to have.
    *
+   * For a harness with {@link Harness.loadAfterFork}, the method loads a fork
+   * right after `session/fork`, so the fork is live and has the MCP servers.
+   *
    * @param from The thread to fork, or null to start empty.
    * @param modeId The mode to put the new thread in.
    * @param config The settings to give the new thread, by option id.
@@ -738,7 +746,7 @@ export class AdapterConnection {
     const res = (await this.request(method, {
       ...(from ? { sessionId: from } : {}),
       cwd: WORKSPACE_DIR,
-      mcpServers: [],
+      mcpServers: this.host.mcpServers(),
       ...this.meta(),
     })) as {
       sessionId?: string;
@@ -746,13 +754,25 @@ export class AdapterConnection {
       configOptions?: ThreadConfigOption[] | null;
     };
     if (!res?.sessionId) throw new Error(`${method} returned no sessionId`);
-    this.live.add(res.sessionId);
-    this.host.openLog(res.sessionId, optionsOf(res), from ?? undefined);
-    this.noteCatalog(res);
-    this.slog.info('acp session created', { method, acpSessionId: res.sessionId, from });
-    await this.applyMode(res.sessionId, modesOf(res), modeId);
-    await this.applyConfig(res.sessionId, res.configOptions ?? null, config);
-    return res.sessionId;
+    const acpSessionId = res.sessionId;
+    let answer: LoadAnswer = res;
+    if (from && this.harness.loadAfterFork) {
+      // The replay goes into a log that the copy of the source log replaces.
+      this.host.beginFill(acpSessionId);
+      try {
+        answer = await this.replay(acpSessionId);
+      } catch (err) {
+        this.host.dropLog(acpSessionId);
+        throw err;
+      }
+    }
+    this.host.openLog(acpSessionId, optionsOf(answer), from ?? undefined);
+    this.live.add(acpSessionId);
+    this.noteCatalog(answer ?? {});
+    this.slog.info('acp session created', { method, acpSessionId, from });
+    await this.applyMode(acpSessionId, modesOf(answer), modeId);
+    await this.applyConfig(acpSessionId, answer?.configOptions ?? null, config);
+    return acpSessionId;
   }
 
   /**
@@ -829,7 +849,7 @@ export class AdapterConnection {
       this.request(ACP_METHOD.sessionLoad, {
         sessionId: acpThreadId,
         cwd: WORKSPACE_DIR,
-        mcpServers: [],
+        mcpServers: this.host.mcpServers(),
         ...this.meta(),
       }),
     )) as LoadAnswer;

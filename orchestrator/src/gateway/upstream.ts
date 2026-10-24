@@ -1,3 +1,4 @@
+import type { McpServer } from '@agentclientprotocol/sdk';
 import { ACP_METHOD, UPDATE_KIND } from '../../../shared/acp.ts';
 import {
   type BackgroundProcess,
@@ -229,6 +230,8 @@ export class UpstreamBox implements AdapterHost {
     private readonly onStatusChange: (status: BoxRow['status']) => void,
     /** Brings the box up and makes it ready. It repairs the container first. */
     private readonly startBox: () => Promise<void>,
+    /** Gives the MCP servers of the box for a session call. */
+    readonly mcpServers: () => McpServer[] = () => [],
   ) {
     this.slog = log.box(boxId);
     this.downstreams = new Broadcast(boxId, (thread) => this.threadState(thread));

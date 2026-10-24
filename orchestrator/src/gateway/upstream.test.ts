@@ -252,6 +252,9 @@ let dir: string;
 let db: Db;
 /** The box manager of the current test. */
 let manager: BoxManager;
+/** The API keys of the test. The agent store reads them for the MCP servers. */
+let apiKeys: ApiKeyStore;
+
 /** Every event the gateway announced, in order. */
 let announced: NotifyEvent[];
 
@@ -312,10 +315,11 @@ beforeEach(async () => {
   containerRunning = true;
   setRuntime(new DockerRuntime(cfg));
   // The environment of a box is built from the prepared policy.
+  apiKeys = new ApiKeyStore(db, () => {});
   const egress = new EgressManager(
     cfg,
     new CredentialStore(db, () => {}, cfg.credentialSet),
-    new ApiKeyStore(db, () => {}),
+    apiKeys,
     db,
   );
   await egress.prepare();
@@ -324,7 +328,10 @@ beforeEach(async () => {
     cfg,
     egress,
     new RecordingNotifier(db, cfg),
-    new AgentStore(db, cfg.DATA_DIR),
+    new AgentStore(db, cfg.DATA_DIR, undefined, undefined, (owner) => ({
+      keys: apiKeys.list(owner),
+      allowedHosts: [],
+    })),
   );
   // config() is memoised for the process, so the manager's DATA_DIR is the
   // first test's `dir`, not necessarily this test's.
@@ -971,7 +978,9 @@ test('a fork starts in plan mode where a fresh thread starts in auto', async () 
       availableModes: [{ id: 'auto' }, { id: 'plan' }, { id: 'default' }],
     };
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh', modes };
-    if (msg.method === 'session/fork') return { sessionId: 'acp-branch', modes };
+    // Like the Claude adapter, the fork answers without modes, and the load after it gives them.
+    if (msg.method === 'session/fork') return { sessionId: 'acp-branch' };
+    if (msg.method === 'session/load' && msg.params?.sessionId === 'acp-branch') return { modes };
     if (msg.method === 'session/set_mode') {
       modeSet.push({ session: msg.params?.sessionId, mode: msg.params?.modeId });
       return {};
@@ -1013,7 +1022,10 @@ test('modes offered only as the config option in the mode category are used', as
       },
     ];
     if (msg.method === 'session/new') return { sessionId: 'acp-fresh', configOptions };
-    if (msg.method === 'session/fork') return { sessionId: 'acp-branch', configOptions };
+    if (msg.method === 'session/fork') return { sessionId: 'acp-branch' };
+    if (msg.method === 'session/load' && msg.params?.sessionId === 'acp-branch') {
+      return { configOptions };
+    }
     if (msg.method === 'session/set_mode') {
       modeSet.push({ session: msg.params?.sessionId, mode: msg.params?.modeId });
       return {};
@@ -1385,9 +1397,10 @@ test('forking a thread no browser has opened loads it first, for the fork to cop
   loaded.length = 0;
 
   // t2 is not the box's default and nobody is watching it, so the spawn
-  // left it alone. Its conversation is what the fork is about to carry.
+  // left it alone. Its conversation is what the fork is about to carry. The
+  // Claude adapter then needs a load of the fork.
   await manager.createThread('s1', { from: 't2' });
-  assert.deepEqual(loaded, ['acp-kept']);
+  assert.deepEqual(loaded, ['acp-kept', 'acp-branch-1']);
 });
 
 test('two forks of a thread that is still loading share one load', async () => {
@@ -3295,4 +3308,111 @@ test('pinning to the thread a spawn already brought back does not replay it twic
   up.attach(handle);
   assert.equal(await up.pin(handle, 't1'), 'acp-gone');
   assert.deepEqual(loads, ['acp-gone']);
+});
+
+/**
+ * Gives the box s1 MCP servers, as its last start would have stored them.
+ *
+ * @param servers The merged servers, with the `${NAME}` references in the header values.
+ */
+function boxMcpServers(servers: unknown[]): void {
+  db.prepare("UPDATE boxes SET mcp_servers = ? WHERE id = 's1'").run(JSON.stringify(servers));
+}
+
+test('each session call carries the MCP servers of the box, with the placeholder of the key', async () => {
+  const secret = 'mcp-0123456789abcdef0123456789';
+  const key = apiKeys.put('', 'MCP_TOKEN', ['mcp.example.com'], secret);
+  boxMcpServers([
+    {
+      name: 'docs',
+      url: 'https://mcp.example.com/mcp',
+      headers: [
+        { name: 'Authorization', value: `Bearer \${MCP_TOKEN}` },
+        { name: 'X-Tenant', value: 'engineering' },
+      ],
+    },
+  ]);
+  const sent: Array<{ method: string; session: unknown; mcpServers: unknown }> = [];
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude', (msg) => {
+      if (msg.method?.startsWith('session/') && msg.params?.mcpServers) {
+        sent.push({
+          method: msg.method,
+          session: msg.params.sessionId,
+          mcpServers: msg.params.mcpServers,
+        });
+      }
+      return undefined;
+    }),
+  });
+
+  const created = await manager.createThread('s1', undefined);
+  await manager.createThread('s1', { from: created.id });
+
+  const expected = [
+    {
+      type: 'http',
+      name: 'docs',
+      url: 'https://mcp.example.com/mcp',
+      headers: [
+        { name: 'Authorization', value: `Bearer ${key.placeholder}` },
+        { name: 'X-Tenant', value: 'engineering' },
+      ],
+    },
+  ];
+  // The fork of Claude gets a load right after it, which makes it live.
+  assert.deepEqual(
+    sent.map((call) => [call.method, call.session]),
+    [
+      ['session/new', undefined],
+      ['session/fork', 'claude-minted'],
+      ['session/load', 'claude-branch'],
+    ],
+  );
+  for (const call of sent) assert.deepEqual(call.mcpServers, expected);
+  assert.ok(!JSON.stringify(sent).includes(secret));
+});
+
+test('a Codex fork gets no load after it', async () => {
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude'),
+    'codex-acp': harnessAdapter(seen, 'codex'),
+  });
+
+  const created = await manager.createThread('s1', { options: { harness: 'codex' } });
+  seen.length = 0;
+  await manager.createThread('s1', { from: created.id });
+
+  assert.deepEqual(
+    seen.filter((line) => !line.includes('set_')),
+    ['codex session/fork codex-minted'],
+  );
+});
+
+test('an MCP server whose API key is gone is left out', async () => {
+  boxMcpServers([
+    {
+      name: 'docs',
+      url: 'https://mcp.example.com/mcp',
+      headers: [{ name: 'Authorization', value: `Bearer \${GONE_TOKEN}` }],
+    },
+    { name: 'open', url: 'https://open.example.com/mcp', headers: [] },
+  ]);
+  const sent: unknown[] = [];
+  const seen: string[] = [];
+  fakeDocker({
+    'claude-agent-acp': harnessAdapter(seen, 'claude', (msg) => {
+      if (msg.method === 'session/new') sent.push(msg.params?.mcpServers);
+      return undefined;
+    }),
+  });
+
+  await manager.createThread('s1', undefined);
+
+  assert.deepEqual(sent, [
+    [{ type: 'http', name: 'open', url: 'https://open.example.com/mcp', headers: [] }],
+  ]);
+  assert.ok(written.some((line) => line.includes('left out an MCP server')));
 });

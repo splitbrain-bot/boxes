@@ -69,6 +69,11 @@ One exec and one adapter process serve one harness. So all threads of the same h
 the diagram, thread 1 and thread 3 both run in `claude-agent-acp` while thread 2 runs in `codex-acp`. A box with Claude
 and Codex threads therefore runs two adapter processes on one workspace.
 
+## MCP servers
+
+The orchestrator gives the adapter the remote [MCP servers](agent-sets.md#mcp-servers) of the box with each session,
+and the adapter connects to the servers itself. A harness that a user starts by hand in the terminal gets no servers.
+
 ## The message log
 
 The orchestrator keeps the messages of each thread in its memory. A browser that opens an existing thread for the first
@@ -170,6 +175,17 @@ Eviction drops the oldest message together with all its chunks, so the log alway
 The full history described above is requested with `_meta.boxes.full` on `session/load` — the one load that reaches the
 adapter. The gateway refuses it while another replay runs or while a fork has no transcript of its own, and it sends the
 replay to the asking browser only: the replay goes into neither the log nor the other browsers.
+
+### MCP servers
+
+The connection sends the `mcpServers` list in each `session/new`, `session/load` and `session/fork` call. It asks the
+box manager for the list at each call, and the manager puts the current placeholder of each API key in place of the
+`${NAME}` reference. A server whose key is gone is left out, with a warning in the log.
+
+A fork in `claude-agent-acp` copies only the transcript, and the adapter takes no prompt for it before a load. So the
+field `loadAfterFork` of the Claude harness makes the connection send `session/load` for the new session right after
+`session/fork`. The load makes the fork live and gives it the servers. The connection drops the replay of the load, and
+the fork gets a copy of the log of its source, like a fork of the other harnesses.
 
 ### Permission requests
 
