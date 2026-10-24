@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { hostMatches, splitHostPattern } from '../../shared/hosts.ts';
 import type { EgressPolicy } from '../../shared/types.ts';
 import {
   credentialsForHost,
   decideCredentials,
   EMPTY_POLICY,
   hostAllowed,
-  hostMatches,
   isInjectionHost,
   parsePolicy,
   policyHash,
@@ -67,68 +67,109 @@ const policy = (over: Partial<EgressPolicy> = {}): EgressPolicy => ({
 
 describe('hostMatches', () => {
   it('matches exact names case-insensitively and ignores a trailing dot', () => {
-    expect(hostMatches('api.github.com', 'api.github.com')).toBe(true);
-    expect(hostMatches('API.GitHub.com', 'api.github.com')).toBe(true);
-    expect(hostMatches('api.github.com.', 'api.github.com')).toBe(true);
-    expect(hostMatches('api.github.com', 'github.com')).toBe(false);
+    expect(hostMatches('api.github.com', 443, 'api.github.com')).toBe(true);
+    expect(hostMatches('API.GitHub.com', 443, 'api.github.com')).toBe(true);
+    expect(hostMatches('api.github.com.', 443, 'api.github.com')).toBe(true);
+    expect(hostMatches('api.github.com', 443, 'github.com')).toBe(false);
   });
 
   it('lets a wildcard stand for exactly one label', () => {
-    expect(hostMatches('raw.githubusercontent.com', '*.githubusercontent.com')).toBe(true);
-    expect(hostMatches('githubusercontent.com', '*.githubusercontent.com')).toBe(false);
-    expect(hostMatches('a.b.githubusercontent.com', '*.githubusercontent.com')).toBe(false);
-    expect(hostMatches('.githubusercontent.com', '*.githubusercontent.com')).toBe(false);
+    expect(hostMatches('raw.githubusercontent.com', 443, '*.githubusercontent.com')).toBe(true);
+    expect(hostMatches('githubusercontent.com', 443, '*.githubusercontent.com')).toBe(false);
+    expect(hostMatches('a.b.githubusercontent.com', 443, '*.githubusercontent.com')).toBe(false);
+    expect(hostMatches('.githubusercontent.com', 443, '*.githubusercontent.com')).toBe(false);
   });
 
   it('never lets a wildcard match an address literal', () => {
-    expect(hostMatches('1.1.1.1', '*.1.1.1')).toBe(false);
-    expect(hostMatches('1.1.1.1', '1.1.1.1')).toBe(true);
-    expect(hostMatches('::1', '*.1')).toBe(false);
+    expect(hostMatches('1.1.1.1', 443, '*.1.1.1')).toBe(false);
+    expect(hostMatches('1.1.1.1', 443, '1.1.1.1')).toBe(true);
+    expect(hostMatches('::1', 443, '*.1')).toBe(false);
   });
 
   it('rejects empty patterns and hosts', () => {
-    expect(hostMatches('', 'github.com')).toBe(false);
-    expect(hostMatches('github.com', '')).toBe(false);
-    expect(hostMatches('github.com', '*.')).toBe(false);
+    expect(hostMatches('', 443, 'github.com')).toBe(false);
+    expect(hostMatches('github.com', 443, '')).toBe(false);
+    expect(hostMatches('github.com', 443, '*.')).toBe(false);
+  });
+
+  it('matches a pattern without a port on the ports 80 and 443 only', () => {
+    expect(hostMatches('github.com', 80, 'github.com')).toBe(true);
+    expect(hostMatches('github.com', 8443, 'github.com')).toBe(false);
+  });
+
+  it('matches a pattern with a port on that port only', () => {
+    expect(hostMatches('mcp.example.com', 8443, 'mcp.example.com:8443')).toBe(true);
+    expect(hostMatches('mcp.example.com', 443, 'mcp.example.com:8443')).toBe(false);
+    expect(hostMatches('a.example.com', 8443, '*.example.com:8443')).toBe(true);
+    expect(hostMatches('2001:db8::1', 8443, '[2001:db8::1]:8443')).toBe(true);
+    expect(hostMatches('2001:db8::1', 443, '2001:db8::1')).toBe(true);
+  });
+});
+
+describe('splitHostPattern', () => {
+  it('splits off an optional port', () => {
+    expect(splitHostPattern('example.com')).toEqual({ host: 'example.com', port: null });
+    expect(splitHostPattern('example.com:8443')).toEqual({ host: 'example.com', port: 8443 });
+    expect(splitHostPattern('2001:db8::1')).toEqual({ host: '2001:db8::1', port: null });
+    expect(splitHostPattern('[2001:db8::1]:8443')).toEqual({ host: '2001:db8::1', port: 8443 });
   });
 });
 
 describe('hostAllowed', () => {
   it('allows everything when no allowlist is configured', () => {
-    expect(hostAllowed('example.com', EMPTY_POLICY)).toBe(true);
-    expect(hostAllowed('1.1.1.1', EMPTY_POLICY)).toBe(true);
+    expect(hostAllowed('example.com', 443, EMPTY_POLICY)).toBe(true);
+    expect(hostAllowed('1.1.1.1', 443, EMPTY_POLICY)).toBe(true);
   });
 
   it('allows only listed hosts once an allowlist exists', () => {
     const p = policy({ allowedHosts: ['registry.npmjs.org', '*.example.com'], credentials: [] });
-    expect(hostAllowed('registry.npmjs.org', p)).toBe(true);
-    expect(hostAllowed('a.example.com', p)).toBe(true);
-    expect(hostAllowed('example.com', p)).toBe(false);
-    expect(hostAllowed('evil.com', p)).toBe(false);
-    expect(hostAllowed('1.1.1.1', p)).toBe(false);
+    expect(hostAllowed('registry.npmjs.org', 443, p)).toBe(true);
+    expect(hostAllowed('a.example.com', 443, p)).toBe(true);
+    expect(hostAllowed('example.com', 443, p)).toBe(false);
+    expect(hostAllowed('evil.com', 443, p)).toBe(false);
+    expect(hostAllowed('1.1.1.1', 443, p)).toBe(false);
   });
 
   it('implies the configured credentials hosts, so a narrow list cannot sever them', () => {
     const p = policy({ allowedHosts: ['registry.npmjs.org'] });
-    expect(hostAllowed('api.anthropic.com', p)).toBe(true);
-    expect(hostAllowed('raw.githubusercontent.com', p)).toBe(true);
-    expect(hostAllowed('evil.com', p)).toBe(false);
+    expect(hostAllowed('api.anthropic.com', 443, p)).toBe(true);
+    expect(hostAllowed('raw.githubusercontent.com', 443, p)).toBe(true);
+    expect(hostAllowed('evil.com', 443, p)).toBe(false);
+  });
+
+  it('allows another port only when a pattern names it', () => {
+    expect(hostAllowed('example.com', 8443, EMPTY_POLICY)).toBe(false);
+    const p = policy({ allowedHosts: ['mcp.example.com:8443'], credentials: [] });
+    expect(hostAllowed('mcp.example.com', 8443, p)).toBe(true);
+    expect(hostAllowed('mcp.example.com', 443, p)).toBe(false);
+    const keyed = policy({ credentials: [{ ...GITHUB, hosts: ['mcp.example.com:8443'] }] });
+    expect(hostAllowed('mcp.example.com', 8443, keyed)).toBe(true);
+    expect(hostAllowed('mcp.example.com', 9000, keyed)).toBe(false);
   });
 });
 
 describe('isInjectionHost', () => {
   it('is true only for a credential host, and only with a CA to intercept with', () => {
-    expect(isInjectionHost('api.github.com', policy())).toBe(true);
-    expect(isInjectionHost('example.com', policy())).toBe(false);
-    expect(isInjectionHost('api.github.com', policy({ ca: null }))).toBe(false);
-    expect(isInjectionHost('api.github.com', policy({ credentials: [CLAUDE] }))).toBe(false);
+    expect(isInjectionHost('api.github.com', 443, policy())).toBe(true);
+    expect(isInjectionHost('example.com', 443, policy())).toBe(false);
+    expect(isInjectionHost('api.github.com', 443, policy({ ca: null }))).toBe(false);
+    expect(isInjectionHost('api.github.com', 443, policy({ credentials: [CLAUDE] }))).toBe(false);
+  });
+
+  it('takes the port into account', () => {
+    expect(isInjectionHost('api.github.com', 8443, policy())).toBe(false);
+    const keyed = policy({ credentials: [{ ...GITHUB, hosts: ['mcp.example.com:8443'] }] });
+    expect(isInjectionHost('mcp.example.com', 8443, keyed)).toBe(true);
+    expect(isInjectionHost('mcp.example.com', 443, keyed)).toBe(false);
   });
 });
 
 describe('credentialsForHost', () => {
   it('maps a host to only its own credentials', () => {
-    expect(credentialsForHost('api.anthropic.com', policy()).map((c) => c.id)).toEqual(['claude']);
-    expect(credentialsForHost('github.com', policy()).map((c) => c.id)).toEqual(['github']);
+    expect(credentialsForHost('api.anthropic.com', 443, policy()).map((c) => c.id)).toEqual([
+      'claude',
+    ]);
+    expect(credentialsForHost('github.com', 443, policy()).map((c) => c.id)).toEqual(['github']);
   });
 });
 
@@ -166,15 +207,15 @@ describe('swapCredentialValue', () => {
 describe('decideCredentials', () => {
   it('passes a host with no credential configured straight through', () => {
     expect(
-      decideCredentials('example.com', { authorization: 'Bearer anything' }, policy()),
+      decideCredentials('example.com', 443, { authorization: 'Bearer anything' }, policy()),
     ).toEqual({ action: 'pass' });
   });
 
   it('passes an unauthenticated request to a credential host', () => {
-    expect(decideCredentials('api.github.com', { accept: '*/*' }, policy())).toEqual({
+    expect(decideCredentials('api.github.com', 443, { accept: '*/*' }, policy())).toEqual({
       action: 'pass',
     });
-    expect(decideCredentials('api.github.com', { authorization: '  ' }, policy())).toEqual({
+    expect(decideCredentials('api.github.com', 443, { authorization: '  ' }, policy())).toEqual({
       action: 'pass',
     });
   });
@@ -182,6 +223,7 @@ describe('decideCredentials', () => {
   it('swaps the placeholder for the real credential', () => {
     const verdict = decideCredentials(
       'api.github.com',
+      443,
       { authorization: `Bearer ${GITHUB.placeholder}` },
       policy(),
     );
@@ -200,7 +242,7 @@ describe('decideCredentials', () => {
       'RemoteAuth abc',
       basicJwt,
     ]) {
-      expect(decideCredentials('api.github.com', { authorization }, policy())).toEqual({
+      expect(decideCredentials('api.github.com', 443, { authorization }, policy())).toEqual({
         action: 'pass',
       });
     }
@@ -210,6 +252,7 @@ describe('decideCredentials', () => {
     expect(
       decideCredentials(
         'api.github.com',
+        443,
         { authorization: [`Bearer ${GITHUB.placeholder}`, 'Bearer ghp_someoneElsesToken'] },
         policy(),
       ),
@@ -221,6 +264,7 @@ describe('decideCredentials', () => {
     expect(
       decideCredentials(
         'api.github.com',
+        443,
         { authorization: ['Bearer ghp_someoneElsesToken', `Bearer ${GITHUB.placeholder}`] },
         policy(),
       ),
@@ -232,6 +276,7 @@ describe('decideCredentials', () => {
     expect(
       decideCredentials(
         'openrouter.ai',
+        443,
         { 'x-custom-key': OPENROUTER.placeholder, accept: '*/*' },
         anyHeader,
       ),
@@ -245,13 +290,19 @@ describe('decideCredentials', () => {
   it('passes other values for a credential that names no header', () => {
     const anyHeader = policy({ credentials: [OPENROUTER] });
     expect(
-      decideCredentials('openrouter.ai', { authorization: 'Bearer sk-or-v1-other' }, anyHeader),
+      decideCredentials(
+        'openrouter.ai',
+        443,
+        { authorization: 'Bearer sk-or-v1-other' },
+        anyHeader,
+      ),
     ).toEqual({ action: 'pass' });
   });
 
   it("does not swap another credential host's placeholder, so hosts do not share", () => {
     const verdict = decideCredentials(
       'api.github.com',
+      443,
       { authorization: `Bearer ${CLAUDE.placeholder}` },
       policy(),
     );
@@ -262,6 +313,7 @@ describe('decideCredentials', () => {
     expect(
       decideCredentials(
         'api.openai.com',
+        443,
         { authorization: `Bearer ${OPENAI.placeholder}` },
         policy(),
       ),
@@ -271,32 +323,38 @@ describe('decideCredentials', () => {
       credentialIds: ['openai'],
     });
     expect(
-      decideCredentials('api.openai.com', { authorization: 'Bearer sk-somebodyelses' }, policy()),
+      decideCredentials(
+        'api.openai.com',
+        443,
+        { authorization: 'Bearer sk-somebodyelses' },
+        policy(),
+      ),
     ).toEqual({ action: 'pass' });
     expect(
       decideCredentials(
         'api.openai.com',
+        443,
         { authorization: `Bearer ${CLAUDE.placeholder}` },
         policy(),
       ),
     ).toEqual({ action: 'pass' });
     // chatgpt.com, the subscription endpoint, has no credential, so any value passes there.
-    expect(isInjectionHost('chatgpt.com', policy())).toBe(false);
+    expect(isInjectionHost('chatgpt.com', 443, policy())).toBe(false);
     expect(
-      decideCredentials('chatgpt.com', { authorization: 'Bearer whatever' }, policy()),
+      decideCredentials('chatgpt.com', 443, { authorization: 'Bearer whatever' }, policy()),
     ).toEqual({ action: 'pass' });
   });
 
   it('checks every header a credential may travel in', () => {
     expect(
-      decideCredentials('api.anthropic.com', { 'x-api-key': CLAUDE.placeholder }, policy()),
+      decideCredentials('api.anthropic.com', 443, { 'x-api-key': CLAUDE.placeholder }, policy()),
     ).toEqual({
       action: 'swap',
       headers: { 'x-api-key': CLAUDE.secret },
       credentialIds: ['claude'],
     });
     expect(
-      decideCredentials('api.anthropic.com', { 'x-api-key': 'sk-ant-someoneelse' }, policy()),
+      decideCredentials('api.anthropic.com', 443, { 'x-api-key': 'sk-ant-someoneelse' }, policy()),
     ).toEqual({ action: 'pass' });
   });
 });
@@ -342,6 +400,16 @@ describe('parsePolicy', () => {
   it('rejects an allowlist entry that would allow everything', () => {
     expect(() => parsePolicy({ ...valid, allowedHosts: ['*'] })).toThrow(/bare \*/);
     expect(() => parsePolicy({ ...valid, allowedHosts: ['api.*.com'] })).toThrow(/leading/);
+  });
+
+  it('accepts a host pattern with a port and rejects a port out of range', () => {
+    expect(parsePolicy({ ...valid, allowedHosts: ['mcp.example.com:8443'] }).allowedHosts).toEqual([
+      'mcp.example.com:8443',
+    ]);
+    expect(() => parsePolicy({ ...valid, allowedHosts: ['mcp.example.com:0'] })).toThrow(/port/);
+    expect(() =>
+      parsePolicy({ ...valid, credentials: [{ ...GITHUB, hosts: ['github.com:70000'] }] }),
+    ).toThrow(/port/);
   });
 
   it('rejects a credential that cannot be translated or is not a translation', () => {

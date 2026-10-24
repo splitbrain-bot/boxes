@@ -116,6 +116,15 @@ test('hosts must be hostnames or one-label wildcards', () => {
   assert.doesNotThrow(() => store.put('', 'KEY', ['*.example.com', 'api.example.com'], KEY));
 });
 
+test('a host can name a port', () => {
+  assert.deepEqual(store.put('', 'KEY', ['mcp.example.com:8443'], KEY).hosts, [
+    'mcp.example.com:8443',
+  ]);
+  assert.throws(() => store.put('', 'KEY', ['mcp.example.com:0'], KEY), /not a hostname/);
+  assert.throws(() => store.put('', 'KEY', ['mcp.example.com:65536'], KEY), /not a hostname/);
+  assert.throws(() => store.put('', 'KEY', ['mcp.example.com:'], KEY), /not a hostname/);
+});
+
 test('removing a key forgets it, and an unknown name is a 404', () => {
   store.put('', 'OPENROUTER_API_KEY', ['openrouter.ai'], KEY);
   store.remove('', 'OPENROUTER_API_KEY');

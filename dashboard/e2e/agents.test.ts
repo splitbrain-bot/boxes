@@ -20,6 +20,10 @@ beforeEach(async () => {
         { name: 'review', content: '---\nname: review\n---\n' },
         { name: 'ship', content: '---\nname: ship\n---\n' },
       ],
+      mcpServers: [
+        { name: 'docs', url: 'https://docs.example.com/mcp', headers: [] },
+        { name: 'search', url: 'https://search.example.com/mcp', headers: [] },
+      ],
     },
     [
       {
@@ -31,6 +35,7 @@ beforeEach(async () => {
           { url: 'https://github.com/example/go-skills', skills: ['bench', 'fuzz'] },
           { url: 'https://github.com/example/gone', skills: [], error: 'repository not found' },
         ],
+        mcpServers: [{ name: 'docs', url: 'https://docs.example.org/mcp', headers: [] }],
       },
     ],
   );
@@ -84,7 +89,9 @@ test('the editor shows the merge, and which of its items replaces a global one',
   try {
     await expect.poll(() => page.getByText('Merged result').isVisible()).toBe(true);
     // Both sets define the review skill. The named set wins and says so.
-    await expect.poll(() => page.getByText('replaces the global one').isVisible()).toBe(true);
+    await expect
+      .poll(() => page.getByText('replaces the global one').first().isVisible())
+      .toBe(true);
     // The ship skill comes only from the global set.
     await expect.poll(() => page.getByText('review, ship').isVisible()).toBe(true);
   } finally {
@@ -170,9 +177,67 @@ test('a repository URL that is not HTTPS is refused with the reason', async () =
   const { page, close } = await openPage(stub.url, '/agents/as1');
   try {
     await page.getByLabel('Repository URL').fill('git@github.com:example/skills.git');
-    await page.getByRole('button', { name: 'Add' }).last().click();
+    await page
+      .getByLabel('Repository URL')
+      .locator('..')
+      .getByRole('button', { name: 'Add' })
+      .click();
     await expect.poll(() => page.getByText('url must be an HTTPS URL').isVisible()).toBe(true);
     expect((await stub.agentSet('as1')).repos).toHaveLength(2);
+  } finally {
+    await close();
+  }
+});
+
+test('the editor lists the MCP servers, and the merge names the servers of the box', async () => {
+  const { page, close } = await openPage(stub.url, '/agents/as1');
+  try {
+    await expect.poll(() => page.getByText('https://docs.example.org/mcp').isVisible()).toBe(true);
+    // The skill review and the server docs both replace a global one.
+    await expect.poll(() => page.getByText('replaces the global one').count()).toBe(2);
+    await expect.poll(() => page.getByText('docs, search', { exact: true }).isVisible()).toBe(true);
+  } finally {
+    await close();
+  }
+});
+
+test('an MCP server with a bearer token from a new API key is written through the dialog', async () => {
+  const { page, close } = await openPage(stub.url, '/agents/global');
+  try {
+    await expect.poll(() => page.getByText('MCP servers').first().isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Add' }).last().click();
+    await page.getByLabel('Name').last().fill('tracker');
+    await page.getByLabel('URL', { exact: true }).fill('https://mcp.example.com:8443/mcp');
+    await page.getByRole('combobox', { name: 'Authentication' }).click();
+    await page.getByRole('option', { name: 'Bearer token' }).click();
+    await page.getByRole('combobox', { name: 'API key' }).click();
+    await page.getByRole('option', { name: 'New key…' }).click();
+
+    // The dialog names the host and the port of the server.
+    await expect.poll(() => page.getByLabel('Hosts').inputValue()).toBe('mcp.example.com:8443');
+    await shoot(page, 'mcp-key-dialog');
+    await page.getByLabel('Environment variable').fill('TRACKER_TOKEN');
+    await page.getByLabel('Hosts').fill('other.example.com');
+    await page.getByLabel('Key', { exact: true }).fill('trk_0123456789abcdef');
+    await page.getByRole('button', { name: 'Add key' }).click();
+
+    // A key for another host is called out, and the server cannot be saved with it.
+    await expect.poll(() => page.getByText('not to mcp.example.com:8443').isVisible()).toBe(true);
+    expect(await page.getByRole('button', { name: 'Save' }).isDisabled()).toBe(true);
+    await shoot(page, 'mcp-server-dialog');
+    await page.getByRole('button', { name: 'Add host to key' }).click();
+    await expect.poll(() => page.getByText('not to mcp.example.com:8443').count()).toBe(0);
+    await page.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(() => page.getByText('https://mcp.example.com:8443/mcp').isVisible())
+      .toBe(true);
+    const tracker = (await stub.agentSet('global')).mcpServers.find((s) => s.name === 'tracker');
+    expect(tracker?.headers).toEqual([
+      { name: 'Authorization', value: `Bearer \${TRACKER_TOKEN}` },
+    ]);
+    const key = (await stub.apiKeys()).find((k) => k.name === 'TRACKER_TOKEN');
+    expect(key?.hosts).toEqual(['other.example.com', 'mcp.example.com:8443']);
   } finally {
     await close();
   }

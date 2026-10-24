@@ -1,7 +1,7 @@
 /** Pure functions over the egress policy. */
 
 import { createHash } from 'node:crypto';
-import net from 'node:net';
+import { DEFAULT_PORTS, hostMatches, splitHostPattern } from '../../shared/hosts.ts';
 import type { EgressCredential, EgressPolicy } from '../../shared/types.ts';
 
 /** The policy of a proxy before the first push. It is frozen, because all callers share the same object. */
@@ -12,78 +12,60 @@ export const EMPTY_POLICY: EgressPolicy = Object.freeze({
 }) as EgressPolicy;
 
 /**
- * Checks if a hostname matches one allowlist pattern.
- *
- * A pattern is an exact name or *.example.com, where the star stands for
- * exactly one label. So *.example.com matches api.example.com, but not
- * example.com or a.b.example.com. Matching ignores case and a trailing dot. An
- * IP literal matches only an identical literal.
+ * Checks if a hostname and a port match one of the patterns.
  *
  * @param host The hostname or IP literal.
- * @param pattern The allowlist pattern.
- * @returns True when the host matches the pattern.
+ * @param port The destination port.
+ * @param patterns The host patterns.
+ * @returns True when the host and the port match at least one pattern.
  */
-export function hostMatches(host: string, pattern: string): boolean {
-  const h = host.trim().toLowerCase().replace(/\.$/, '');
-  const p = pattern.trim().toLowerCase().replace(/\.$/, '');
-  if (h === '' || p === '') return false;
-
-  if (!p.startsWith('*.')) return h === p;
-  if (net.isIP(h) !== 0) return false;
-
-  const suffix = p.slice(2);
-  if (suffix === '' || suffix.includes('*')) return false;
-  if (!h.endsWith(`.${suffix}`)) return false;
-  const label = h.slice(0, h.length - suffix.length - 1);
-  return label !== '' && !label.includes('.');
+function hostMatchesAny(host: string, port: number, patterns: readonly string[]): boolean {
+  return patterns.some((p) => hostMatches(host, port, p));
 }
 
 /**
- * Checks if a hostname matches one of the patterns.
+ * Checks if the policy allows a host on a port. An empty allowlist allows
+ * every host on the ports in {@link DEFAULT_PORTS}.
  *
  * @param host The hostname or IP literal.
- * @param patterns The allowlist patterns.
- * @returns True when the host matches at least one pattern.
- */
-function hostMatchesAny(host: string, patterns: readonly string[]): boolean {
-  return patterns.some((p) => hostMatches(host, p));
-}
-
-/**
- * Checks if the policy allows a host. An empty allowlist allows every host.
- *
- * @param host The hostname or IP literal.
+ * @param port The destination port.
  * @param policy The policy to check against.
- * @returns True when the allowlist or the hosts of a credential match the host.
+ * @returns True when the allowlist or the hosts of a credential match the host and the port.
  */
-export function hostAllowed(host: string, policy: EgressPolicy): boolean {
-  if (policy.allowedHosts.length === 0) return true;
-  if (hostMatchesAny(host, policy.allowedHosts)) return true;
+export function hostAllowed(host: string, port: number, policy: EgressPolicy): boolean {
+  if (policy.allowedHosts.length === 0 && DEFAULT_PORTS.has(port)) return true;
+  if (hostMatchesAny(host, port, policy.allowedHosts)) return true;
   // The hosts of a credential are always allowed, so a narrow allowlist cannot
   // cut off the traffic that the proxy authenticates.
-  return policy.credentials.some((c) => hostMatchesAny(host, c.hosts));
+  return policy.credentials.some((c) => hostMatchesAny(host, port, c.hosts));
 }
 
 /**
- * Finds the credentials configured for a host.
+ * Finds the credentials configured for a host on a port.
  *
  * @param host The hostname or IP literal.
+ * @param port The destination port.
  * @param policy The policy to search.
- * @returns The credentials for the host, in policy order.
+ * @returns The credentials for the host and the port, in policy order.
  */
-export function credentialsForHost(host: string, policy: EgressPolicy): EgressCredential[] {
-  return policy.credentials.filter((c) => hostMatchesAny(host, c.hosts));
+export function credentialsForHost(
+  host: string,
+  port: number,
+  policy: EgressPolicy,
+): EgressCredential[] {
+  return policy.credentials.filter((c) => hostMatchesAny(host, port, c.hosts));
 }
 
 /**
- * Checks if the proxy intercepts the TLS of a host.
+ * Checks if the proxy intercepts the TLS of a host on a port.
  *
  * @param host The hostname or IP literal.
+ * @param port The destination port.
  * @param policy The policy to check against.
- * @returns True when the policy has a CA and a credential for the host.
+ * @returns True when the policy has a CA and a credential for the host and the port.
  */
-export function isInjectionHost(host: string, policy: EgressPolicy): boolean {
-  return policy.ca !== null && credentialsForHost(host, policy).length > 0;
+export function isInjectionHost(host: string, port: number, policy: EgressPolicy): boolean {
+  return policy.ca !== null && credentialsForHost(host, port, policy).length > 0;
 }
 
 /**
@@ -164,16 +146,18 @@ function firstHeaderValue(
  * accepts them.
  *
  * @param host The hostname of the request.
+ * @param port The destination port of the request.
  * @param headers The request headers.
  * @param policy The policy that holds the credentials.
  * @returns The verdict for the request.
  */
 export function decideCredentials(
   host: string,
+  port: number,
   headers: Readonly<Record<string, string | string[] | undefined>>,
   policy: EgressPolicy,
 ): CredentialVerdict {
-  const credentials = credentialsForHost(host, policy);
+  const credentials = credentialsForHost(host, port, policy);
   if (credentials.length === 0) return { action: 'pass' };
 
   // Pseudo-headers carry the request line, never a credential.
@@ -255,12 +239,19 @@ export function parsePolicy(input: unknown): EgressPolicy {
     });
   };
 
+  const checkPort = (pattern: string, field: string): void => {
+    const { port } = splitHostPattern(pattern);
+    if (port !== null && (port < 1 || port > 65535))
+      fail(`${field} entry ${pattern} has no valid port`);
+  };
+
   const allowedHosts = stringArray(raw.allowedHosts ?? [], 'allowedHosts');
   for (const pattern of allowedHosts) {
     if (pattern === '*') return fail('a bare * allowlist entry would allow everything');
     if (pattern.includes('*') && !pattern.startsWith('*.')) {
       return fail(`allowlist entry ${pattern} may only use a leading *. wildcard`);
     }
+    checkPort(pattern, 'allowlist');
   }
 
   let ca: EgressPolicy['ca'] = null;
@@ -293,6 +284,7 @@ export function parsePolicy(input: unknown): EgressPolicy {
     }
     const hosts = stringArray(c.hosts, `credential ${id} hosts`);
     if (hosts.length === 0) return fail(`credential ${id} needs at least one host`);
+    for (const host of hosts) checkPort(host, `credential ${id} hosts`);
     const headers = stringArray(c.headers, `credential ${id} headers`).map((h) => h.toLowerCase());
     return { id, hosts, headers, placeholder, secret };
   });

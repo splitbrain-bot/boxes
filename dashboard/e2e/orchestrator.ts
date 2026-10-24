@@ -29,6 +29,7 @@ import { runtime } from '../../orchestrator/src/runtime/runtime.ts';
 import * as ws from '../../orchestrator/src/workspaces.ts';
 import { TERMINAL_SUBPROTOCOL } from '../../shared/terminal.ts';
 import type {
+  AgentMcpServer,
   AgentSetDetail,
   ApiKeySummary,
   BoxTunnel,
@@ -372,6 +373,8 @@ export interface AgentSetSpec {
   items?: Array<{ name: string; content: string }>;
   /** Repositories the set takes skills from, as if pulled already. */
   repos?: Array<{ url: string; skills: string[]; error?: string }>;
+  /** The MCP servers of the set. */
+  mcpServers?: AgentMcpServer[];
 }
 
 /** A running orchestrator, with the handles a test drives it by. */
@@ -1305,6 +1308,7 @@ export async function startOrchestrator(
     agentSets: async (global, named) => {
       db.prepare('DELETE FROM agent_items').run();
       db.prepare('DELETE FROM agent_repos').run();
+      db.prepare('DELETE FROM agent_mcp_servers').run();
       db.prepare("DELETE FROM agent_sets WHERE id <> 'global'").run();
       for (const set of named) {
         db.prepare(
@@ -1316,6 +1320,9 @@ export async function startOrchestrator(
         await setup('PATCH', `/api/agent-sets/${set.id}`, { agentsMd: set.agentsMd ?? '' });
         for (const item of set.items ?? []) {
           await setup('PUT', `/api/agent-sets/${set.id}/items`, item);
+        }
+        for (const server of set.mcpServers ?? []) {
+          await setup('PUT', `/api/agent-sets/${set.id}/mcp-servers`, server);
         }
         for (const [i, repo] of (set.repos ?? []).entries()) {
           db.prepare(

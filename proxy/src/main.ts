@@ -9,9 +9,10 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import net from 'node:net';
+import { DEFAULT_PORTS } from '../../shared/hosts.ts';
 import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
 import { createControlServer, resolveControlAddress } from './control.ts';
-import { ALLOWED_PORTS, createForwardServer, type DenialCategory } from './forward.ts';
+import { createForwardServer, type DenialCategory } from './forward.ts';
 import { Interceptor } from './inject.ts';
 import { EMPTY_POLICY, injectionPatterns, policyHash } from './policy.ts';
 
@@ -215,7 +216,7 @@ async function main(): Promise<void> {
   log('upstream tunnel listening', { port: upstreamPort });
 
   await listen(front, PORT, '0.0.0.0');
-  log('egress proxy listening', { port: PORT, allowedPorts: [...ALLOWED_PORTS] });
+  log('egress proxy listening', { port: PORT, defaultPorts: [...DEFAULT_PORTS] });
 
   const bind = CONTROL_BIND || (await resolveControlAddress());
   if (bind === null) {

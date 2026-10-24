@@ -57,6 +57,11 @@ export interface BoxRow {
    * or null while the box is not ready.
    */
   ready_at: number | null;
+  /**
+   * The merged MCP servers of the agent sets of the box at its last start, as a
+   * JSON array of AgentMcpServer with the `${NAME}` references in the header values.
+   */
+  mcp_servers: string;
 }
 
 /** One stored thread of a box. */
@@ -179,6 +184,22 @@ export interface AgentSetRow {
   name: string;
   /** The AGENTS.md of this set, or '' when it has none. */
   agents_md: string;
+  /** Epoch milliseconds of creation. */
+  created_at: number;
+  /** Epoch milliseconds of the last change. */
+  updated_at: number;
+}
+
+/** One remote MCP server of an agent set. */
+export interface AgentMcpServerRow {
+  /** The set the server belongs to. */
+  set_id: string;
+  /** The name of the server, unique in its set. */
+  name: string;
+  /** The URL of the server. */
+  url: string;
+  /** The headers as a JSON array of name and value, with the `${NAME}` references in the values. */
+  headers: string;
   /** Epoch milliseconds of creation. */
   created_at: number;
   /** Epoch milliseconds of the last change. */
@@ -660,6 +681,20 @@ export const MIGRATIONS: string[] = [
   // can show the options of the selected model.
   `
   ALTER TABLE harness_catalog ADD COLUMN model_options TEXT NOT NULL DEFAULT '{}';
+  `,
+  // Adds the remote MCP servers of the agent sets, and the merged servers of
+  // each box at its last start.
+  `
+  CREATE TABLE agent_mcp_servers (
+    set_id     TEXT NOT NULL REFERENCES agent_sets(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    headers    TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (set_id, name)
+  );
+  ALTER TABLE boxes ADD COLUMN mcp_servers TEXT NOT NULL DEFAULT '[]';
   `,
 ];
 

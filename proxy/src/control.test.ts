@@ -198,7 +198,6 @@ describe('overlapping policy pushes', () => {
     let liveStatus: () => EgressStatus = () => emptyStatus;
 
     vi.doMock('./forward.ts', () => ({
-      ALLOWED_PORTS: new Set([443]),
       createForwardServer: () => fakeServer(),
     }));
     vi.doMock('./inject.ts', () => ({

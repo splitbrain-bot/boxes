@@ -30,8 +30,10 @@ flowchart TB
 ## Network access
 
 The orchestrator sets `HTTP_PROXY` and `HTTPS_PROXY` in the environment of each box container. Tools that use these
-variables connect through the proxy. The proxy allows only port 80 and port 443. All other connections fail, because the
-box network has no other route. An agent thus cannot use SSH, and cannot connect to a database on a remote host.
+variables connect through the proxy. The proxy allows port 80 and port 443, and other ports only where the
+[allowlist](#allowlist) names them. All other connections fail, because the box network has no other route. An agent
+thus cannot use SSH, and cannot connect to a database on a remote host. The proxy also closes a connection that carries
+no traffic for 120 seconds.
 
 ## Allowlist
 
@@ -43,7 +45,9 @@ EGRESS_ALLOWED_HOSTS=github.com, *.npmjs.org, cache.nixos.org, pypi.org
 ```
 
 A name that starts with `*.` includes one level of subdomains. `*.npmjs.org` includes `registry.npmjs.org`. It does not
-include `npmjs.org` or `a.b.npmjs.org`.
+include `npmjs.org` or `a.b.npmjs.org`. A name with a port, such as `mcp.example.com:8443`, allows only that port. A
+name without a port allows the ports 80 and 443. The hosts of the [other API keys](credentials.md#other-api-keys) use
+the same rules.
 
 The variable is empty by default. The proxy then allows all public hosts. The proxy always refuses a private address,
 also when a public host name has a private address.
@@ -163,25 +167,27 @@ every forwarder does.
 The front door and the upstream tunnel are the same server code. Only the front door hands connections to the engine.
 The tunnel never intercepts, so the connections of the engine cannot loop back into it.
 
-The front door (`forward.ts`) handles plain HTTP with an absolute URI, and CONNECT, on ports 80 and 443 only. It vets a
-target in a fixed order: the port, then the allowlist, then the address. The allowlist comes before the DNS lookup, so
-the proxy never resolves a denied name. Every resolved address must pass. `cidr.ts` holds the blocked ranges, with the
-IPv6 forms that embed an IPv4 address, and input that it cannot parse fails closed.
+The front door (`forward.ts`) handles plain HTTP with an absolute URI, and CONNECT. It vets a target in a fixed order:
+the host and the port, then the address. The host check comes before the DNS lookup, so the proxy never resolves a
+denied name. Every resolved address must pass. `shared/cidr.ts` holds the blocked ranges, with the IPv6 forms that
+embed an IPv4 address, and input that it cannot parse fails closed.
 
 A forwarder connects to the one address that vetting chose, and does not resolve the name a second time. This closes DNS
 rebinding for that connection. On the intercepted path the upstream tunnel gives this protection, because the front door
 drops its address when it hands the connection to the engine.
 
-The front door refuses a credential host in the clear: on port 80, and on a CONNECT to a port other than 443. Such a
-request has no TLS for the engine to terminate, so the proxy would send either the real credential or the placeholder as
-plaintext.
+The front door refuses a credential host in the clear, which is plain HTTP and a CONNECT to port 80. Such a request
+has no TLS for the engine to terminate, so the proxy would send either the real credential or the placeholder as
+plaintext. On a CONNECT to another port, the front door hands the connection to the engine when a host of the credential
+names that port. The engine connects upstream on the same port, so the upstream tunnel checks the port again.
 
 The front door forwards nothing before the first policy push arrives. No policy is a denial, although an empty allowlist
 means "allow all public".
 
 ### Policy
 
-`policy.ts` implements the allowlist grammar and the credential decision as pure functions, with no I/O and no state.
+`policy.ts` implements the credential decision as pure functions, with no I/O and no state. `shared/hosts.ts` holds the
+grammar of the host patterns, so the orchestrator checks a host with the rule of the proxy.
 The intercepted hosts and their credential headers are fixed in `orchestrator/src/config.ts`: they are facts about the
 services, and no setting changes them. The exceptions are the GitLab host, which `GITLAB_HOST` names, and the hosts of
 the other API keys, which a user sets on the settings page.

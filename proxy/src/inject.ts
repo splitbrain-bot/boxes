@@ -252,13 +252,21 @@ export class Interceptor {
   private screen(req: CompletedRequest): { host: string; verdict: Screening } {
     const policy = this.opts.policy();
     let host: string;
+    let port: number;
     let protocol = '';
     try {
       const url = new URL(req.url);
       host = url.hostname;
       protocol = url.protocol;
+      port =
+        url.port !== ''
+          ? Number(url.port)
+          : protocol === 'https:' || protocol === 'wss:'
+            ? 443
+            : 80;
     } catch {
       host = req.destination?.hostname ?? '';
+      port = req.destination?.port ?? 443;
     }
 
     // The engine listens on every interface, and the proxy sits on every box
@@ -276,7 +284,7 @@ export class Interceptor {
     }
 
     const encrypted = protocol === 'https:' || protocol === 'wss:';
-    if (!encrypted && credentialsForHost(host, policy).length > 0) {
+    if (!encrypted && credentialsForHost(host, port, policy).length > 0) {
       // In the clear a swap would put the real credential on the wire as
       // plaintext, and forwarding unswapped would hand over the placeholder.
       return {
@@ -289,7 +297,7 @@ export class Interceptor {
       };
     }
 
-    return { host, verdict: decideCredentials(host, req.headers, policy) };
+    return { host, verdict: decideCredentials(host, port, req.headers, policy) };
   }
 
   /**

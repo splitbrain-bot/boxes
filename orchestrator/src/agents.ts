@@ -1,5 +1,6 @@
 /**
- * Agent sets for the agent in a box. A set holds an AGENTS.md and skills.
+ * Agent sets for the agent in a box. A set holds an AGENTS.md, skills and
+ * remote MCP servers.
  *
  * The database stores the sets. A set can also take skills from git
  * repositories, which the orchestrator pulls into checkouts under DATA_DIR.
@@ -9,20 +10,29 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import type { McpServer } from '@agentclientprotocol/sdk';
 import { type Pack, pack } from 'tar-stream';
 import type {
   AgentBundlePreview,
   AgentItem,
   AgentItemBody,
+  AgentMcpServer,
   AgentRepoBody,
   AgentSetDetail,
   AgentSetSummary,
 } from '../../shared/types.ts';
 import type { BuiltinSkill } from './builtin-skills.ts';
-import type { AgentItemRow, AgentRepoRow, AgentSetRow, Db } from './db.ts';
+import type { AgentItemRow, AgentMcpServerRow, AgentRepoRow, AgentSetRow, Db } from './db.ts';
 import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
+import {
+  MAX_MCP_SERVERS,
+  type McpContext,
+  mcpWarning,
+  resolveMcpServers,
+  validMcpServer,
+} from './mcp-servers.ts';
 import {
   fetchRepo,
   findSkills,
@@ -80,13 +90,17 @@ interface Bundle {
   skills: BundleSkill[];
   /** The names of the skills in the selected set that replace a skill of the global set. */
   overrides: string[];
+  /** Every MCP server, sorted by name. */
+  mcpServers: AgentMcpServer[];
+  /** The names of the MCP servers in the selected set that replace a server of the global set. */
+  mcpOverrides: string[];
 }
 
 /** The display name of the global set of a user. */
 const GLOBAL_SET_NAME = 'Global';
 
 /**
- * The store of agent sets, with their skills and repositories.
+ * The store of agent sets, with their skills, repositories and MCP servers.
  *
  * Each set belongs to one user. Each user has one global set. Each change
  * returns the whole set, so a client needs one request per screen.
@@ -97,6 +111,7 @@ export class AgentStore {
    * @param dataDir The DATA_DIR that holds the repository checkouts.
    * @param fetcher The function that fetches a repository into its checkout for the owner of its set.
    * @param builtins The function that returns the built-in skills of the orchestrator for a user.
+   * @param mcpContext The function that returns the API keys of a user and the egress allowlist.
    */
   constructor(
     /** Where the sets are stored. */
@@ -108,6 +123,11 @@ export class AgentStore {
       fetchRepo(dir, url, ref, null, keep),
     /** Returns the built-in skills of the orchestrator for a user. */
     private readonly builtins: (owner: string) => BuiltinSkill[] = () => [],
+    /** Returns the API keys of a user and the egress allowlist, for the MCP server checks. */
+    private readonly mcpContext: (owner: string) => McpContext = () => ({
+      keys: [],
+      allowedHosts: [],
+    }),
   ) {}
 
   /** The pulls running now, by repository id. */
@@ -162,7 +182,7 @@ export class AgentStore {
   }
 
   /**
-   * Gives one set of a user with its AGENTS.md, skills and repositories.
+   * Gives one set of a user with its AGENTS.md, skills, repositories and MCP servers.
    *
    * @param owner The user.
    * @param id The id of the set.
@@ -171,6 +191,7 @@ export class AgentStore {
    */
   getSet(owner: string, id: string): AgentSetDetail {
     const row = this.mustGet(owner, id);
+    const ctx = this.mcpContext(owner);
     return {
       ...this.summarize(row),
       agentsMd: row.agents_md,
@@ -183,6 +204,10 @@ export class AgentStore {
         skills: repoSkills(repo).map((skill) => skill.name),
         pulledAt: repo.pulled_at,
         error: repo.error,
+      })),
+      mcpServers: this.mcpServers(id).map((server) => ({
+        ...server,
+        warning: mcpWarning(server, ctx),
       })),
     };
   }
@@ -217,6 +242,23 @@ export class AgentStore {
       name: row.name,
       content: row.content,
       updatedAt: row.updated_at,
+    }));
+  }
+
+  /**
+   * Gives the stored MCP servers of a set.
+   *
+   * @param setId The id of the set.
+   * @returns The servers, sorted by name.
+   */
+  private mcpServers(setId: string): AgentMcpServer[] {
+    const rows = this.db
+      .prepare('SELECT * FROM agent_mcp_servers WHERE set_id = ? ORDER BY name')
+      .all(setId) as AgentMcpServerRow[];
+    return rows.map((row) => ({
+      name: row.name,
+      url: row.url,
+      headers: JSON.parse(row.headers) as AgentMcpServer['headers'],
     }));
   }
 
@@ -434,6 +476,66 @@ export class AgentStore {
   }
 
   /**
+   * Creates an MCP server, or replaces the server with the same name.
+   *
+   * @param owner The user.
+   * @param id The id of the set.
+   * @param body The name, the URL and the headers of the server.
+   * @returns The changed set.
+   * @throws {HttpError} A 404 when the user has no such set, or a 400 when a field is not valid or
+   *   the set is full.
+   */
+  putMcpServer(owner: string, id: string, body: AgentMcpServer): AgentSetDetail {
+    this.mustGet(owner, id);
+    const server = validMcpServer(body, this.mcpContext(owner));
+    const now = Date.now();
+
+    const existing = this.db
+      .prepare('SELECT 1 FROM agent_mcp_servers WHERE set_id = ? AND name = ?')
+      .get(id, server.name);
+    if (!existing) {
+      const count = this.db
+        .prepare('SELECT COUNT(*) AS n FROM agent_mcp_servers WHERE set_id = ?')
+        .get(id) as { n: number };
+      if (count.n >= MAX_MCP_SERVERS) {
+        throw new HttpError(400, `A set holds at most ${MAX_MCP_SERVERS} MCP servers`);
+      }
+    }
+
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO agent_mcp_servers (set_id, name, url, headers, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(set_id, name) DO UPDATE SET
+             url = excluded.url, headers = excluded.headers, updated_at = excluded.updated_at`,
+        )
+        .run(id, server.name, server.url, JSON.stringify(server.headers), now, now);
+      this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(now, id);
+    })();
+    return this.getSet(owner, id);
+  }
+
+  /**
+   * Removes one MCP server.
+   *
+   * @param owner The user.
+   * @param id The id of the set.
+   * @param name The name of the server.
+   * @returns The changed set.
+   * @throws {HttpError} A 404 when the user has no such set or the server does not exist.
+   */
+  deleteMcpServer(owner: string, id: string, name: unknown): AgentSetDetail {
+    this.mustGet(owner, id);
+    const info = this.db
+      .prepare('DELETE FROM agent_mcp_servers WHERE set_id = ? AND name = ?')
+      .run(id, typeof name === 'string' ? name.trim().toLowerCase() : '');
+    if (info.changes === 0) throw new HttpError(404, 'No such MCP server');
+    this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(Date.now(), id);
+    return this.getSet(owner, id);
+  }
+
+  /**
    * Adds a repository to a set and pulls it. A failed pull is recorded on the
    * repository, which stays in the set.
    *
@@ -603,21 +705,58 @@ export class AgentStore {
    * @returns The merged AGENTS.md, the skills with their sources, and the overridden skill names.
    */
   bundle(owner: string, setId: string | null): AgentBundlePreview {
-    const { agentsMd, skills, overrides } = this.merge(owner, setId);
+    const { agentsMd, skills, overrides, mcpServers, mcpOverrides } = this.merge(owner, setId);
     return {
       agentsMd,
       skills: skills.map((skill) => ({ name: skill.name, repo: skill.repo })),
       overrides,
+      mcpServers: mcpServers.map((server) => ({ name: server.name, url: server.url })),
+      mcpOverrides,
     };
+  }
+
+  /**
+   * Gives the merged MCP servers for a box, with the `${NAME}` references in
+   * the header values. The adapters of the box use this list until its next start.
+   *
+   * @param owner The owner of the box.
+   * @param setId The id of the set that the box selected, or null for only the global set.
+   * @returns The servers, sorted by name.
+   */
+  mcpSnapshot(owner: string, setId: string | null): AgentMcpServer[] {
+    return this.merge(owner, setId).mcpServers;
+  }
+
+  /**
+   * Makes the `mcpServers` list for an adapter from the servers of a box, with
+   * the current placeholders of the API keys of the owner. A server whose key
+   * is gone is left out, with a warning in the log.
+   *
+   * @param owner The owner of the box.
+   * @param servers The servers that the box got at its start.
+   * @returns The list for the adapter.
+   */
+  mcpServersFor(owner: string, servers: readonly AgentMcpServer[]): McpServer[] {
+    const { keys } = this.mcpContext(owner);
+    return resolveMcpServers(
+      servers,
+      (name) => keys.find((key) => key.name === name),
+      (server, missingKey) =>
+        log.warn('left out an MCP server, because its API key does not exist', {
+          owner,
+          server,
+          key: missingKey,
+        }),
+    );
   }
 
   /**
    * Merges the selected set over the global set of the owner.
    *
    * The merged AGENTS.md is the global AGENTS.md, then a blank line, then the
-   * AGENTS.md of the selected set. A skill of the selected set replaces a
-   * skill of the global set with the same name. A selected set of another user
-   * counts as no selection.
+   * AGENTS.md of the selected set. A skill or an MCP server of the selected set
+   * replaces a skill or a server of the global set with the same name. A
+   * selected set of another user counts as no selection.
    *
    * @param owner The owner of the box.
    * @param setId The id of the selected set, or null for only the global set.
@@ -644,7 +783,17 @@ export class AgentStore {
     }
 
     const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-    return { agentsMd, skills, overrides };
+
+    const servers = new Map(
+      (global ? this.mcpServers(global.id) : []).map((server) => [server.name, server]),
+    );
+    const mcpOverrides: string[] = [];
+    for (const server of extra ? this.mcpServers(extra.id) : []) {
+      if (servers.has(server.name)) mcpOverrides.push(server.name);
+      servers.set(server.name, server);
+    }
+    const mcpServers = [...servers.values()].sort((a, b) => a.name.localeCompare(b.name));
+    return { agentsMd, skills, overrides, mcpServers, mcpOverrides };
   }
 
   /**

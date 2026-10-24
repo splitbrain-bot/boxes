@@ -58,7 +58,7 @@ These variables are read by the orchestrator container.
 | `EGRESS_PROXY_PORT` | `3128` | Positive integer | Egress proxy port used by boxes. Changing it requires matching proxy container configuration. |
 | `EGRESS_PROXY_SERVICE` | `boxes-egress-proxy` | Non-empty Service name | Service of the egress proxy in the namespace of the orchestrator. Kubernetes only. |
 | `EGRESS_CONTROL_URL` | `http://boxes-egress-proxy:3129` | `http:` URL | Egress proxy control channel used by the orchestrator. Changing it requires matching proxy container configuration. |
-| `EGRESS_ALLOWED_HOSTS` | empty | Comma- or whitespace-separated hostnames | Optional [egress allowlist](egress.md). Exact hostnames and one-label wildcards such as `*.example.com` are accepted. Leave empty to allow all public hosts. Private ranges remain blocked. A bare `*` is invalid. |
+| `EGRESS_ALLOWED_HOSTS` | empty | Comma- or whitespace-separated hostnames | Optional [egress allowlist](egress.md). Exact hostnames and one-label wildcards such as `*.example.com` are accepted. A name with a port, such as `mcp.example.com:8443`, allows only that port. Leave empty to allow all public hosts. Private ranges remain blocked. A bare `*` is invalid. |
 | `GITLAB_HOST` | `gitlab.com` | Bare hostname with at least two labels | GitLab host for the GitLab credential. Set this for a self-managed public GitLab instance. |
 
 ## Development variable

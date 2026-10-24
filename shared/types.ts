@@ -1017,6 +1017,34 @@ export interface AgentSetDetail extends AgentSetSummary {
   items: AgentItem[];
   /** The repositories that the set takes more skills from, in the order they were added. */
   repos: AgentRepo[];
+  /** The remote MCP servers of the set, by name. */
+  mcpServers: AgentMcpServerState[];
+}
+
+/**
+ * A remote MCP server of an agent set. The agent reaches it with the Streamable
+ * HTTP transport.
+ */
+export interface AgentMcpServer {
+  /** The name of the server. It holds lowercase letters, digits and dashes, and at most 32 characters. */
+  name: string;
+  /** The http or https URL of the server. */
+  url: string;
+  /**
+   * The headers that the agent sends to the server. A value can refer to an API
+   * key of the owner as `${NAME}`, where NAME is the environment variable name of
+   * the key.
+   */
+  headers: { name: string; value: string }[];
+}
+
+/** A remote MCP server of an agent set, as the editor shows it. */
+export interface AgentMcpServerState extends AgentMcpServer {
+  /**
+   * The reason the agent will probably not reach the server, for example an API
+   * key without the host of the server, or null when no problem is known.
+   */
+  warning: string | null;
 }
 
 /** A git repository an agent set takes skills from. */
@@ -1081,6 +1109,10 @@ export interface AgentBundlePreview {
    * set.
    */
   overrides: string[];
+  /** All remote MCP servers of the box after the overrides, by name. */
+  mcpServers: { name: string; url: string }[];
+  /** The names of the MCP servers of the selected set that replace servers of the global set. */
+  mcpOverrides: string[];
 }
 
 /** One skill of a merged configuration. */

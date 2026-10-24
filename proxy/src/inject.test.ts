@@ -27,6 +27,12 @@ let ca: { key: string; cert: string };
 /** Requests that arrived at the stand-in origin. */
 let received: Array<{ url: string; headers: http.IncomingHttpHeaders }> = [];
 
+/** The authorities that the engine sent to the stand-in tunnel in its CONNECT requests. */
+let connects: string[] = [];
+
+/** Ends the open event stream of the stand-in origin. */
+let endStream: () => void = () => {};
+
 /** A TLS server that stands in for the credential host. */
 let origin: https.Server;
 
@@ -91,6 +97,13 @@ beforeAll(async () => {
 
   origin = https.createServer({ key: ca.key, cert: ca.cert }, (req, res) => {
     received.push({ url: req.url ?? '', headers: req.headers });
+    if (req.url === '/events') {
+      // An event stream sends its first event and stays open until the test ends it.
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: first\n\n');
+      endStream = () => res.end('data: last\n\n');
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end('origin reached\n');
   });
@@ -111,7 +124,8 @@ beforeAll(async () => {
 
   // The engine reaches its proxy by CONNECT, whatever the target scheme.
   tunnel = http.createServer();
-  tunnel.on('connect', (_req, client, head) => {
+  tunnel.on('connect', (req, client, head) => {
+    connects.push(req.url ?? '');
     const upstream = net.connect({ host: '127.0.0.1', port: originPort }, () => {
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length > 0) upstream.write(head);
@@ -135,6 +149,8 @@ beforeAll(async () => {
 
 afterEach(() => {
   received = [];
+  connects = [];
+  endStream();
 });
 
 afterAll(async () => {
@@ -197,6 +213,7 @@ function tunnelThroughEngine(
  * @param host The hostname of the origin.
  * @param path The request path.
  * @param engineHost The address of the engine to connect to.
+ * @param targetPort The port of the origin, as the client names it in the CONNECT.
  * @returns The status and the body of the answer.
  */
 async function throughEngine(
@@ -205,14 +222,16 @@ async function throughEngine(
   host = 'api.github.com',
   path = '/user',
   engineHost = '127.0.0.1',
+  targetPort = 443,
 ): Promise<Answer> {
-  const socket = await tunnelThroughEngine(port, `${host}:443`, engineHost);
+  const socket = await tunnelThroughEngine(port, `${host}:${targetPort}`, engineHost);
   return new Promise((resolve, reject) => {
     const req = https.request(
       {
         // With createConnection and no http.Agent, the request uses this socket and closes it.
         createConnection: () => connectTls({ socket, servername: host, ca: ca.cert }),
         host,
+        port: targetPort,
         path,
         method: 'GET',
         headers,
@@ -347,6 +366,73 @@ describe('the interception engine', () => {
     expect(res.status).toBe(200);
     expect(received).toHaveLength(1);
     expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
+  }, 30_000);
+
+  it('swaps the placeholder on a port that the host pattern names', async () => {
+    policy = githubPolicy({
+      credentials: [{ ...githubPolicy().credentials[0]!, hosts: ['api.github.com:8443'] }],
+    });
+    await interceptor.apply();
+
+    const res = await throughEngine(
+      interceptor.port()!,
+      { authorization: `Bearer ${PLACEHOLDER}` },
+      'api.github.com',
+      '/user',
+      '127.0.0.1',
+      8443,
+    );
+
+    expect(res.status).toBe(200);
+    expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
+    // The upstream tunnel vets the port of the CONNECT.
+    expect(connects).toEqual(['api.github.com:8443']);
+  }, 30_000);
+
+  it('does not swap on a port that no host pattern names', async () => {
+    policy = githubPolicy();
+    await interceptor.apply();
+
+    const res = await throughEngine(
+      interceptor.port()!,
+      { authorization: `Bearer ${PLACEHOLDER}` },
+      'api.github.com',
+      '/user',
+      '127.0.0.1',
+      8443,
+    );
+
+    expect(res.status).toBe(200);
+    expect(received[0]?.headers.authorization).toBe(`Bearer ${PLACEHOLDER}`);
+  }, 30_000);
+
+  it('streams an event stream to the client before the stream ends', async () => {
+    policy = githubPolicy();
+    await interceptor.apply();
+
+    const socket = await tunnelThroughEngine(interceptor.port()!, 'api.github.com:443');
+    const first = await new Promise<string>((resolve, reject) => {
+      const req = https.request(
+        {
+          createConnection: () => connectTls({ socket, servername: 'api.github.com', ca: ca.cert }),
+          host: 'api.github.com',
+          path: '/events',
+          method: 'GET',
+          headers: { accept: 'text/event-stream', authorization: `Bearer ${PLACEHOLDER}` },
+        },
+        (res) => {
+          expect(res.headers['content-type']).toBe('text/event-stream');
+          res.once('data', (chunk) => resolve(String(chunk)));
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    // The origin has not ended the stream yet, so the engine passed the first event on as it came.
+    expect(first).toBe('data: first\n\n');
+    expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
+    socket.destroy();
   }, 30_000);
 
   it('swaps a credential that names no header in any header, and passes other values', async () => {

@@ -26,8 +26,8 @@ volume.
 
 **[Agent set](agent-sets.md)**
 
-A named collection of agent instructions and skills. Boxes copies the selected set into each box when it
-starts.
+A named collection of agent instructions, skills, and remote MCP servers. The orchestrator gives the selected set to
+each box when the box starts.
 
 **Harness**
 
