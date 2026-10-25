@@ -24,9 +24,7 @@ import { type GitBox, headCommit } from './git.ts';
 import {
   type Base,
   type FileStatuses,
-  fileStatuses,
   NO_BASE,
-  resolveBase,
   resolveBases,
   workspaceStatuses,
 } from './gitstatus.ts';
@@ -64,6 +62,8 @@ interface GitSnapshot {
   repos: ReviewRepo[];
   /** The git status of every changed file in the workspace, by path. */
   statuses: FileStatuses;
+  /** The base of each repository, by repository path. A repository without an entry compares against HEAD. */
+  bases: Map<string, Base>;
 }
 
 /** The access to the boxes that the review needs. */
@@ -119,6 +119,12 @@ export class ReviewService {
   private readonly snapshots = new Map<string, GitSnapshot>();
 
   /**
+   * The snapshot that is being taken for each review, by box id. Only this snapshot replaces the held one when it
+   * is complete.
+   */
+  private readonly taking = new Map<string, Promise<GitSnapshot>>();
+
+  /**
    * Creates the service.
    *
    * @param db The database that holds the box rows.
@@ -132,9 +138,9 @@ export class ReviewService {
   ) {}
 
   /**
-   * The time in milliseconds that a git snapshot stays in use when no request asks for a new one.
+   * The time in milliseconds after which a request starts a new git snapshot in the background.
    *
-   * Many folder opens in this time run git once.
+   * Many folder and file opens in this time run git for the snapshot once.
    */
   private static readonly SNAPSHOT_MS = 60_000;
 
@@ -175,27 +181,58 @@ export class ReviewService {
    * Gives the git snapshot of a review.
    *
    * The method reuses the held snapshot, because each git call is an exec into the
-   * box. It takes a new snapshot when `fresh` is true, when no snapshot is held,
-   * and when {@link ReviewService.SNAPSHOT_MS} has passed.
+   * box. It takes a new snapshot and waits for it when `fresh` is true or when no
+   * snapshot is held. When {@link ReviewService.SNAPSHOT_MS} has passed, it returns
+   * the held snapshot and takes a new one in the background, so the request does
+   * not wait for git.
    *
    * @param box The box to run git in.
    * @param id The box id.
-   * @param fresh True to take a new snapshot in all cases.
+   * @param fresh True to take a new snapshot and wait for it in all cases.
    * @returns The snapshot.
    */
   private async snapshot(box: ReviewBox, id: string, fresh: boolean): Promise<GitSnapshot> {
-    const held = this.snapshots.get(id);
-    if (!fresh && held && Date.now() - held.at < ReviewService.SNAPSHOT_MS) return held;
+    if (fresh) return this.take(box, id);
 
-    const map = await discoverRepos(box.files, box);
-    const bases = await resolveBases(box, map, this.baseRev(id));
-    const [repos, statuses] = await Promise.all([
-      this.describeRepos(box, map, bases),
-      workspaceStatuses(box, map, bases),
-    ]);
-    const taken: GitSnapshot = { at: Date.now(), map, repos, statuses };
-    this.snapshots.set(id, taken);
-    return taken;
+    const held = this.snapshots.get(id);
+    if (!held) return this.taking.get(id) ?? this.take(box, id);
+
+    if (Date.now() - held.at >= ReviewService.SNAPSHOT_MS && !this.taking.has(id)) {
+      this.take(box, id).catch((err: unknown) => {
+        log.box(id).warn('could not refresh the git snapshot', { error: (err as Error).message });
+      });
+    }
+    return held;
+  }
+
+  /**
+   * Takes a new git snapshot of a review.
+   *
+   * A later take or an {@link ReviewService.invalidate} replaces this take. The
+   * snapshot of a replaced take is returned to its caller, but it is not held.
+   *
+   * @param box The box to run git in.
+   * @param id The box id.
+   * @returns The snapshot.
+   */
+  private async take(box: ReviewBox, id: string): Promise<GitSnapshot> {
+    const taking = (async (): Promise<GitSnapshot> => {
+      const map = await discoverRepos(box.files, box);
+      const bases = await resolveBases(box, map, this.baseRev(id));
+      const [repos, statuses] = await Promise.all([
+        this.describeRepos(box, map, bases),
+        workspaceStatuses(box, map, bases),
+      ]);
+      return { at: Date.now(), map, repos, statuses, bases };
+    })();
+    this.taking.set(id, taking);
+    try {
+      const taken = await taking;
+      if (this.taking.get(id) === taking) this.snapshots.set(id, taken);
+      return taken;
+    } finally {
+      if (this.taking.get(id) === taking) this.taking.delete(id);
+    }
   }
 
   /**
@@ -205,6 +242,7 @@ export class ReviewService {
    */
   private invalidate(id: string): void {
     this.snapshots.delete(id);
+    this.taking.delete(id);
   }
 
   /**
@@ -265,10 +303,11 @@ export class ReviewService {
   /**
    * Gives one file with its content, diff markers and comments, in one response.
    *
-   * The diff and the status come from the repository that owns the path, with
-   * the path relative to that repository. A file outside every repository has
-   * no diff and no status. The content is plain text, and the browser adds the
-   * highlighting.
+   * The diff comes from the repository that owns the path, with the path
+   * relative to that repository. The status and the base come from the git
+   * snapshot, so the status is the one that the tree shows. A file outside every
+   * repository has no diff and no status. The content is plain text, and the
+   * browser adds the highlighting.
    *
    * @param id The box id.
    * @param relPath The workspace-relative path of the file.
@@ -277,22 +316,24 @@ export class ReviewService {
    */
   async file(id: string, relPath: string): Promise<ReviewFileResponse> {
     const box = await this.box(id);
-    const { map } = await this.snapshot(box, id, false);
+    const { map, statuses, bases } = await this.snapshot(box, id, false);
     const repo = map.repoFor(relPath);
     if (!(await this.resolveFile(box, id, relPath))) {
       return goneFile(relPath, repo, await this.annotationsOf(id, box.files, relPath));
     }
     const read = await box.files.read(relPath, MAX_FILE_BYTES);
-    const base = repo ? await this.baseIn(box, id, repo) : NO_BASE;
 
     // Git runs only in the owning repository, so opening a file costs the same
     // for any number of repositories in the workspace.
-    const [diff, statuses] = await Promise.all([
+    const diff =
       repo && !read.binary
-        ? fileDiff(gitTarget(box, repo.path), base, inRepo(repo, relPath), read.content)
-        : Promise.resolve(null),
-      repo ? fileStatuses(gitTarget(box, repo.path), base) : Promise.resolve(null),
-    ]);
+        ? await fileDiff(
+            gitTarget(box, repo.path),
+            bases.get(repo.path) ?? NO_BASE,
+            inRepo(repo, relPath),
+            read.content,
+          )
+        : null;
 
     // The drift check needs the whole text, so the comments on a binary or
     // truncated file come back as they stand.
@@ -312,7 +353,7 @@ export class ReviewService {
       size: read.size,
       lines: read.binary ? 0 : fileLines(read.content).length,
       language: detectLang(relPath),
-      status: (repo ? statuses?.[inRepo(repo, relPath)] : null) ?? null,
+      status: statuses[relPath] ?? null,
       diff: {
         lines: Object.fromEntries(Object.entries(diff?.lines ?? {})),
         hunks: diff?.hunks ?? [],
@@ -740,23 +781,6 @@ export class ReviewService {
   }
 
   /**
-   * Resolves the base of one repository, for a request about a single file in it. The
-   * method resolves the base only in this repository.
-   *
-   * @param box The box to run git in.
-   * @param id The box id.
-   * @param repo The repository.
-   * @returns The base, or {@link NO_BASE} when no revision is set or the revision names nothing.
-   */
-  private async baseIn(box: GitBox, id: string, repo: Repo): Promise<Base> {
-    const rev = this.baseRev(id);
-    if (rev === '') return NO_BASE;
-    const resolved = await resolveBase(gitTarget(box, repo.path), rev);
-    // An unknown revision falls back to HEAD here, as in `resolveBases`.
-    return 'base' in resolved ? resolved.base : NO_BASE;
-  }
-
-  /**
    * Checks that a path from the client names a file that the review offers.
    *
    * {@link listedFile} applies the rule of the listing, so the API serves only
@@ -824,12 +848,13 @@ export class ReviewService {
   }
 
   /**
-   * Drops the snapshot and the lock of a deleted box.
+   * Drops the snapshot, a snapshot that is being taken and the lock of a deleted box.
    *
    * @param id The box id.
    */
   forget(id: string): void {
     this.snapshots.delete(id);
+    this.taking.delete(id);
     this.locks.delete(id);
   }
 }

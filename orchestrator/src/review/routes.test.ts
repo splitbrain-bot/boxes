@@ -1357,6 +1357,18 @@ describe('the base revision', () => {
     assert.deepEqual(after.body.diff.lines, { 1: 'added' });
   });
 
+  test('with a base set, opening a file does not resolve the base again', async () => {
+    branched('cce');
+    await setBase('cce', 'main');
+    await openDir('cce');
+
+    // The git snapshot holds the base of each repository.
+    const before = invocations;
+    const { body } = await get<ReviewFileResponse>('/api/boxes/cce/review/file?path=mine.txt');
+    assert.deepEqual(body.diff.lines, { 1: 'added' });
+    assert.equal(invocations - before, 2);
+  });
+
   test('null clears the base back to HEAD', async () => {
     branched('ddd');
     await setBase('ddd', 'main');
@@ -1473,6 +1485,42 @@ describe('freshness is the fetch', () => {
     write(ws, 'code.ts', 'one\nTWO\n');
     const { body } = await get<ReviewFileResponse>('/api/boxes/ddd/review/file?path=code.ts');
     assert.equal(body.content, 'one\nTWO\n');
+  });
+
+  test('opening a file runs git only for its own diff', async () => {
+    const ws = insertBox('eee');
+    initRepo(ws);
+    write(ws, 'code.ts', 'one\ntwo\n');
+    git(ws, 'add', '.');
+    git(ws, 'commit', '-q', '-m', 'init');
+    await openDir('eee');
+
+    // The status comes from the git snapshot of the arrival, so the file asks
+    // git only for its diff and if it is untracked.
+    const before = invocations;
+    await get<ReviewFileResponse>('/api/boxes/eee/review/file?path=code.ts');
+    assert.equal(invocations - before, 2);
+  });
+
+  test('an old snapshot answers at once, and a new one follows in the background', async () => {
+    const ws = insertBox('fff');
+    initRepo(ws);
+    write(ws, 'code.ts', 'one\ntwo\n');
+    git(ws, 'add', '.');
+    git(ws, 'commit', '-q', '-m', 'init');
+    await openDir('fff');
+
+    write(ws, 'code.ts', 'one\nTWO\n');
+    const later = Date.now() + 61_000;
+    vi.spyOn(Date, 'now').mockReturnValue(later);
+
+    // The request does not wait for git, so it gets the status of the old snapshot.
+    const old = await get<ReviewFileResponse>('/api/boxes/fff/review/file?path=code.ts');
+    assert.equal(old.body.status, null);
+    await vi.waitFor(async () => {
+      const { body } = await get<ReviewFileResponse>('/api/boxes/fff/review/file?path=code.ts');
+      assert.equal(body.status, 'modified');
+    });
   });
 
   test('reading a review keeps the box it is read from alive', async () => {

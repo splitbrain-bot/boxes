@@ -68,7 +68,9 @@ wins over its parent, and a file that no repository claims is shown without git.
 
 Git's answers are one snapshot per review — the repository map, the base of each repository, and the status of every
 changed file — taken when a reader arrives, after a save, or after a base change, rather than per folder. Opening a
-folder is then one directory read and nothing else.
+folder is then one directory read and nothing else, and opening a file runs git only for the diff of that file. When a
+request finds a snapshot older than one minute, the orchestrator answers with that snapshot and takes a new one in the
+background.
 
 A comparison base such as `main` is stored as the expression only. It is resolved per repository through the merge base
 with that repository's HEAD; a repository where the expression names nothing falls back to its own HEAD, and the request
