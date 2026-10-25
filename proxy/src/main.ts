@@ -12,9 +12,21 @@ import net from 'node:net';
 import { DEFAULT_PORTS } from '../../shared/hosts.ts';
 import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
 import { createControlServer, resolveControlAddress } from './control.ts';
-import { createForwardServer, type DenialCategory } from './forward.ts';
+import {
+  createForwardServer,
+  type DenialCategory,
+  isProfileDenial,
+  type Target,
+} from './forward.ts';
 import { Interceptor } from './inject.ts';
-import { EMPTY_POLICY, injectionPatterns, policyHash } from './policy.ts';
+import {
+  boxFromAuthorization,
+  EMPTY_POLICY,
+  injectionPatterns,
+  policyHash,
+  upstreamBoxPolicy,
+} from './policy.ts';
+import { RefusedTargets } from './refused.ts';
 
 /**
  * Writes one JSON line to stderr.
@@ -79,16 +91,26 @@ let applied = false;
  */
 const denials = new Map<DenialCategory, number>();
 
+/** The targets that the egress profile of each box refused. */
+const refused = new RefusedTargets();
+
 /** Start time of this process in milliseconds since the epoch, for the uptime in the status. */
 const bootedAt = Date.now();
 
 /**
- * Counts one denial under its category.
+ * Counts one denial under its category. A denial by the egress profile also
+ * goes into the list of refused targets of the box.
  *
  * @param category The category of the denial.
+ * @param box The id of the box that sent the request, or undefined when it is not known.
+ * @param target The refused target, or undefined when it is not known.
  */
-function denied(category: DenialCategory): void {
+function denied(category: DenialCategory, box?: string, target?: Target): void {
   denials.set(category, (denials.get(category) ?? 0) + 1);
+  // The upstream tunnel has no box, so its denials have the empty box id.
+  if (box && target !== undefined && isProfileDenial(category)) {
+    refused.record(box, target.host, target.port, category);
+  }
 }
 
 /**
@@ -100,7 +122,7 @@ function status(): EgressStatus {
   return {
     applied,
     policyHash: policyHash(policy),
-    allowedHostCount: policy.allowedHosts.length,
+    boxCount: policy.boxes.length,
     credentialIds: policy.credentials.map((c) => c.id),
     denials: Object.fromEntries(denials),
     uptimeSeconds: Math.round((Date.now() - bootedAt) / 1000),
@@ -114,6 +136,7 @@ function status(): EgressStatus {
  */
 const upstream = createForwardServer({
   policy: () => policy,
+  identify: (_header, current) => upstreamBoxPolicy(current),
   interceptPort: () => null,
   applied: () => applied,
   denied,
@@ -137,6 +160,7 @@ const interceptor = new Interceptor({
  */
 const front = createForwardServer({
   policy: () => policy,
+  identify: boxFromAuthorization,
   interceptPort: () => interceptor.port(),
   applied: () => applied,
   denied,
@@ -181,14 +205,16 @@ const control = createControlServer({
         throw new Error(`could not apply policy: ${(err as Error).message}`);
       }
       applied = true;
+      refused.retain(new Set(policy.boxes.map((b) => b.box)));
       log('applied policy', {
         hash: policyHash(policy),
-        allowedHosts: policy.allowedHosts.length,
+        boxes: policy.boxes.length,
         credentials: policy.credentials.map((c) => c.id),
         intercepting: injectionPatterns(policy),
       });
     }),
   status,
+  denials: (box) => refused.list(box),
   log,
 });
 

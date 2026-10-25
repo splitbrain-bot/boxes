@@ -52,6 +52,10 @@ The process in a box that provides ACP access to a harness. The dashboard reache
 A public HTTPS link to a port in a box, used to share a running application. Boxes creates tunnels with [Microsoft Dev
 Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/overview).
 
+**[Egress profile](egress-profiles.md)**
+
+A named set of rules that decides which hosts the agent in a box can reach. Each box uses one profile.
+
 **[Egress proxy](egress.md)**
 
 The service that provides a box's only outbound network path. It enforces network policy and replaces a credential

@@ -5,7 +5,7 @@ import http from 'node:http';
 import net from 'node:net';
 import { allAddressesAllowed, isBlockedAddress } from '../../shared/cidr.ts';
 import { DEFAULT_PORTS } from '../../shared/hosts.ts';
-import type { EgressPolicy } from '../../shared/types.ts';
+import type { EgressBoxPolicy, EgressPolicy } from '../../shared/types.ts';
 import { hostAllowed, isInjectionHost } from './policy.ts';
 
 /** Time limit to open the upstream connection of a CONNECT, in milliseconds. */
@@ -25,13 +25,32 @@ export type DenialCategory =
   | 'dns'
   | 'credential-upgrade'
   | 'plaintext-credential-host'
-  | 'no-policy';
+  | 'no-policy'
+  | 'proxy-auth';
 
 /** Denial reason for a request to a credential host without TLS. */
 export const PLAINTEXT_CREDENTIAL_REASON = 'a credential host may only be reached over https';
 
 /** Denial reason while the proxy waits for its first policy. */
 const NO_POLICY_REASON = 'the proxy has no policy yet';
+
+/** The reason phrase of the status line of a refusal by the egress profile. */
+const PROFILE_STATUS = 'Not allowed by the egress profile';
+
+/** The headers of the 407 answer to a request without a valid box identity. */
+const PROXY_AUTH_HEADERS = {
+  'Proxy-Authenticate': 'Basic realm="boxes"',
+  'Content-Length': '0',
+  Connection: 'close',
+};
+
+/** The 407 answer to a CONNECT without a valid box identity, as raw HTTP. */
+const PROXY_AUTH_RESPONSE = [
+  'HTTP/1.1 407 Proxy Authentication Required',
+  ...Object.entries(PROXY_AUTH_HEADERS).map(([name, value]) => `${name}: ${value}`),
+  '',
+  '',
+].join('\r\n');
 
 /** Destination of a request. */
 export interface Target {
@@ -78,25 +97,32 @@ export type Verdict =
   | { ok: false; category: DenialCategory; reason: string };
 
 /**
+ * Checks if a denial category comes from the egress profile of a box, so
+ * that a change to the profile can lift it.
+ *
+ * @param category The category of the denial.
+ * @returns True for the categories allowlist and port.
+ */
+export function isProfileDenial(category: DenialCategory): boolean {
+  return category === 'allowlist' || category === 'port';
+}
+
+/**
  * Vets a target and finds the single address to pin the connection to. An IP
  * literal is checked as it is. A hostname is resolved, and every answer must
- * pass. The allowlist check comes before DNS, so a denied host is never looked
- * up.
+ * pass. The host check comes before DNS, so a denied host is never looked up.
  *
  * @param target The destination of the request.
- * @param policy The policy to check against.
+ * @param box The policy of the box that sent the request.
  * @returns The verdict, with the first resolved address when the target passes.
  */
-export async function vetTarget(target: Target, policy: EgressPolicy): Promise<Verdict> {
-  if (!hostAllowed(target.host, target.port, policy)) {
-    if (!DEFAULT_PORTS.has(target.port)) {
-      return {
-        ok: false,
-        category: 'port',
-        reason: `port ${target.port} not allowed for this host`,
-      };
-    }
-    return { ok: false, category: 'allowlist', reason: 'host is not on the egress allowlist' };
+export async function vetTarget(target: Target, box: EgressBoxPolicy): Promise<Verdict> {
+  if (!hostAllowed(target.host, target.port, box)) {
+    return {
+      ok: false,
+      category: DEFAULT_PORTS.has(target.port) ? 'allowlist' : 'port',
+      reason: `${formatTarget(target)} is not allowed by the egress profile of this box`,
+    };
   }
 
   const literalFamily = net.isIP(target.host);
@@ -136,16 +162,42 @@ export async function vetTarget(target: Target, policy: EgressPolicy): Promise<V
   return { ok: true, address: chosen.address, family: chosen.family };
 }
 
+/**
+ * Writes a target as host and port. An IPv6 literal is in brackets.
+ *
+ * @param target The target.
+ * @returns The target as in example.com:443 or [::1]:443.
+ */
+function formatTarget(target: Target): string {
+  return net.isIP(target.host) === 6
+    ? `[${target.host}]:${target.port}`
+    : `${target.host}:${target.port}`;
+}
+
 /** Callbacks of a forward proxy server. */
 export interface ForwardOptions {
   /** Returns the live policy. The server reads it for each request, so a push takes effect at once. */
   policy: () => EgressPolicy;
+  /**
+   * Finds the policy of the box that sent a request.
+   *
+   * @param header The value of the Proxy-Authorization header, or undefined when the request has none.
+   * @param policy The live policy.
+   * @returns The policy of the box, or null to answer the request with a 407.
+   */
+  identify: (header: string | undefined, policy: EgressPolicy) => EgressBoxPolicy | null;
   /** Returns the loopback port of the TLS engine, or null for no interception. */
   interceptPort: () => number | null;
   /** Returns true after the first policy push. The server forwards nothing before it. */
   applied: () => boolean;
-  /** Counts one denial under its category. */
-  denied: (category: DenialCategory) => void;
+  /**
+   * Counts one denial under its category.
+   *
+   * @param category The category of the denial.
+   * @param box The id of the box that sent the request, or undefined when it is not known.
+   * @param target The refused target, or undefined when it is not known.
+   */
+  denied: (category: DenialCategory, box?: string, target?: Target) => void;
   /** Writes one structured log line. */
   log: (msg: string, fields?: Record<string, unknown>) => void;
 }
@@ -155,10 +207,23 @@ export interface ForwardOptions {
  *
  * @param res The response to the client.
  * @param reason The denial reason.
+ * @param category The category of the denial. A refusal by the egress profile gets its own reason phrase.
  */
-function deny(res: http.ServerResponse, reason: string): void {
-  res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+function deny(res: http.ServerResponse, reason: string, category?: DenialCategory): void {
+  const phrase = category !== undefined && isProfileDenial(category) ? PROFILE_STATUS : 'Forbidden';
+  res.writeHead(403, phrase, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end(`egress denied: ${reason}\n`);
+}
+
+/**
+ * Reads the first value of the Proxy-Authorization header.
+ *
+ * @param req The request from the client.
+ * @returns The value, or undefined when the request has none.
+ */
+function proxyAuthorization(req: http.IncomingMessage): string | undefined {
+  const header = req.headers['proxy-authorization'];
+  return Array.isArray(header) ? header[0] : header;
 }
 
 /** Hop-by-hop headers, which end at this proxy. */
@@ -213,7 +278,6 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
 
   server.on('request', (req, res) => {
     if (!opts.applied()) {
-      // An empty policy allows every public host, so nothing passes before the first push.
       opts.denied('no-policy');
       opts.log('denied http request', { reason: NO_POLICY_REASON });
       deny(res, NO_POLICY_REASON);
@@ -247,6 +311,16 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       return;
     }
 
+    const policy = opts.policy();
+    const box = opts.identify(proxyAuthorization(req), policy);
+    if (!box) {
+      opts.denied('proxy-auth');
+      opts.log('denied http request', { host: target.host, reason: 'no valid box identity' });
+      res.writeHead(407, PROXY_AUTH_HEADERS);
+      res.end();
+      return;
+    }
+
     if (req.headers.upgrade) {
       // A forwarded upgrade would leave this proxy with a protocol it cannot
       // vet, and the request would never reach its response callback.
@@ -255,12 +329,12 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       return;
     }
 
-    const policy = opts.policy();
     if (opts.interceptPort() !== null && isInjectionHost(target.host, target.port, policy)) {
       // In the clear, a credential host would get the placeholder, or the real
       // secret as plaintext.
-      opts.denied('plaintext-credential-host');
+      opts.denied('plaintext-credential-host', box.box, target);
       opts.log('denied http request', {
+        box: box.box,
         host: target.host,
         reason: PLAINTEXT_CREDENTIAL_REASON,
       });
@@ -268,15 +342,17 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
       return;
     }
 
-    void vetTarget(target, policy).then((verdict) => {
+    void vetTarget(target, box).then((verdict) => {
       if (!verdict.ok) {
-        opts.denied(verdict.category);
+        opts.denied(verdict.category, box.box, target);
         opts.log('denied http request', {
+          box: box.box,
           host: target.host,
           port: target.port,
+          category: verdict.category,
           reason: verdict.reason,
         });
-        deny(res, verdict.reason);
+        deny(res, verdict.reason, verdict.category);
         return;
       }
       // The client can disconnect before the vetting ends.
@@ -317,6 +393,8 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
   // CONNECT tunnels.
 
   server.on('connect', (req, clientSocket: net.Socket, head: Buffer) => {
+    // A client can reset the socket while a refusal is written, and an error without a listener stops the process.
+    clientSocket.on('error', () => clientSocket.destroy());
     const refuse = (code: number, reason: string): void => {
       try {
         clientSocket.write(`HTTP/1.1 ${code} ${reason}\r\n\r\n`);
@@ -327,7 +405,6 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
     };
 
     if (!opts.applied()) {
-      // An empty policy allows every public host, so nothing passes before the first push.
       opts.denied('no-policy');
       opts.log('denied CONNECT', { reason: NO_POLICY_REASON });
       refuse(403, 'Forbidden');
@@ -341,14 +418,42 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
     }
 
     const policy = opts.policy();
-    void vetTarget(target, policy).then((verdict) => {
+    const box = opts.identify(proxyAuthorization(req), policy);
+    if (!box) {
+      opts.denied('proxy-auth');
+      opts.log('denied CONNECT', { host: target.host, reason: 'no valid box identity' });
+      try {
+        clientSocket.end(PROXY_AUTH_RESPONSE);
+      } catch {
+        clientSocket.destroy();
+      }
+      return;
+    }
+
+    void vetTarget(target, box).then((verdict) => {
       if (!verdict.ok) {
-        opts.denied(verdict.category);
+        opts.denied(verdict.category, box.box, target);
         opts.log('denied CONNECT', {
+          box: box.box,
           host: target.host,
           port: target.port,
+          category: verdict.category,
           reason: verdict.reason,
         });
+        if (isProfileDenial(verdict.category)) {
+          const body = `egress denied: ${verdict.reason}\n`;
+          try {
+            clientSocket.end(
+              `HTTP/1.1 403 ${PROFILE_STATUS}\r\n` +
+                'Content-Type: text/plain; charset=utf-8\r\n' +
+                `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+                `Connection: close\r\n\r\n${body}`,
+            );
+          } catch {
+            clientSocket.destroy();
+          }
+          return;
+        }
         refuse(403, 'Forbidden');
         return;
       }
@@ -358,8 +463,9 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
         if (target.port === 80) {
           // The proxy takes port 80 as plain HTTP. There, the engine could swap
           // the real credential into plaintext.
-          opts.denied('plaintext-credential-host');
+          opts.denied('plaintext-credential-host', box.box, target);
           opts.log('denied CONNECT', {
+            box: box.box,
             host: target.host,
             port: target.port,
             reason: PLAINTEXT_CREDENTIAL_REASON,

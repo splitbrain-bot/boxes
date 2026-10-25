@@ -11,6 +11,7 @@ import type {
   ApiKeySummary,
   BootResponse,
   CredentialSummary,
+  EgressDenial,
   HarnessHealth,
   HarnessInfo,
   HealthResponse,
@@ -29,8 +30,10 @@ import {
   agentMcpServerBody,
   agentRepoBody,
   backgroundStopBody,
+  boxEgressProfileBody,
   createAgentSetBody,
   createBoxBody,
+  createEgressProfileBody,
   createThreadBody,
   loginCodeBody,
   parseBody,
@@ -44,6 +47,7 @@ import {
   reviewFileBody,
   threadDoneBody,
   updateAgentSetBody,
+  updateEgressProfileBody,
 } from './bodies.ts';
 import { BOOT_PAGE, BOOT_PAGE_CSP, BootState } from './boot.ts';
 import { BoxManager } from './boxes.ts';
@@ -57,6 +61,7 @@ import {
   undeliverableReason,
 } from './credentials.ts';
 import {
+  type BoxRow,
   countLiveBoxes,
   countPushSubscriptions,
   type Db,
@@ -64,13 +69,15 @@ import {
   readHarnessCatalog,
   upsertPushSubscription,
 } from './db.ts';
-import { EgressManager } from './egress.ts';
+import { type EgressBoxInput, EgressManager } from './egress.ts';
+import { EgressProfileStore } from './egress-profiles.ts';
 import { type FileStream, fileService, isRefusedPath } from './files.ts';
 import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
 import { log } from './log.ts';
 import { LoginManager } from './login.ts';
+import { mcpHostPattern } from './mcp-servers.ts';
 import { Notifier } from './notify.ts';
 import { MAX_FILE_BYTES } from './review/fs.ts';
 import { ReviewService } from './review/service.ts';
@@ -310,14 +317,15 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
 
   // The stores and the egress manager need each other. The manager makes the policy from
   // the rows of the stores, and each write to a store pushes the policy again. The hoisted
-  // function below lets the stores be built first.
+  // functions below let the stores be built first.
   const credentials = new CredentialStore(db, () => repushPolicy(), cfg.credentialSet);
   const apiKeys = new ApiKeyStore(db, () => repushPolicy());
-  const egress = new EgressManager(cfg, credentials, apiKeys, db);
+  const profiles = new EgressProfileStore(db, () => repushPolicy());
+  const egress = new EgressManager(cfg, credentials, apiKeys, db, () => egressBoxes());
   const notifier = new Notifier(db, cfg);
 
   /**
-   * Pushes the policy again after a credential or an API key changed.
+   * Pushes the policy again after a write that can change it.
    *
    * The push is best effort and not awaited, so the settings page does not
    * fail while the proxy restarts. The reconciler pushes the policy again
@@ -325,12 +333,32 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
    */
   function repushPolicy(): void {
     void egress.sync().catch((err: Error) => {
-      log.warn(
-        'could not push the egress policy after a credential or an API key changed; will retry',
-        {
-          error: err.message,
-        },
-      );
+      log.warn('could not push the egress policy after a change; will retry', {
+        error: err.message,
+      });
+    });
+  }
+
+  /**
+   * Lists the boxes that are not deleted, with the egress profile and the MCP
+   * hosts of each, for the egress policy. The MCP hosts are those of the
+   * current agent sets, so a removed server loses its host at once.
+   *
+   * @returns The boxes.
+   */
+  function egressBoxes(): EgressBoxInput[] {
+    const rows = db.prepare("SELECT * FROM boxes WHERE status != 'deleted'").all() as BoxRow[];
+    return rows.map((row) => {
+      const profile = profiles.forBox(row.owner, row.egress_profile_id);
+      const servers = agents.mcpSnapshot(row.owner, row.agent_set_id);
+      return {
+        id: row.id,
+        owner: row.owner,
+        token: row.proxy_token,
+        open: profile.open,
+        hosts: profile.hosts,
+        mcpHosts: servers.flatMap((server) => mcpHostPattern(server.url) ?? []),
+      };
     });
   }
   const logins = new LoginManager(credentials);
@@ -344,7 +372,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       return fetchRepo(dir, url, ref, row ? deliverableSecret(row) : null, keep);
     },
     (owner) => builtinSkills({ hasCredential: (id) => credentials.get(owner, id) !== undefined }),
-    (owner) => ({ keys: apiKeys.list(owner), allowedHosts: cfg.egressAllowedHosts }),
+    (owner) => ({ keys: apiKeys.list(owner) }),
   );
   // The closure lets the reconciler be built before the manager it reads.
   const tunnels = new TunnelReconciler(
@@ -356,7 +384,9 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     deploymentId(db),
     (owners) => manager.processReadings(owners),
   );
-  const manager = new BoxManager(db, cfg, egress, notifier, agents, (id) => tunnels.forBox(id));
+  const manager = new BoxManager(db, cfg, egress, notifier, agents, profiles, (id) =>
+    tunnels.forBox(id),
+  );
   // The manager finds the files of a box and starts its container when it is stopped.
   const review = new ReviewService(db, {
     execTarget: (id) => manager.execTarget(id),
@@ -652,6 +682,23 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return reply.code(204).send();
   });
 
+  app.put('/api/boxes/:id/egress-profile', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(boxEgressProfileBody, req.body);
+    return manager.setEgressProfile(id, body.egressProfile);
+  });
+
+  /** The targets that the egress profile of the box refused, from the memory of the proxy. */
+  app.get('/api/boxes/:id/denials', async (req): Promise<EgressDenial[]> => {
+    const { id } = req.params as { id: string };
+    manager.mustGet(id);
+    try {
+      return await egress.denials(id);
+    } catch (err) {
+      throw new HttpError(502, `The egress proxy did not answer: ${(err as Error).message}`);
+    }
+  });
+
   /**
    * Lists the threads of a box. The threads of a box share its container,
    * files and egress policy.
@@ -876,6 +923,8 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   app.delete('/api/agent-sets/:setId', async (req, reply) => {
     const { setId } = req.params as { setId: string };
     agents.deleteSet(userOf(req), setId);
+    // The set can hold MCP servers, whose hosts are in the policy of its boxes.
+    repushPolicy();
     return reply.code(204).send();
   });
 
@@ -894,13 +943,17 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   /** Creates an MCP server, or replaces the one already under that name. */
   app.put('/api/agent-sets/:setId/mcp-servers', async (req) => {
     const { setId } = req.params as { setId: string };
-    return agents.putMcpServer(userOf(req), setId, parseBody(agentMcpServerBody, req.body));
+    const set = agents.putMcpServer(userOf(req), setId, parseBody(agentMcpServerBody, req.body));
+    repushPolicy();
+    return set;
   });
 
   app.delete('/api/agent-sets/:setId/mcp-servers', async (req) => {
     const { setId } = req.params as { setId: string };
     const { name } = req.query as { name?: string };
-    return agents.deleteMcpServer(userOf(req), setId, name);
+    const set = agents.deleteMcpServer(userOf(req), setId, name);
+    repushPolicy();
+    return set;
   });
 
   /** Adds a repository to take skills from, and pulls it. */
@@ -927,6 +980,31 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const user = userOf(req);
     agents.getSet(user, setId);
     return agents.bundle(user, setId);
+  });
+
+  // --- Egress profiles ----------------------------------------------------------
+
+  app.get('/api/egress-profiles', async (req) => profiles.list(userOf(req)));
+
+  app.post('/api/egress-profiles', async (req, reply) => {
+    const body = parseBody(createEgressProfileBody, req.body);
+    return reply.code(201).send(profiles.create(userOf(req), body));
+  });
+
+  app.get('/api/egress-profiles/:profileId', async (req) => {
+    const { profileId } = req.params as { profileId: string };
+    return profiles.get(userOf(req), profileId);
+  });
+
+  app.patch('/api/egress-profiles/:profileId', async (req) => {
+    const { profileId } = req.params as { profileId: string };
+    return profiles.update(userOf(req), profileId, parseBody(updateEgressProfileBody, req.body));
+  });
+
+  app.delete('/api/egress-profiles/:profileId', async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    profiles.delete(userOf(req), profileId);
+    return reply.code(204).send();
   });
 
   // --- Credentials and settings ------------------------------------------------

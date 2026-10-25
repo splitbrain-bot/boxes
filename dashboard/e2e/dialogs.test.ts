@@ -105,6 +105,8 @@ test('the new-box form creates the box and its first thread in one request', asy
     expect(stub.boxCalls[0]).toEqual({
       name: 'second box',
       agentSet: null,
+      // The form preselects the default profile. The orchestrator makes its id.
+      egressProfile: expect.stringMatching(/^ep[0-9a-f]{10}$/),
       thread: {
         harness: 'codex',
         modeId: 'agent-full-access',

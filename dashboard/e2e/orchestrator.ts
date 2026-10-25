@@ -37,6 +37,7 @@ import type {
   CredentialId,
   CredentialStatus,
   CredentialSummary,
+  EgressDenial,
   HarnessId,
   ReviewAnnotation,
   ReviewFileResponse,
@@ -403,6 +404,8 @@ export interface TestOrchestrator {
   boxStops: string[];
   /** Every review mutation the browser made, in order. */
   reviewCalls: ReviewCall[];
+  /** The targets that the egress proxy refused, by box id. A box without an entry has no refused targets. */
+  denials: Map<string, EgressDenial[]>;
   /**
    * Adds a box, its directories, its threads and its container.
    *
@@ -1222,6 +1225,9 @@ export async function startOrchestrator(
 
   installHooks(app, state, calls);
   const logins = installLoginRuntime();
+  const denials = new Map<string, EgressDenial[]>();
+  // The test harness runs no egress proxy, so the refused targets come from the map.
+  app.egress.denials = async (boxId) => denials.get(boxId) ?? [];
 
   // As at boot, box creation fails until the egress policy exists.
   await app.egress.prepare();
@@ -1260,6 +1266,7 @@ export async function startOrchestrator(
     gateway,
     state,
     ...calls,
+    denials,
     terminalsOpen: (boxId) => app.manager.terminalCount(boxId),
     get terminalAnswer() {
       return docker.terminalAnswer;

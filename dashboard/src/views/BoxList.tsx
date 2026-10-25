@@ -1,4 +1,4 @@
-import { KeyRound, Plus, SlidersHorizontal } from 'lucide-react';
+import { KeyRound, Plus, Shield, SlidersHorizontal } from 'lucide-react';
 import { useEffect } from 'react';
 import { Link } from 'react-router';
 import { BoxCard } from '@/components/BoxCard';
@@ -35,6 +35,11 @@ export function BoxList() {
           <Button asChild size="sm" variant="ghost" aria-label="Agent configuration">
             <Link to="/agents">
               <SlidersHorizontal />
+            </Link>
+          </Button>
+          <Button asChild size="sm" variant="ghost" aria-label="Egress profiles">
+            <Link to="/egress">
+              <Shield />
             </Link>
           </Button>
           <Button asChild size="sm" variant="ghost" aria-label="Settings">

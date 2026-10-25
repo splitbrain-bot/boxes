@@ -72,9 +72,8 @@ Each server has a name, a URL, and a list of HTTP headers. The name must be lowe
 it can have at most 32 characters. The URL must use `https`, or `http` for a server without a secret. A server has at
 most 20 headers, and a header value can have at most 4096 characters.
 
-The agent reaches a server through the [egress proxy](egress.md), so the allowlist and the port rules of the proxy
-apply to the server. The orchestrator refuses a URL with a private IP address. How the agents get the servers is in
-[Agent communication](acp.md#mcp-servers).
+The agent reaches a server through the [egress proxy](egress.md), and the proxy always allows the host and the port of
+the server. The orchestrator refuses a URL with a private IP address.
 
 ### Secrets in headers
 

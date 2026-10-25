@@ -38,6 +38,8 @@ adapter's last advertised modes and config options (when one has answered), and 
 | POST | `/api/boxes/:id/start` | `BoxDetail` |
 | POST | `/api/boxes/:id/stop` | `BoxDetail` |
 | DELETE | `/api/boxes/:id` | 204 |
+| PUT | `/api/boxes/:id/egress-profile` | `BoxDetail` |
+| GET | `/api/boxes/:id/denials` | `EgressDenial[]` |
 
 `POST /api/boxes` accepts a `CreateBoxBody`:
 
@@ -45,12 +47,16 @@ adapter's last advertised modes and config options (when one has answered), and 
 {
   "name": "my-box",
   "agentSet": "set-id-or-null",
+  "egressProfile": "profile-id-or-null",
   "thread": { "harness": "claude", "modeId": "…", "config": { } }
 }
 ```
 
 Every [box](boxes.md) is created with one thread. `thread` selects its harness and its initial mode and config; absent,
-it is Claude on its defaults. `profile` is accepted but ignored.
+it is Claude on its defaults. `profile` is accepted but ignored. An unknown `agentSet` or `egressProfile` gets a 400.
+
+`PUT …/egress-profile` accepts `{ "egressProfile": "…" }`, or null for the default profile. `GET …/denials` answers the
+[refused hosts](egress-profiles.md#refused-hosts) from the proxy, and a 502 when the proxy does not answer.
 
 ## Threads
 
@@ -141,6 +147,19 @@ pull is not an error of the request: the set's `repos` list shows it. `POST …/
 
 The preview answers what a box that selects this [agent set](agent-sets.md) receives: the global set, with this set laid
 over it. Each skill in `skills` names the repository it comes from, or `null`.
+
+## Egress profiles
+
+| Method | Path | Answer |
+| --- | --- | --- |
+| GET | `/api/egress-profiles` | `EgressProfileSummary[]` |
+| POST | `/api/egress-profiles` | 201, `EgressProfileDetail` |
+| GET | `/api/egress-profiles/:profileId` | `EgressProfileDetail` |
+| PATCH | `/api/egress-profiles/:profileId` | `EgressProfileDetail` |
+| DELETE | `/api/egress-profiles/:profileId` | 204 |
+
+`POST` accepts `{ "name": "…", "open"?, "hosts"? }`, and a profile without `open` is closed. `PATCH` accepts
+`{ "name"?, "open"?, "hosts"? }` and leaves absent fields alone. A DELETE of the default profile gets a 400.
 
 ## Credentials
 

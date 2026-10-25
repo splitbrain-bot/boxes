@@ -8,6 +8,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -903,6 +905,298 @@ test('creating a box against an unknown set is refused before anything is built'
   // The check runs before the insert, so the table has no row.
   const rows = db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number };
   assert.equal(rows.n, 0);
+});
+
+/**
+ * Gives the egress profiles of the user over the API.
+ *
+ * @param headers The headers of the request, for a user in multi-user mode.
+ * @returns The id, the name, the default flag and the box count of each profile.
+ */
+async function listProfiles(
+  headers: Record<string, string> = {},
+): Promise<Array<{ id: string; name: string; isDefault: boolean; boxCount: number }>> {
+  return (await orchestrator.app.inject({ url: '/api/egress-profiles', headers })).json();
+}
+
+test('an egress profile is created, read, changed and deleted over the API', async () => {
+  const created = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/egress-profiles',
+    payload: { name: 'Work', hosts: ['GitHub.com', '*.npmjs.org'] },
+  });
+  assert.equal(created.statusCode, 201);
+  const work = created.json() as { id: string; open: boolean; hosts: string[] };
+  assert.equal(work.open, false);
+  assert.deepEqual(work.hosts, ['github.com', '*.npmjs.org']);
+
+  assert.deepEqual(
+    (await listProfiles()).map((p) => [p.name, p.isDefault]),
+    [
+      ['Default', true],
+      ['Work', false],
+    ],
+  );
+
+  const changed = await orchestrator.app.inject({
+    method: 'PATCH',
+    url: `/api/egress-profiles/${work.id}`,
+    payload: { open: true },
+  });
+  assert.equal(changed.statusCode, 200);
+  const read = await orchestrator.app.inject({ url: `/api/egress-profiles/${work.id}` });
+  assert.deepEqual((read.json() as { open: boolean; hosts: string[] }).hosts, [
+    'github.com',
+    '*.npmjs.org',
+  ]);
+  assert.equal((read.json() as { open: boolean }).open, true);
+
+  const bad = await orchestrator.app.inject({
+    method: 'PATCH',
+    url: `/api/egress-profiles/${work.id}`,
+    payload: { hosts: ['*'] },
+  });
+  assert.equal(bad.statusCode, 400);
+  assert.match((bad.json() as { error: string }).error, /bare \*/);
+
+  const deleted = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: `/api/egress-profiles/${work.id}`,
+  });
+  assert.equal(deleted.statusCode, 204);
+  const gone = await orchestrator.app.inject({ url: `/api/egress-profiles/${work.id}` });
+  assert.equal(gone.statusCode, 404);
+
+  const defaultId = (await listProfiles())[0]!.id;
+  const refused = await orchestrator.app.inject({
+    method: 'DELETE',
+    url: `/api/egress-profiles/${defaultId}`,
+  });
+  assert.equal(refused.statusCode, 400);
+});
+
+test('creating a box with an unknown egress profile is refused before anything is built', async () => {
+  const res = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/boxes',
+    payload: { name: 'a box', egressProfile: 'epnope' },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match((res.json() as { error: string }).error, /Unknown egress profile/);
+  const rows = db.prepare('SELECT COUNT(*) AS n FROM boxes').get() as { n: number };
+  assert.equal(rows.n, 0);
+});
+
+test('a box changes its egress profile, and moves to the default when its profile is deleted', async () => {
+  insertBox('abc123');
+  fakeDocker();
+  const work = (
+    await orchestrator.app.inject({
+      method: 'POST',
+      url: '/api/egress-profiles',
+      payload: { name: 'Work' },
+    })
+  ).json() as { id: string };
+  const defaultId = (await listProfiles())[0]!.id;
+
+  // A box without a selected profile uses the default profile.
+  const before = await orchestrator.app.inject({ url: '/api/boxes/abc123' });
+  assert.deepEqual(
+    [before.json().egressProfileId, before.json().egressProfileName],
+    [defaultId, 'Default'],
+  );
+
+  const selected = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/boxes/abc123/egress-profile',
+    payload: { egressProfile: work.id },
+  });
+  assert.equal(selected.statusCode, 200);
+  assert.deepEqual(
+    [selected.json().egressProfileId, selected.json().egressProfileName],
+    [work.id, 'Work'],
+  );
+  assert.deepEqual(
+    (await listProfiles()).map((p) => [p.name, p.boxCount]),
+    [
+      ['Default', 0],
+      ['Work', 1],
+    ],
+  );
+
+  const unknown = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/boxes/abc123/egress-profile',
+    payload: { egressProfile: 'epnope' },
+  });
+  assert.equal(unknown.statusCode, 400);
+  const missingBox = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/boxes/nope/egress-profile',
+    payload: { egressProfile: null },
+  });
+  assert.equal(missingBox.statusCode, 404);
+
+  await orchestrator.app.inject({ method: 'DELETE', url: `/api/egress-profiles/${work.id}` });
+  const after = await orchestrator.app.inject({ url: '/api/boxes/abc123' });
+  assert.deepEqual(
+    [after.json().egressProfileId, after.json().egressProfileName],
+    [defaultId, 'Default'],
+  );
+  assert.deepEqual(
+    (await listProfiles()).map((p) => [p.name, p.boxCount]),
+    [['Default', 1]],
+  );
+});
+
+/** The fields of a pushed policy that the tests read. */
+interface PushedPolicy {
+  /** The policy of each box. */
+  boxes: Array<{ box: string; open: boolean; hosts: string[] }>;
+}
+
+/**
+ * Builds the app of the test again with a fake egress proxy on its control
+ * channel. The fake records each policy push and answers each denials read.
+ *
+ * @param denials The answer to a read of the refused hosts of a box.
+ * @returns The bodies of the policy pushes and the URLs of the denials reads.
+ */
+async function withFakeProxy(
+  denials: unknown[],
+): Promise<{ policies: PushedPolicy[]; reads: string[] }> {
+  const policies: PushedPolicy[] = [];
+  const reads: string[] = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (req.url?.startsWith('/denials')) {
+        reads.push(req.url);
+        res.end(JSON.stringify(denials));
+        return;
+      }
+      policies.push(JSON.parse(body));
+      res.end(
+        JSON.stringify({
+          applied: true,
+          policyHash: 'x',
+          boxCount: 0,
+          credentialIds: [],
+          denials: {},
+          uptimeSeconds: 1,
+        }),
+      );
+    });
+  });
+  const port = await new Promise<number>((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+  });
+  await orchestrator.app.close();
+  orchestrator = buildApp(
+    loadConfig({
+      ...process.env,
+      DATA_DIR: orchestrator.cfg.DATA_DIR,
+      EGRESS_CONTROL_URL: `http://127.0.0.1:${port}`,
+    }),
+    db,
+  );
+  orchestrator.app.addHook('onClose', async () => {
+    server.close();
+  });
+  await orchestrator.egress.prepare();
+  return { policies, reads };
+}
+
+test('a new egress profile of a box reaches the proxy without a restart', async () => {
+  insertBox('abc123');
+  fakeDocker();
+  const { policies } = await withFakeProxy([]);
+  const work = (
+    await orchestrator.app.inject({
+      method: 'POST',
+      url: '/api/egress-profiles',
+      payload: { name: 'Work' },
+    })
+  ).json() as { id: string };
+
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/boxes/abc123/egress-profile',
+    payload: { egressProfile: work.id },
+  });
+
+  await untilTrue('the push of the closed profile', () =>
+    policies.some((p) => p.boxes.some((b) => b.box === 'abc123' && !b.open)),
+  );
+});
+
+test('a removed MCP server leaves the policy, also before the next start of the box', async () => {
+  insertBox('abc123');
+  // The adapters still have the server from the last start of the box.
+  db.prepare("UPDATE boxes SET mcp_servers = ? WHERE id = 'abc123'").run(
+    JSON.stringify([{ name: 'docs', url: 'https://docs.example.com/mcp', headers: [] }]),
+  );
+  const { policies } = await withFakeProxy([]);
+  const hostsOfBox = (): string[] | undefined =>
+    policies.at(-1)?.boxes.find((b) => b.box === 'abc123')?.hosts;
+
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/agent-sets/global/mcp-servers',
+    payload: { name: 'docs', url: 'https://docs.example.com/mcp', headers: [] },
+  });
+  await untilTrue(
+    'the push with the server',
+    () => hostsOfBox()?.includes('docs.example.com:443') === true,
+  );
+
+  await orchestrator.app.inject({
+    method: 'DELETE',
+    url: '/api/agent-sets/global/mcp-servers?name=docs',
+  });
+  await untilTrue(
+    'the push without the server',
+    () => hostsOfBox()?.includes('docs.example.com:443') === false,
+  );
+});
+
+test('the refused hosts of a box come from the proxy', async () => {
+  insertBox('abc123');
+  const denial = {
+    host: 'evil.example.com',
+    port: 443,
+    category: 'allowlist',
+    count: 2,
+    lastAt: 1,
+  };
+  const { reads } = await withFakeProxy([denial]);
+
+  const res = await orchestrator.app.inject({ url: '/api/boxes/abc123/denials' });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), [denial]);
+  assert.deepEqual(reads, ['/denials?box=abc123']);
+
+  const missing = await orchestrator.app.inject({ url: '/api/boxes/nope/denials' });
+  assert.equal(missing.statusCode, 404);
+});
+
+test('the refused hosts of a box are a 502 when the proxy does not answer', async () => {
+  insertBox('abc123');
+  await orchestrator.app.close();
+  orchestrator = buildApp(
+    loadConfig({
+      ...process.env,
+      DATA_DIR: orchestrator.cfg.DATA_DIR,
+      EGRESS_CONTROL_URL: 'http://127.0.0.1:1',
+    }),
+    db,
+  );
+
+  const res = await orchestrator.app.inject({ url: '/api/boxes/abc123/denials' });
+  assert.equal(res.statusCode, 502);
+  assert.match((res.json() as { error: string }).error, /did not answer/);
 });
 
 test('starting a container to reach into installs the current configuration first', async () => {
@@ -1809,6 +2103,69 @@ test('each user has their own credentials, settings and agent sets', async () =>
     headers: as('bob'),
   });
   assert.equal(foreignDelete.statusCode, 404);
+});
+
+test('each user has their own egress profiles, and a box cannot use the profile of another user', async () => {
+  await multiUser();
+  insertBox('abc123', 'bob');
+  const work = (
+    await orchestrator.app.inject({
+      method: 'POST',
+      url: '/api/egress-profiles',
+      headers: as('alice'),
+      payload: { name: 'Work' },
+    })
+  ).json() as { id: string };
+
+  assert.deepEqual(
+    (await listProfiles(as('bob'))).map((p) => p.name),
+    ['Default'],
+  );
+  for (const [method, payload] of [
+    ['GET', undefined],
+    ['PATCH', { name: 'Mine' }],
+    ['DELETE', undefined],
+  ] as const) {
+    const res = await orchestrator.app.inject({
+      method,
+      url: `/api/egress-profiles/${work.id}`,
+      headers: as('bob'),
+      payload,
+    });
+    assert.equal(res.statusCode, 404, method);
+  }
+
+  const created = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/boxes',
+    headers: as('bob'),
+    payload: { name: 'a box', egressProfile: work.id },
+  });
+  assert.equal(created.statusCode, 400);
+  assert.match((created.json() as { error: string }).error, /Unknown egress profile/);
+
+  const selected = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/boxes/abc123/egress-profile',
+    headers: as('bob'),
+    payload: { egressProfile: work.id },
+  });
+  assert.equal(selected.statusCode, 400);
+  const foreignBox = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/boxes/abc123/egress-profile',
+    headers: as('alice'),
+    payload: { egressProfile: work.id },
+  });
+  assert.equal(foreignBox.statusCode, 404);
+  assert.equal(
+    (
+      db.prepare('SELECT COUNT(*) AS n FROM boxes WHERE egress_profile_id IS NOT NULL').get() as {
+        n: number;
+      }
+    ).n,
+    0,
+  );
 });
 
 test('in single user mode every box is listed, whatever its owner', async () => {

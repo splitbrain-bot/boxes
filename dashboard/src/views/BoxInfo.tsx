@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { Link, useNavigate, useParams } from 'react-router';
 import { BackLink } from '@/components/BackLink';
 import { boxBadges } from '@/components/BoxCard';
 import { BoxWorkList } from '@/components/BoxWorkList';
@@ -9,10 +9,17 @@ import { Notice } from '@/components/Notice';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { useUp } from '@/hooks/use-up';
 import { pollWhileVisible } from '@/lib/poll';
 import { shortSize } from '@/lib/rough';
-import type { BoxDetail } from '../../../shared/types.ts';
+import type { BoxDetail, EgressDenial, EgressProfileSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { refresh } from '../stores/boxes.ts';
 
@@ -49,14 +56,28 @@ export function BoxInfo() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /** The egress profiles, for the select. Null while loading or when the request failed. */
+  const [profiles, setProfiles] = useState<EgressProfileSummary[] | null>(null);
+  /** The targets that the egress profile refused. Null while loading or when the request failed. */
+  const [denials, setDenials] = useState<EgressDenial[] | null>(null);
+  /** The message of the failed denials request, or null. */
+  const [denialsError, setDenialsError] = useState<string | null>(null);
 
-  /** Reads the box. */
+  /** Reads the box and the targets that its egress profile refused. */
   const load = useCallback(async (): Promise<void> => {
     try {
       setBox(await api.getBox(id));
       setError(null);
     } catch (err) {
       setError((err as Error).message);
+      return;
+    }
+    try {
+      setDenials(await api.boxDenials(id));
+      setDenialsError(null);
+    } catch (err) {
+      setDenials(null);
+      setDenialsError((err as Error).message);
     }
   }, [id]);
 
@@ -64,6 +85,16 @@ export function BoxInfo() {
     void load();
     return pollWhileVisible(() => void load(), POLL_MS);
   }, [load]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setProfiles(await api.listEgressProfiles());
+      } catch {
+        // Without the list, the page shows the name of the profile without the select.
+      }
+    })();
+  }, []);
 
   /** Runs one action on the box, then reloads the box and the box list. */
   const act = async (fn: () => Promise<unknown>): Promise<void> => {
@@ -155,6 +186,65 @@ export function BoxInfo() {
               <Meta label="Measured" value={new Date(box.diskMeasuredAt).toLocaleString()} />
             )}
           </dl>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Egress</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {profiles ? (
+            <div className="flex flex-col gap-2">
+              <Select
+                value={box.egressProfileId}
+                disabled={busy}
+                onValueChange={(value) => void act(() => api.setBoxEgressProfile(id, value))}
+              >
+                <SelectTrigger aria-label="Egress profile" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {profiles.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                A change applies to the next connection of the box.{' '}
+                <Link to="/egress" className="underline hover:text-foreground">
+                  Edit the profiles
+                </Link>
+                .
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm">{box.egressProfileName}</p>
+          )}
+
+          <div className="flex flex-col gap-1">
+            <span className="text-xs text-muted-foreground">Refused hosts</span>
+            {denialsError ? (
+              <Notice className="rounded-md border px-3 py-2">{denialsError}</Notice>
+            ) : null}
+            {denials?.length === 0 ? <p className="text-sm text-muted-foreground">None.</p> : null}
+            {denials && denials.length > 0 ? (
+              <ul className="flex flex-col gap-1 text-sm">
+                {denials.map((d) => (
+                  <li key={`${d.host}:${d.port}`} className="flex items-baseline gap-2">
+                    <span className="truncate font-mono text-xs">
+                      {d.host.includes(':') ? `[${d.host}]` : d.host}:{d.port}
+                    </span>
+                    <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
+                      {d.count}× · {new Date(d.lastAt).toLocaleString()}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
         </CardContent>
       </Card>
 

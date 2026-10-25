@@ -652,15 +652,17 @@ export class KubernetesRuntime implements Runtime {
   }
 
   /**
-   * Gives the address of the egress proxy at the cluster IP of its Service.
+   * Gives the proxy URL of a box, with the address of the egress proxy at the cluster IP of its Service.
    *
-   * @returns The URL of the proxy.
+   * @param boxId The id of the box.
+   * @param token The token of the box at the proxy.
+   * @returns The URL of the proxy, with the box id and the token.
    * @throws Error before prepare().
    */
-  proxyUrl(): string {
+  proxyUrl(boxId: string, token: string): string {
     if (!this.proxy) throw new Error('The Kubernetes runtime is not prepared');
     const host = this.proxy.ip.includes(':') ? `[${this.proxy.ip}]` : this.proxy.ip;
-    return `http://${host}:${this.cfg.EGRESS_PROXY_PORT}`;
+    return `http://${boxId}:${token}@${host}:${this.cfg.EGRESS_PROXY_PORT}`;
   }
 
   /**

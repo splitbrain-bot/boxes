@@ -3,23 +3,24 @@
 Boxes creates a private Docker network for each [box](boxes.md), and creates it as an internal network. Such a network
 has no route to the outside. The egress proxy is attached to it, and is the only way out.
 
-The proxy does two things. It controls which hosts the tools in a box can connect to. It also replaces the credential
-placeholders in the requests that go to those hosts. A real credential thus never enters a box container.
+The proxy does two things. It controls which hosts the tools in a box can connect to, with the
+[egress profile](egress-profiles.md) of the box. It also replaces the credential placeholders in the requests that go
+to those hosts. A real credential thus never enters a box container.
 
 The proxy keeps its rules in memory. It has no configuration file and no database. The orchestrator sends the rules to
-the proxy at start, and again after each change to a credential or a setting. Only the Compose network `boxes_default`
-can connect to this control channel. The orchestrator and the proxy share that network, and the box networks have no
-route to it.
+the proxy at start, and again after each change to a credential, an API key, a profile or a box. Only the Compose
+network `boxes_default` can connect to this control channel. The orchestrator and the proxy share that network, and the
+box networks have no route to it.
 
 ```mermaid
 flowchart TB
     orch["orchestrator"]
 
     subgraph bn["box network (internal)"]
-        box["box container<br>HTTP_PROXY, HTTPS_PROXY<br>credential placeholders"]
+        box["box container<br>HTTP_PROXY, HTTPS_PROXY with the box token<br>credential placeholders"]
     end
 
-    proxy["egress proxy<br>allowlist, credentials, CA"]
+    proxy["egress proxy<br>box policies, credentials, CA"]
     net(["the internet"])
 
     orch -- "rules and CA<br>on boxes_default" --> proxy
@@ -30,30 +31,10 @@ flowchart TB
 ## Network access
 
 The orchestrator sets `HTTP_PROXY` and `HTTPS_PROXY` in the environment of each box container. Tools that use these
-variables connect through the proxy. The proxy allows port 80 and port 443, and other ports only where the
-[allowlist](#allowlist) names them. All other connections fail, because the box network has no other route. An agent
-thus cannot use SSH, and cannot connect to a database on a remote host. The proxy also closes a connection that carries
-no traffic for 120 seconds.
-
-## Allowlist
-
-`EGRESS_ALLOWED_HOSTS` is an orchestrator environment variable. It holds one allowlist for the full deployment. Separate
-the host names with commas or spaces:
-
-```sh
-EGRESS_ALLOWED_HOSTS=github.com, *.npmjs.org, cache.nixos.org, pypi.org
-```
-
-A name that starts with `*.` includes one level of subdomains. `*.npmjs.org` includes `registry.npmjs.org`. It does not
-include `npmjs.org` or `a.b.npmjs.org`. A name with a port, such as `mcp.example.com:8443`, allows only that port. A
-name without a port allows the ports 80 and 443. The hosts of the [other API keys](credentials.md#other-api-keys) use
-the same rules.
-
-The variable is empty by default. The proxy then allows all public hosts. The proxy always refuses a private address,
-also when a public host name has a private address.
-
-The proxy always allows the hosts of the saved credentials, and the hosts that the related tools must connect to. A
-short allowlist thus cannot prevent an agent from reaching its API, or `git` from reaching its repository.
+variables connect through the proxy. The [egress profile](egress-profiles.md) of the box decides which hosts and ports
+the proxy allows. All other connections fail, because the box network has no other route. An agent thus cannot use SSH,
+and cannot connect to a database on a remote host. The proxy always refuses a private address, also when a public host
+name has a private address. The proxy closes a connection that carries no traffic for 120 seconds.
 
 ## Credentials
 
@@ -72,8 +53,7 @@ not only to the credential header.
 
 The proxy does not intercept any other host. It only sends that traffic through, and does not read it.
 
-Each credential is valid for a fixed set of hosts. When a credential is set, its hosts are added to the list of allowed
-hosts automatically.
+Each credential is valid for a fixed set of hosts:
 
 | Credential | Valid hosts |
 | --- | --- |
@@ -123,7 +103,7 @@ flowchart TB
         engine["<b>interception engine</b><br>loopback only, high port"]
         upstream["<b>upstream tunnel</b><br>loopback only, high port"]
         
-        policy[("policy<br>allowlist, credentials, CA")]
+        policy[("policy<br>box policies, credentials, CA")]
         
         creds{{"credential check"}}
         vetting1{{"vetting"}}
@@ -135,8 +115,8 @@ flowchart TB
 
     orch --> control
     control --> policy
-    policy -. "allowlist" .-> vetting1
-    policy -. "allowlist" .-> vetting2
+    policy -. "box policy" .-> vetting1
+    policy -. "credential hosts" .-> vetting2
     policy -. "credentials" .-> creds
     policy -. "credentials, CA" .-> engine
 
@@ -152,6 +132,19 @@ flowchart TB
     
 ```
 
+### Box identity
+
+The orchestrator gives each box a random token, and puts the box id and the token into the proxy URL of the box as the
+user and the password, for example `http://<box id>:<token>@proxy:3128`. A client sends them in the
+`Proxy-Authorization` header with the Basic scheme. The front door finds the box from the token, and the box id in the
+header must match. A request without a valid header gets `407 Proxy Authentication Required` with
+`Proxy-Authenticate: Basic realm="boxes"`, and the proxy counts it under the category `proxy-auth`. Some clients, for
+example git and Chromium, send the header only after a 407. `box-image/setup.d/20-browser` writes the user and the
+password into their own fields of the browser config, because Chromium ignores them in the URL.
+
+The front door removes `Proxy-Authorization` from a plain HTTP request, and the handoff to the engine replays only the
+CONNECT line and the `Host` header. The token thus never leaves the proxy.
+
 ### Vetting
 
 Vetting is one function, `vetTarget` in `forward.ts`. Each forwarder calls it before it connects, so no socket leaves
@@ -163,6 +156,10 @@ An intercepted host passes vetting two times, because that path opens two connec
 to the host; it connects to the engine on the loopback, and the address that it vetted is of no more use. The engine
 then makes its own request, and that request leaves through the upstream tunnel. The tunnel vets before it connects, as
 every forwarder does.
+
+The front door vets a target against the policy of the box. The connections of the engine have no box identity, so the
+upstream tunnel vets them against a closed policy with the hosts of all credentials. The engine connects only to
+credential hosts, and the front door has already vetted the target against the policy of the box.
 
 The front door and the upstream tunnel are the same server code. Only the front door hands connections to the engine.
 The tunnel never intercepts, so the connections of the engine cannot loop back into it.
@@ -181,8 +178,13 @@ has no TLS for the engine to terminate, so the proxy would send either the real 
 plaintext. On a CONNECT to another port, the front door hands the connection to the engine when a host of the credential
 names that port. The engine connects upstream on the same port, so the upstream tunnel checks the port again.
 
-The front door forwards nothing before the first policy push arrives. No policy is a denial, although an empty allowlist
-means "allow all public".
+The front door forwards nothing before the first policy push arrives.
+
+A refusal by the profile of the box has the category `allowlist` or `port`. The front door answers it with the status
+`403 Not allowed by the egress profile` and a body that names the target, and writes the box id, the target and the
+category to the log. `RefusedTargets` in `refused.ts` holds the
+[refused hosts](egress-profiles.md#refused-hosts), and drops the list of a box when a new policy does not have the box.
+The orchestrator reads the list on the control channel with `GET /denials?box=<id>`.
 
 ### Policy
 
@@ -227,7 +229,9 @@ The orchestrator side (`orchestrator/src/egress.ts`) generates the CA and that t
 database. A placeholder is generated when a credential is stored, and is kept with it. A restarted proxy has lost the
 policy, so the reconciler pushes it again every minute.
 
-The policy holds the credentials and the API keys of every [user](users.md), so one host can have one credential of
+`composePolicy` builds one policy for each box that is not deleted, with its id, its token, the mode of its profile and
+its hosts. The hosts are those of the profile, the credentials and the API keys of the owner, and the MCP servers of the
+box. The policy holds the credentials and the API keys of every [user](users.md), so one host can have one credential of
 each user. The proxy selects the credential whose placeholder is in the request. In the policy, the id of a credential
 has its owner as a prefix, for example `alice/claude`, because the ids must be unique. A credential of the empty user
 has no prefix.

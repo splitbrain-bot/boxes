@@ -1,12 +1,12 @@
 /** Pure functions over the egress policy. */
 
-import { createHash } from 'node:crypto';
-import { DEFAULT_PORTS, hostMatches, splitHostPattern } from '../../shared/hosts.ts';
-import type { EgressCredential, EgressPolicy } from '../../shared/types.ts';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { DEFAULT_PORTS, hostMatches, hostPatternProblem } from '../../shared/hosts.ts';
+import type { EgressBoxPolicy, EgressCredential, EgressPolicy } from '../../shared/types.ts';
 
 /** The policy of a proxy before the first push. It is frozen, because all callers share the same object. */
 export const EMPTY_POLICY: EgressPolicy = Object.freeze({
-  allowedHosts: Object.freeze([] as string[]),
+  boxes: Object.freeze([] as EgressBoxPolicy[]),
   ca: null,
   credentials: Object.freeze([] as EgressCredential[]),
 }) as EgressPolicy;
@@ -24,20 +24,68 @@ function hostMatchesAny(host: string, port: number, patterns: readonly string[])
 }
 
 /**
- * Checks if the policy allows a host on a port. An empty allowlist allows
+ * Checks if the policy of a box allows a host on a port. An open box can reach
  * every host on the ports in {@link DEFAULT_PORTS}.
  *
  * @param host The hostname or IP literal.
  * @param port The destination port.
- * @param policy The policy to check against.
- * @returns True when the allowlist or the hosts of a credential match the host and the port.
+ * @param box The policy of the box.
+ * @returns True when the box is open and the port is a default port, or when a host pattern of the box matches.
  */
-export function hostAllowed(host: string, port: number, policy: EgressPolicy): boolean {
-  if (policy.allowedHosts.length === 0 && DEFAULT_PORTS.has(port)) return true;
-  if (hostMatchesAny(host, port, policy.allowedHosts)) return true;
-  // The hosts of a credential are always allowed, so a narrow allowlist cannot
-  // cut off the traffic that the proxy authenticates.
-  return policy.credentials.some((c) => hostMatchesAny(host, port, c.hosts));
+export function hostAllowed(host: string, port: number, box: EgressBoxPolicy): boolean {
+  if (box.open && DEFAULT_PORTS.has(port)) return true;
+  return hostMatchesAny(host, port, box.hosts);
+}
+
+/**
+ * Makes the policy for the connections of the interception engine, which
+ * have no box identity. The policy is closed and allows the hosts of all
+ * credentials, because the front door has already vetted each target against
+ * the policy of its box.
+ *
+ * @param policy The policy of the proxy.
+ * @returns The policy for the upstream tunnel.
+ */
+export function upstreamBoxPolicy(policy: EgressPolicy): EgressBoxPolicy {
+  return { box: '', token: '', open: false, hosts: injectionPatterns(policy) };
+}
+
+/**
+ * Finds the box that a Proxy-Authorization header identifies. The header uses
+ * the Basic scheme, with the box id as the user and the token of the box as
+ * the password.
+ *
+ * @param header The value of the Proxy-Authorization header, or undefined when the request has none.
+ * @param policy The policy that holds the boxes.
+ * @returns The policy of the box, or null when the header is missing or bad, or names no box of the policy.
+ */
+export function boxFromAuthorization(
+  header: string | undefined,
+  policy: EgressPolicy,
+): EgressBoxPolicy | null {
+  const encoded = /^\s*basic\s+([A-Za-z0-9+/=]+)\s*$/i.exec(header ?? '')?.[1];
+  if (!encoded) return null;
+  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  const colon = decoded.indexOf(':');
+  if (colon === -1) return null;
+  const id = decoded.slice(0, colon);
+  const token = decoded.slice(colon + 1);
+  if (token === '') return null;
+  const box = policy.boxes.find((b) => tokensMatch(b.token, token));
+  return box !== undefined && box.box === id ? box : null;
+}
+
+/**
+ * Compares two tokens in constant time.
+ *
+ * @param a The first token.
+ * @param b The second token.
+ * @returns True when the tokens are equal. Tokens of different lengths do not match.
+ */
+export function tokensMatch(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 /**
@@ -202,7 +250,14 @@ export function decideCredentials(
  */
 export function policyHash(policy: EgressPolicy): string {
   const canonical = JSON.stringify({
-    allowedHosts: [...policy.allowedHosts].map((h) => h.toLowerCase()).sort(),
+    boxes: [...policy.boxes]
+      .map((b) => ({
+        box: b.box,
+        token: createHash('sha256').update(b.token).digest('hex'),
+        open: b.open,
+        hosts: [...b.hosts].map((h) => h.toLowerCase()).sort(),
+      }))
+      .sort((a, b) => a.box.localeCompare(b.box)),
     ca: policy.ca ? createHash('sha256').update(policy.ca.cert).digest('hex') : null,
     credentials: [...policy.credentials]
       .map((c) => ({
@@ -239,20 +294,28 @@ export function parsePolicy(input: unknown): EgressPolicy {
     });
   };
 
-  const checkPort = (pattern: string, field: string): void => {
-    const { port } = splitHostPattern(pattern);
-    if (port !== null && (port < 1 || port > 65535))
-      fail(`${field} entry ${pattern} has no valid port`);
-  };
-
-  const allowedHosts = stringArray(raw.allowedHosts ?? [], 'allowedHosts');
-  for (const pattern of allowedHosts) {
-    if (pattern === '*') return fail('a bare * allowlist entry would allow everything');
-    if (pattern.includes('*') && !pattern.startsWith('*.')) {
-      return fail(`allowlist entry ${pattern} may only use a leading *. wildcard`);
+  const rawBoxes = raw.boxes ?? [];
+  if (!Array.isArray(rawBoxes)) return fail('boxes must be an array');
+  const tokens = new Set<string>();
+  const boxes = rawBoxes.map((entry, i): EgressBoxPolicy => {
+    if (typeof entry !== 'object' || entry === null) return fail(`box ${i} is not an object`);
+    const b = entry as Record<string, unknown>;
+    const box = b.box;
+    const token = b.token;
+    if (typeof box !== 'string' || !box || box.includes(':')) {
+      return fail(`box ${i} needs an id without a colon`);
     }
-    checkPort(pattern, 'allowlist');
-  }
+    if (typeof token !== 'string' || !token) return fail(`box ${box} needs a token`);
+    if (tokens.has(token)) return fail(`box ${box} has the token of another box`);
+    tokens.add(token);
+    if (typeof b.open !== 'boolean') return fail(`box ${box} needs the open flag`);
+    const hosts = stringArray(b.hosts, `box ${box} hosts`).map((h) => h.toLowerCase());
+    for (const pattern of hosts) {
+      const problem = hostPatternProblem(pattern);
+      if (problem !== null) return fail(`box ${box} hosts: ${problem}`);
+    }
+    return { box, token, open: b.open, hosts };
+  });
 
   let ca: EgressPolicy['ca'] = null;
   const rawCa = raw.ca;
@@ -284,7 +347,10 @@ export function parsePolicy(input: unknown): EgressPolicy {
     }
     const hosts = stringArray(c.hosts, `credential ${id} hosts`);
     if (hosts.length === 0) return fail(`credential ${id} needs at least one host`);
-    for (const host of hosts) checkPort(host, `credential ${id} hosts`);
+    for (const host of hosts) {
+      const problem = hostPatternProblem(host.toLowerCase());
+      if (problem !== null) return fail(`credential ${id} hosts: ${problem}`);
+    }
     const headers = stringArray(c.headers, `credential ${id} headers`).map((h) => h.toLowerCase());
     return { id, hosts, headers, placeholder, secret };
   });
@@ -292,5 +358,5 @@ export function parsePolicy(input: unknown): EgressPolicy {
   if (credentials.length > 0 && ca === null) {
     return fail('credentials cannot be translated without a CA to intercept with');
   }
-  return { allowedHosts, ca, credentials };
+  return { boxes, ca, credentials };
 }

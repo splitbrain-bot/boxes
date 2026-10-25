@@ -437,6 +437,10 @@ export interface BoxDetail extends BoxSummary {
    * detail has this field.
    */
   boxWork: BoxWork[];
+  /** The id of the egress profile that the box uses. It is the default profile when the user selected none. */
+  egressProfileId: string;
+  /** The current name of the egress profile, for the UI. */
+  egressProfileName: string;
 }
 
 /**
@@ -487,6 +491,8 @@ export interface CreateBoxBody {
    * the global set only.
    */
   agentSet?: string | null;
+  /** The id of the egress profile of the box. Absent or null means the default profile of the user. */
+  egressProfile?: string | null;
   /**
    * The options of the first thread of the box. The orchestrator creates each box with one thread. Absent means
    * Claude with its defaults.
@@ -673,8 +679,7 @@ export interface EgressCredential {
   id: string;
   /**
    * The hostnames for which the proxy intercepts TLS to swap in this
-   * credential. The grammar is the same as for the allowlist: exact names and
-   * wildcards for one label.
+   * credential. The grammar is the same as for the hosts of a box.
    */
   hosts: string[];
   /**
@@ -693,15 +698,30 @@ export interface EgressCredential {
  * has no configuration until the orchestrator pushes it.
  */
 export interface EgressPolicy {
-  /**
-   * The hostname patterns that an agent can reach through the proxy. The proxy also allows the hosts of each
-   * credential. Empty means every public host.
-   */
-  allowedHosts: string[];
+  /** The policy of each live box. */
+  boxes: EgressBoxPolicy[];
   /** The `key` and the `cert` of the CA from which the proxy makes leaf certificates for interception, or null. */
   ca: { key: string; cert: string } | null;
   /** The credentials that the proxy swaps in. Empty means that the proxy intercepts nothing. */
   credentials: EgressCredential[];
+}
+
+/**
+ * The hosts that one box can reach. The proxy identifies the box from the user
+ * and the password in its proxy URL.
+ */
+export interface EgressBoxPolicy {
+  /** The id of the box. It is the user in the proxy URL. */
+  box: string;
+  /** The token of the box. It is the password in the proxy URL. */
+  token: string;
+  /** True when the box can reach every public host on the ports 80 and 443. */
+  open: boolean;
+  /**
+   * The host patterns that the box can reach in both modes. A pattern is an
+   * exact name or a wildcard for one label, with an optional port.
+   */
+  hosts: string[];
 }
 
 /** The status that the proxy reports on the control channel. It holds no secret. */
@@ -710,8 +730,8 @@ export interface EgressStatus {
   applied: boolean;
   /** The fingerprint of the applied policy. */
   policyHash: string;
-  /** The number of entries in the applied allowlist. 0 means that the allowlist is off. */
-  allowedHostCount: number;
+  /** The number of boxes in the applied policy. */
+  boxCount: number;
   /** The ids of the credentials that the proxy swaps in. */
   credentialIds: string[];
   /** Denials since the proxy booted, counted by category. */
@@ -724,14 +744,82 @@ export interface EgressStatus {
 export interface EgressHealth {
   /** True when the proxy applied the last push of the composed policy. */
   inSync: boolean;
-  /** True when an allowlist is configured. */
-  allowlistActive: boolean;
   /** The ids of the credentials that the proxy swaps in, without the values. */
   credentialIds: string[];
   /** Denials the proxy has counted since it booted, by category. */
   denials: Record<string, number>;
   /** The reason for the failure of the last push, or null. */
   error: string | null;
+}
+
+/**
+ * One target that the egress proxy refused for a box, because the egress
+ * profile of the box does not allow it.
+ */
+export interface EgressDenial {
+  /** The hostname or the IP literal of the target. */
+  host: string;
+  /** The port of the target. */
+  port: number;
+  /**
+   * The denial category. It is allowlist for a host that the profile does not allow on port 80 or 443, and
+   * port for another port that no pattern of the profile names.
+   */
+  category: string;
+  /** The number of refused attempts of the target while it is in the list of the box. */
+  count: number;
+  /** The time of the last refused attempt, in epoch milliseconds. */
+  lastAt: number;
+}
+
+/** An egress profile as the list endpoint reports it, without the hosts. */
+export interface EgressProfileSummary {
+  /** The id of the profile. */
+  id: string;
+  /** The name the user gave the profile. */
+  name: string;
+  /** True for the one profile that a box without a selected profile uses. It cannot be deleted. */
+  isDefault: boolean;
+  /** True for the open mode, where a box can reach every public host on the ports 80 and 443. */
+  open: boolean;
+  /** The number of live boxes that use the profile. */
+  boxCount: number;
+  /** The creation time of the profile, in epoch milliseconds. */
+  createdAt: number;
+  /** The time of the last change to the profile, in epoch milliseconds. */
+  updatedAt: number;
+}
+
+/** An egress profile with its hosts, as the editor loads it. */
+export interface EgressProfileDetail extends EgressProfileSummary {
+  /** The host patterns that a box with this profile can always reach. */
+  hosts: string[];
+}
+
+/** Body of a create-profile request. */
+export interface CreateEgressProfileBody {
+  /** The name of the new profile. */
+  name: string;
+  /** The mode of the new profile. Absent means the closed mode. */
+  open?: boolean;
+  /** The host patterns of the new profile. Absent means none. */
+  hosts?: string[];
+}
+
+/** Body of a profile update. An absent field stays unchanged. */
+export interface UpdateEgressProfileBody {
+  /** The new name of the profile. */
+  name?: string;
+  /** The new mode of the profile. */
+  open?: boolean;
+  /** The new host patterns of the profile. */
+  hosts?: string[];
+}
+
+/** Body of a request that selects the egress profile of a box. */
+export interface BoxEgressProfileBody {
+  /** The id of the profile, or null for the default profile of the user. */
+  egressProfile: string | null;
 }
 
 /** The git status of a file, as the review tree colours it. */

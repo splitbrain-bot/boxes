@@ -221,8 +221,11 @@ beforeEach(() => {
 });
 
 describe('the proxy', () => {
-  it('is reached at the cluster IP of its Service', async () => {
-    assert.equal((await kubernetesRuntime()).proxyUrl(), 'http://10.96.0.20:3128');
+  it('is reached at the cluster IP of its Service, with the box id and the token', async () => {
+    assert.equal(
+      (await kubernetesRuntime()).proxyUrl('a1', 'f00d'),
+      'http://a1:f00d@10.96.0.20:3128',
+    );
   });
 
   it('fails the boot when its Service is missing', async () => {

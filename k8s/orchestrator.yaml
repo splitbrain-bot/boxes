@@ -98,8 +98,7 @@ spec:
             # repositories at the writable /tmp.
             - name: HOME
               value: /tmp
-          # Optional settings, for example EGRESS_ALLOWED_HOSTS or
-          # BOX_MEM_LIMIT, from a ConfigMap.
+          # Optional settings, for example BOX_MEM_LIMIT, from a ConfigMap.
           envFrom:
             - configMapRef:
                 name: boxes-settings

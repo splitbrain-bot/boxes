@@ -20,6 +20,14 @@ const AgentSetEditor = lazy(async () => ({
 const AgentSets = lazy(async () => ({
   default: (await import('./views/AgentSets.tsx')).AgentSets,
 }));
+/** The egress profile editor view. Loaded on first use. */
+const EgressProfileEditor = lazy(async () => ({
+  default: (await import('./views/EgressProfileEditor.tsx')).EgressProfileEditor,
+}));
+/** The list of egress profiles. Loaded on first use. */
+const EgressProfiles = lazy(async () => ({
+  default: (await import('./views/EgressProfiles.tsx')).EgressProfiles,
+}));
 /** The component playground. Loaded on first use. */
 const Playground = lazy(async () => ({
   default: (await import('./views/Playground.tsx')).Playground,
@@ -111,6 +119,8 @@ function App() {
             <Route path="/new" element={<BoxCreate />} />
             <Route path="/agents" element={<AgentSets />} />
             <Route path="/agents/:setId" element={<AgentSetEditor />} />
+            <Route path="/egress" element={<EgressProfiles />} />
+            <Route path="/egress/:profileId" element={<EgressProfileEditor />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/boxes/:id/info" element={<BoxInfo />} />
             <Route path="*" element={<Navigate to="/" replace />} />

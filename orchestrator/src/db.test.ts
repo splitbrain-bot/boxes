@@ -736,3 +736,45 @@ test('each row gets the empty user, and the deployment id stays with the deploym
     upgraded.close();
   }
 });
+
+test('boxes from before the egress profiles each get a proxy token and keep their data', () => {
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('CREATE TABLE egress_profiles'));
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  for (const id of ['b1', 'b2']) {
+    db.prepare(
+      `INSERT INTO boxes (id, name, owner, status, ws_token, created_at, last_active_at)
+       VALUES (?, ?, 'alice', 'stopped', ?, 1000, 2000)`,
+    ).run(id, `box ${id}`, `ws-${id}`);
+  }
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    const rows = upgraded
+      .prepare(
+        'SELECT id, name, owner, ws_token, egress_profile_id, proxy_token FROM boxes ORDER BY id',
+      )
+      .all() as Array<{
+      id: string;
+      name: string;
+      owner: string;
+      ws_token: string;
+      egress_profile_id: string | null;
+      proxy_token: string;
+    }>;
+    assert.deepEqual(
+      rows.map(({ proxy_token: _, ...rest }) => rest),
+      [
+        { id: 'b1', name: 'box b1', owner: 'alice', ws_token: 'ws-b1', egress_profile_id: null },
+        { id: 'b2', name: 'box b2', owner: 'alice', ws_token: 'ws-b2', egress_profile_id: null },
+      ],
+    );
+    for (const row of rows) assert.match(row.proxy_token, /^[0-9a-f]{64}$/);
+    assert.notEqual(rows[0]!.proxy_token, rows[1]!.proxy_token);
+    assert.deepEqual(upgraded.prepare('SELECT * FROM egress_profiles').all(), []);
+  } finally {
+    upgraded.close();
+  }
+});

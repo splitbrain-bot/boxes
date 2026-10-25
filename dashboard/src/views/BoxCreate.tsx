@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useUp } from '@/hooks/use-up';
-import type { AgentSetSummary } from '../../../shared/types.ts';
+import type { AgentSetSummary, EgressProfileSummary } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { refresh } from '../stores/boxes.ts';
 
@@ -34,6 +34,10 @@ export function BoxCreate() {
    */
   const [agentSets, setAgentSets] = useState<AgentSetSummary[] | null>(null);
   const [agentSet, setAgentSet] = useState(NO_SET);
+  /** The egress profiles. Null while loading. The form hides the select while null. */
+  const [profiles, setProfiles] = useState<EgressProfileSummary[] | null>(null);
+  /** The id of the selected profile. The empty string sends null, so the box uses the default profile. */
+  const [profile, setProfile] = useState('');
   /** The agent and settings of the box's first thread, created in the same request. */
   const thread = useThreadOptions();
 
@@ -44,6 +48,15 @@ export function BoxCreate() {
       } catch {
         // A box needs no set, so the form works without the list.
         setAgentSets([]);
+      }
+    })();
+    void (async () => {
+      try {
+        const list = await api.listEgressProfiles();
+        setProfiles(list);
+        setProfile(list.find((p) => p.isDefault)?.id ?? '');
+      } catch {
+        // Without the list, the box uses the default profile.
       }
     })();
   }, []);
@@ -58,6 +71,7 @@ export function BoxCreate() {
       const created = await api.createBox({
         name: name.trim(),
         agentSet: agentSet === NO_SET ? null : agentSet,
+        egressProfile: profile === '' ? null : profile,
         ...(thread.value ? { thread: thread.value } : {}),
       });
       // Stores the choice only after the create succeeded, so it records the settings a thread started with.
@@ -109,6 +123,31 @@ export function BoxCreate() {
             Merged over the global AGENTS.md and skills, which every box gets.{' '}
             <Link to="/agents" className="underline hover:text-foreground">
               Edit the sets
+            </Link>
+            .
+          </p>
+        </div>
+      ) : null}
+
+      {profiles && profile !== '' ? (
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="box-egress-profile">Egress profile</Label>
+          <Select value={profile} onValueChange={setProfile}>
+            <SelectTrigger id="box-egress-profile" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {profiles.map((p) => (
+                <SelectItem key={p.id} value={p.id}>
+                  {p.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            The hosts that the agent can reach. You can change it later on the details page.{' '}
+            <Link to="/egress" className="underline hover:text-foreground">
+              Edit the profiles
             </Link>
             .
           </p>

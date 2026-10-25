@@ -388,7 +388,7 @@ export function runtimeConformance(name: string, setup: () => Promise<Conformanc
       });
 
       it('lets a box reach the front door of the egress proxy', async () => {
-        const url = new URL(rt.proxyUrl());
+        const url = new URL(rt.proxyUrl(sibling, 'token'));
         assert.equal(
           await canConnect({ label: 'proxy', host: url.hostname, port: Number(url.port) }),
           true,

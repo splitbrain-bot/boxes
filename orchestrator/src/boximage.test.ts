@@ -11,6 +11,7 @@ import { type Db, openDb, touchBox } from './db.ts';
 import * as dk from './docker.ts';
 import { setFileServiceSpawnerForTests } from './files.ts';
 import { inProcessFileService } from './files-in-process.ts';
+import { runtime } from './runtime/runtime.ts';
 import { patchSettings } from './settings.ts';
 import * as ws from './workspaces.ts';
 
@@ -21,8 +22,8 @@ const IMAGE = 'ghcr.io/example/box:latest';
 interface Fake {
   /** Maps each image reference to the image id that it resolves to now. */
   images: Map<string, string>;
-  /** Maps each container id to its image id and its run state. */
-  containers: Map<string, { image: string; running: boolean }>;
+  /** Maps each container id to its image id, its run state and its environment as NAME=value entries. */
+  containers: Map<string, { image: string; running: boolean; env: string[] }>;
   /** The options of each created container, in order. */
   created: Array<Record<string, unknown>>;
   /** The ids of the removed containers, in order. */
@@ -108,7 +109,7 @@ function dockerFor(fake: Fake): Docker {
       inspect: async () => {
         const c = fake.containers.get(id);
         if (!c) throw notFound('container');
-        return { Image: c.image, State: { Running: c.running } };
+        return { Image: c.image, State: { Running: c.running }, Config: { Env: c.env } };
       },
       start: async () => {
         const c = fake.containers.get(id);
@@ -148,6 +149,7 @@ function dockerFor(fake: Fake): Docker {
       fake.containers.set(id, {
         image: fake.images.get(opts.Image as string) ?? 'unresolved',
         running: false,
+        env: (opts.Env as string[] | undefined) ?? [],
       });
       return { id };
     },
@@ -225,14 +227,20 @@ let fake: Fake;
  *
  * @param id The id of the box.
  * @param imageId The image id of the container.
+ * @param proxyUrl The HTTP_PROXY of the container. The default is the proxy URL of the box.
  */
-function insertBox(id: string, imageId: string): void {
+function insertBox(id: string, imageId: string, proxyUrl?: string): void {
   const now = Date.now();
-  fake.containers.set(`box-${id}`, { image: imageId, running: false });
+  const token = `token-of-${id}`;
+  fake.containers.set(`box-${id}`, {
+    image: imageId,
+    running: false,
+    env: [`HTTP_PROXY=${proxyUrl ?? runtime().proxyUrl(id, token)}`],
+  });
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, status, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'stopped', ?, ?)`,
-  ).run(id, now, now);
+    `INSERT INTO boxes (id, name, profile, status, proxy_token, created_at, last_active_at)
+     VALUES (?, 'test', 'DEFAULT', 'stopped', ?, ?, ?)`,
+  ).run(id, token, now, now);
   ws.createWorkspace(dir, id);
   ws.createHome(dir, id);
 }
@@ -330,6 +338,18 @@ describe('starting a box whose image has moved', () => {
 
     assert.deepEqual(fake.removed, []);
     assert.equal(fake.created.length, 0);
+    assert.equal(fake.containers.get('box-a3')?.running, true);
+  });
+
+  it('recreates a stopped container whose proxy URL differs from the spec', async () => {
+    insertBox('a3', 'sha256:one', 'http://boxes-egress-proxy:3128');
+
+    await orchestrator.manager.start('a3');
+
+    assert.deepEqual(fake.removed, ['box-a3']);
+    assert.equal(fake.created.length, 1);
+    const env = fake.created[0]!.Env as string[];
+    assert.ok(env.includes(`HTTP_PROXY=${runtime().proxyUrl('a3', 'token-of-a3')}`));
     assert.equal(fake.containers.get('box-a3')?.running, true);
   });
 

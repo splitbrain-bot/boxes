@@ -4,7 +4,7 @@ The supplied `compose.yaml` starts Boxes as two services and one named volume:
 
 | Resource | Purpose |
 | --- | --- |
-| `orchestrator` | Serves the dashboard, [API](rests.md), health endpoint, and WebSocket gateway. It creates and manages [box containers](boxes.md) through the Docker socket. |
+| `orchestrator` | Serves the dashboard, [API](rest.md), health endpoint, and WebSocket gateway. It creates and manages [box containers](boxes.md) through the Docker socket. |
 | `egress-proxy` | Provides the only network route out of each box's private network. It applies [egress policy](egress.md) and replaces credential placeholders with stored credentials. |
 | `boxes-data` | Persists the Boxes database, generated Web Push keys, and every box [workspace](storage.md). |
 

@@ -14,3 +14,16 @@ const WS_TOKEN_BYTES = 32;
 export function generateWsToken(): string {
   return randomBytes(WS_TOKEN_BYTES).toString('hex');
 }
+
+/** Bytes of randomness behind the token of one box at the egress proxy. */
+const PROXY_TOKEN_BYTES = 32;
+
+/**
+ * Returns a new token that identifies one box at the egress proxy, as the hex
+ * of PROXY_TOKEN_BYTES random bytes. Hex needs no encoding in a URL.
+ *
+ * @returns The token as a hex string.
+ */
+export function generateProxyToken(): string {
+  return randomBytes(PROXY_TOKEN_BYTES).toString('hex');
+}

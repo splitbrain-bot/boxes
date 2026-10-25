@@ -19,8 +19,8 @@
 #
 # Without the OpenAI key, the script skips the Codex checks.
 #
-# The allowlist checks read EGRESS_ALLOWED_HOSTS from the running
-# orchestrator. With no allowlist, they run only the allowed probe.
+# The script makes an open and a closed egress profile for its boxes, so the
+# default profile of the user does not change the results.
 #
 # Optional:
 #   SMOKE_BOT_FORK=<url>       a repository the bot must be able to reach
@@ -118,7 +118,8 @@ must_output() {
   fi
 }
 
-# Deletes the boxes that BOX_ID and SIBLING_ID name. Takes no arguments.
+# Deletes the boxes that BOX_ID and SIBLING_ID name, and the egress profiles
+# that OPEN_PROFILE and CLOSED_PROFILE name. Takes no arguments.
 cleanup() {
   if [ -n "${BOX_ID:-}" ]; then
     grey "cleaning up box $BOX_ID"
@@ -127,6 +128,22 @@ cleanup() {
   if [ -n "${SIBLING_ID:-}" ]; then
     api -X DELETE "$API_BASE/api/boxes/$SIBLING_ID" >/dev/null || true
   fi
+  for profile in "${OPEN_PROFILE:-}" "${CLOSED_PROFILE:-}"; do
+    if [ -n "$profile" ]; then
+      api -X DELETE "$API_BASE/api/egress-profiles/$profile" >/dev/null || true
+    fi
+  done
+}
+
+# Selects the egress profile of the box that BOX_ID names. $1 is the id of the
+# profile. The orchestrator answers before its push to the proxy completes, so
+# the function waits a moment. Returns 0.
+select_profile() {
+  api -f -X PUT "$API_BASE/api/boxes/$BOX_ID/egress-profile" \
+    -H 'Content-Type: application/json' \
+    -d "{\"egressProfile\":\"$1\"}" >/dev/null \
+    || red "could not select the egress profile $1"
+  sleep 2
 }
 trap cleanup EXIT
 
@@ -162,15 +179,25 @@ else
 fi
 
 echo
-echo "== creating throwaway boxes =="
+echo "== creating throwaway egress profiles and boxes =="
+OPEN_PROFILE=$(api -X POST "$API_BASE/api/egress-profiles" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"smoke-test-open","open":true}' | jq -r '.id')
+CLOSED_PROFILE=$(api -X POST "$API_BASE/api/egress-profiles" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"smoke-test-closed","open":false,"hosts":["registry.npmjs.org"]}' | jq -r '.id')
+[ -n "$OPEN_PROFILE" ] && [ "$OPEN_PROFILE" != "null" ] \
+  && [ -n "$CLOSED_PROFILE" ] && [ "$CLOSED_PROFILE" != "null" ] \
+  || { red "could not create the egress profiles"; exit 1; }
+
 BOX_ID=$(api -X POST "$API_BASE/api/boxes" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"smoke-test"}' | jq -r '.id')
+  -d '{"name":"smoke-test","egressProfile":"'"$OPEN_PROFILE"'"}' | jq -r '.id')
 [ -n "$BOX_ID" ] && [ "$BOX_ID" != "null" ] || { red "could not create box"; exit 1; }
 
 SIBLING_ID=$(api -X POST "$API_BASE/api/boxes" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"smoke-test-sibling"}' | jq -r '.id')
+  -d '{"name":"smoke-test-sibling","egressProfile":"'"$OPEN_PROFILE"'"}' | jq -r '.id')
 
 CONTAINER="box-$BOX_ID"
 SIBLING_CONTAINER="box-$SIBLING_ID"
@@ -437,37 +464,50 @@ else
 fi
 
 echo
-echo "== egress allowlist =="
-ALLOWLIST=$(docker exec boxes-orchestrator printenv EGRESS_ALLOWED_HOSTS 2>/dev/null || true)
-if [ -z "$ALLOWLIST" ]; then
-  # Unset allows any public host, and private ranges stay denied.
-  must_pass "allowlist unset: https://example.com is reachable" \
-    curl -fsS -m 15 https://example.com
-  grey "note (allowlist off):          set EGRESS_ALLOWED_HOSTS to exercise the deny probes"
-  noted=$((noted+1))
-else
-  grey "allowlist: $ALLOWLIST"
-  must_fail "an unlisted host is denied" \
-    curl -fsS -m 15 https://example.com
-  must_fail "an unlisted address literal is denied" \
-    curl -fsS -m 15 https://1.1.1.1
-  must_pass "a listed host is still reachable" \
-    curl -fsS -m 15 https://registry.npmjs.org/
-  # A narrow allowlist must never sever the credential hosts. No -f, as
-  # above: a rate limited 403 is still GitHub answering.
-  must_pass "a credential host is implied by the allowlist" \
+echo "== egress profiles =="
+# The proxy identifies the box by the user and the password in its proxy URL.
+must_output "a request without the token of the box gets a 407" '^407' \
+  sh -c 'curl -sS -m 15 -o /dev/null -w "%{http_connect}" -x "http://${HTTPS_PROXY#*@}" https://example.com'
+
+# The box starts with the open profile.
+must_pass "open profile: https://example.com is reachable" \
+  curl -fsS -m 15 https://example.com
+must_fail "open profile: a port other than 80 and 443 is denied" \
+  curl -fsS -m 15 https://example.com:8443
+
+select_profile "$CLOSED_PROFILE"
+must_fail "closed profile: a host that is not in the profile is denied" \
+  curl -fsS -m 15 https://example.com
+must_output "closed profile: the refusal names the egress profile" 'Not allowed by the egress profile' \
+  sh -c 'curl -sS -m 15 -v https://example.com 2>&1'
+must_fail "closed profile: an address literal that is not in the profile is denied" \
+  curl -fsS -m 15 https://1.1.1.1
+# No -f: a 403 of the registry is still the host answering. A refused
+# CONNECT makes curl fail.
+must_pass "closed profile: a host in the profile is reachable" \
+  curl -sS -m 15 -o /dev/null https://registry.npmjs.org/
+if [ -n "$REAL_GH" ]; then
+  # No -f: a rate limited 403 is still GitHub answering.
+  must_pass "closed profile: the GitHub credential host is always allowed" \
     curl -sS -m 15 -o /dev/null https://api.github.com
-  if [ -n "$REAL_OPENAI" ]; then
-    # No -f: an unauthenticated call to OpenAI is a 401, which is the host
-    # answering. The check fails only when the proxy refuses the CONNECT.
-    must_pass "the OpenAI key host is implied by the allowlist" \
-      curl -sS -m 15 -o /dev/null https://api.openai.com/v1/models
-    # Codex logs in at this host. The alsoAllow list of the OpenAI credential
-    # keeps it reachable with a narrow allowlist.
-    must_pass "Codex's login host comes with the OpenAI credential" \
-      curl -sS -m 15 -o /dev/null https://auth.openai.com/
-  fi
 fi
+if [ -n "$REAL_OPENAI" ]; then
+  # No -f: an unauthenticated call to OpenAI is a 401, which is the host
+  # answering. The check fails only when the proxy refuses the CONNECT.
+  must_pass "closed profile: the OpenAI key host is always allowed" \
+    curl -sS -m 15 -o /dev/null https://api.openai.com/v1/models
+  # Codex logs in at this host. The alsoAllow list of the OpenAI credential
+  # keeps it reachable in a closed profile.
+  must_pass "closed profile: Codex's login host comes with the OpenAI credential" \
+    curl -sS -m 15 -o /dev/null https://auth.openai.com/
+fi
+if api "$API_BASE/api/boxes/$BOX_ID/denials" \
+     | jq -e '.[] | select(.host == "example.com" and .port == 443)' >/dev/null; then
+  green "ok   the refused host is in the list of the box"; pass=$((pass+1))
+else
+  red   "FAIL: the refused host is not in the list of the box"; fail=$((fail+1))
+fi
+select_profile "$OPEN_PROFILE"
 
 echo
 echo "== egress policy is live in the proxy =="

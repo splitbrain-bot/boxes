@@ -28,6 +28,12 @@ const GITLAB_TOKEN = 'glpat-therealgitlabtoken';
 /** A real Dev Tunnels token as the store holds it. */
 const DEVTUNNELS_TOKEN = 'ghu_therealdevtunnelstoken';
 
+/** The id of the box in the proxy URL. */
+const BOX_ID = 'b1';
+
+/** The token of the box at the proxy. */
+const PROXY_TOKEN = 'a1b2c3';
+
 /** The temporary data directories of the current test. */
 let dirs: string[] = [];
 /** The open databases of the current test. */
@@ -95,7 +101,7 @@ async function envFor(
     placeholderFor: (id) => egress.placeholderFor('', id),
     methodFor: (id) => egress.methodFor('', id),
     gitlabHost: cfg.GITLAB_HOST,
-    proxyUrl: new DockerRuntime(cfg).proxyUrl(),
+    proxyUrl: new DockerRuntime(cfg).proxyUrl(BOX_ID, PROXY_TOKEN),
     hasCa: egress.caCertificate() !== '',
     apiKeys: egress.apiKeyEnv(''),
   });
@@ -183,9 +189,11 @@ describe('boxEnv', () => {
     }
   }, 30_000);
 
-  it('still routes every client through the proxy', async () => {
+  it('still routes every client through the proxy, with the box id and the token', async () => {
     const env = await envFor();
-    expect(env.HTTPS_PROXY).toBe('http://proxy:3128');
+    // The proxy identifies the box from the user and the password.
+    expect(env.HTTP_PROXY).toBe(`http://${BOX_ID}:${PROXY_TOKEN}@proxy:3128`);
+    expect(env.HTTPS_PROXY).toBe(`http://${BOX_ID}:${PROXY_TOKEN}@proxy:3128`);
     expect(env.NO_PROXY).toBe('localhost,127.0.0.1');
   }, 30_000);
 

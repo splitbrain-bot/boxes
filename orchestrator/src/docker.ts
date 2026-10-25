@@ -342,6 +342,22 @@ export async function containerImageId(container: string): Promise<string | null
 }
 
 /**
+ * Gives the value of one environment variable of a container, as the container was created.
+ *
+ * @param container The name or id of the container.
+ * @param name The name of the variable.
+ * @returns The value, the empty string when the container has no such variable, or null when the container does
+ *   not exist.
+ */
+export async function containerEnvValue(container: string, name: string): Promise<string | null> {
+  return inspecting(async () => {
+    const env = (await docker().getContainer(container).inspect()).Config?.Env ?? [];
+    const entry = env.find((e) => e.startsWith(`${name}=`));
+    return entry === undefined ? '' : entry.slice(name.length + 1);
+  });
+}
+
+/**
  * Gives the full id of a container.
  *
  * @param container The name or id of the container.

@@ -111,7 +111,7 @@ export class AgentStore {
    * @param dataDir The DATA_DIR that holds the repository checkouts.
    * @param fetcher The function that fetches a repository into its checkout for the owner of its set.
    * @param builtins The function that returns the built-in skills of the orchestrator for a user.
-   * @param mcpContext The function that returns the API keys of a user and the egress allowlist.
+   * @param mcpContext The function that returns the API keys of a user.
    */
   constructor(
     /** Where the sets are stored. */
@@ -123,11 +123,8 @@ export class AgentStore {
       fetchRepo(dir, url, ref, null, keep),
     /** Returns the built-in skills of the orchestrator for a user. */
     private readonly builtins: (owner: string) => BuiltinSkill[] = () => [],
-    /** Returns the API keys of a user and the egress allowlist, for the MCP server checks. */
-    private readonly mcpContext: (owner: string) => McpContext = () => ({
-      keys: [],
-      allowedHosts: [],
-    }),
+    /** Returns the API keys of a user, for the MCP server checks. */
+    private readonly mcpContext: (owner: string) => McpContext = () => ({ keys: [] }),
   ) {}
 
   /** The pulls running now, by repository id. */

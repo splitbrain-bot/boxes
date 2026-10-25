@@ -162,46 +162,56 @@ export class DockerRuntime implements Runtime {
       slog.info('created the container');
       return;
     }
-    await this.rollOntoCurrentImage(box);
+    await this.replaceOutdatedContainer(box);
   }
 
   /**
    * Replaces a stopped container when its image differs from the image that
-   * BOX_IMAGE resolves to.
+   * BOX_IMAGE resolves to, or when its HTTP_PROXY, which holds the token of
+   * the box, differs from the value in the spec.
    *
    * The comparison uses image ids, because a tag such as `latest` can name a
    * new image.
    *
    * @param box The id and the environment of the box.
    */
-  private async rollOntoCurrentImage(box: BoxSpec): Promise<void> {
+  private async replaceOutdatedContainer(box: BoxSpec): Promise<void> {
     const slog = log.box(box.boxId);
     const container = dk.names.container(box.boxId);
     let wanted: string | null;
     let current: string | null;
+    let proxy: string | null;
     try {
       wanted = await dk.imageId(this.cfg.BOX_IMAGE);
       current = await dk.containerImageId(container);
+      proxy = await dk.containerEnvValue(container, 'HTTP_PROXY');
     } catch (err) {
       // A box that already has a container can start without the comparison.
-      slog.warn('could not compare the box image; starting as it is', {
+      slog.warn('could not compare the container with the box spec; starting it as it is', {
         error: (err as Error).message,
       });
       return;
     }
     // Keep the container when the host has no BOX_IMAGE or the container is
     // gone. start() reports a missing container.
-    if (!wanted || !current || wanted === current) return;
+    if (!wanted || !current || proxy === null) return;
+    const newImage = wanted !== current;
+    const newProxy = proxy !== (box.env.HTTP_PROXY ?? '');
+    if (!newImage && !newProxy) return;
 
-    slog.info('recreating the container on the current box image', {
-      from: current,
-      image: this.cfg.BOX_IMAGE,
-    });
+    if (newImage) {
+      slog.info('recreating the container on the current box image', {
+        from: current,
+        image: this.cfg.BOX_IMAGE,
+      });
+    } else {
+      slog.info('recreating the container with a new proxy URL');
+    }
     // Both tolerate a container that is gone.
     await dk.stopContainer(container);
     await dk.removeContainer(container);
     await dk.createContainer(this.containerSpec(box), this.cfg);
-    slog.info('box moved onto the current box image', { image: this.cfg.BOX_IMAGE });
+    if (newImage) slog.info('box moved onto the current box image', { image: this.cfg.BOX_IMAGE });
   }
 
   /**
@@ -493,12 +503,14 @@ export class DockerRuntime implements Runtime {
   }
 
   /**
-   * Gives the address of the egress proxy on a box network.
+   * Gives the proxy URL of a box, with the address of the egress proxy on the box network.
    *
-   * @returns The URL with the network alias and the port of the proxy.
+   * @param boxId The id of the box.
+   * @param token The token of the box at the proxy.
+   * @returns The URL with the box id, the token, the network alias and the port of the proxy.
    */
-  proxyUrl(): string {
-    return `http://${this.cfg.EGRESS_PROXY_ALIAS}:${this.cfg.EGRESS_PROXY_PORT}`;
+  proxyUrl(boxId: string, token: string): string {
+    return `http://${boxId}:${token}@${this.cfg.EGRESS_PROXY_ALIAS}:${this.cfg.EGRESS_PROXY_PORT}`;
   }
 
   /**
