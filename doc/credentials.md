@@ -97,7 +97,7 @@ start.
 The proxy replaces the placeholder in any header of a request to one of the hosts.
 
 The opencode harness has no credential of its own and runs on these keys. It can always run, because some of its models
-need no key. The [MCP servers](agent-sets.md#mcp-servers) of an agent set authenticate with these keys too.
+need no key.
 
 ## Statuses and refresh
 

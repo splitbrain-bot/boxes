@@ -8,6 +8,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import type {
+  AgentMcpAuth,
   BoxStatus,
   HarnessCatalog,
   HarnessId,
@@ -69,7 +70,7 @@ export interface BoxRow {
   ready_at: number | null;
   /**
    * The merged MCP servers of the agent sets of the box at its last start, as a
-   * JSON array of AgentMcpServer with the `${NAME}` references in the header values.
+   * JSON array of McpSnapshotEntry.
    */
   mcp_servers: string;
 }
@@ -228,7 +229,12 @@ export interface AgentMcpServerRow {
   name: string;
   /** The URL of the server. */
   url: string;
-  /** The headers as a JSON array of name and value, with the `${NAME}` references in the values. */
+  /** The way the agent authenticates at the server. */
+  auth: AgentMcpAuth;
+  /**
+   * The headers as a JSON array of AgentMcpHeader. A secret header has an
+   * empty value, and agent_mcp_secrets holds the value.
+   */
   headers: string;
   /** Epoch milliseconds of creation. */
   created_at: number;
@@ -745,6 +751,30 @@ export const MIGRATIONS: string[] = [
     REFERENCES egress_profiles(id) ON DELETE SET NULL;
   ALTER TABLE boxes ADD COLUMN proxy_token TEXT NOT NULL DEFAULT '';
   UPDATE boxes SET proxy_token = lower(hex(randomblob(32)));
+  `,
+  // Adds the auth mode of each MCP server and the secrets of the servers. The
+  // migration deletes the stored servers, because their header values hold
+  // references to API keys.
+  `
+  DELETE FROM agent_mcp_servers;
+  UPDATE boxes SET mcp_servers = '[]';
+  ALTER TABLE agent_mcp_servers ADD COLUMN auth TEXT NOT NULL DEFAULT 'none';
+  CREATE TABLE agent_mcp_secrets (
+    set_id       TEXT NOT NULL,
+    server       TEXT NOT NULL,
+    header       TEXT NOT NULL,
+    secret       TEXT NOT NULL,
+    placeholder  TEXT NOT NULL,
+    oauth        TEXT,
+    expires_at   INTEGER,
+    refreshed_at INTEGER,
+    status       TEXT NOT NULL DEFAULT 'ok',
+    last_error   TEXT,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (set_id, server, header),
+    FOREIGN KEY (set_id, server) REFERENCES agent_mcp_servers(set_id, name) ON DELETE CASCADE
+  );
   `,
 ];
 

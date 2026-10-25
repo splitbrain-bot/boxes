@@ -1,8 +1,9 @@
 /** The TLS interception engine, the one place a real credential goes onto the wire. */
 
-import type { CompletedRequest, Headers } from 'mockttp';
+import type { CompletedRequest, Headers, InitiatedResponse } from 'mockttp';
 import * as mockttp from 'mockttp';
-import type { EgressPolicy } from '../../shared/types.ts';
+import type { EgressPolicy, EgressRefusedToken } from '../../shared/types.ts';
+import { bearerChallenge } from '../../shared/www-authenticate.ts';
 import { type DenialCategory, PLAINTEXT_CREDENTIAL_REASON } from './forward.ts';
 import { credentialsForHost, decideCredentials, injectionPatterns } from './policy.ts';
 
@@ -17,6 +18,8 @@ export interface InterceptorOptions {
   upstreamProxyUrl: () => string;
   /** Counts one denial under its category. */
   denied: (category: DenialCategory) => void;
+  /** Records a server answer that refused an OAuth token. */
+  refusedToken: (report: EgressRefusedToken) => void;
   /** Writes one structured log line. */
   log: (msg: string, fields?: Record<string, unknown>) => void;
 }
@@ -31,6 +34,9 @@ function isLoopback(address: string | undefined): boolean {
   if (!address) return false;
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }
+
+/** The maximum number of requests with an OAuth token that wait for their answers. */
+const MAX_OAUTH_REQUESTS = 10_000;
 
 /** Headers that decide leaves out of a new header set, so the engine derives them from the request URL. */
 const URL_LINKED_HEADERS = ['host', ':authority'];
@@ -76,6 +82,9 @@ export class Interceptor {
    * stops never overlap.
    */
   private queue: Promise<void> = Promise.resolve();
+
+  /** The id of the OAuth credential in each forwarded request that waits for its answer, by request id. */
+  private readonly oauthRequests = new Map<string, string>();
 
   /**
    * Creates a controller with no running engine.
@@ -169,6 +178,11 @@ export class Interceptor {
         .always()
         .thenRejectConnection(403, 'protocol upgrade refused by the egress policy');
 
+      // The event comes with the head of the answer and holds back no body, so an
+      // event stream reaches the client at once.
+      await server.on('response-initiated', (res) => this.answered(res));
+      await server.on('abort', (req) => this.oauthRequests.delete(req.id));
+
       await server.on('tls-client-error', (failure) => {
         // A client that does not trust the deployment CA rejects the certificate,
         // for example a tool that ignores the CA environment variables.
@@ -215,6 +229,28 @@ export class Interceptor {
         error: (err as Error).message,
       });
     }
+  }
+
+  /**
+   * Reads the answer to a request with an OAuth token. A 401, or a 403 with a
+   * Bearer challenge, goes to the refusedToken callback.
+   *
+   * @param res The head of the answer.
+   */
+  private answered(res: InitiatedResponse): void {
+    const credentialId = this.oauthRequests.get(res.id);
+    if (credentialId === undefined) return;
+    this.oauthRequests.delete(res.id);
+
+    const raw = res.headers['www-authenticate'];
+    const challenge = bearerChallenge(Array.isArray(raw) ? raw.join(', ') : raw);
+    if (res.statusCode !== 401 && !(res.statusCode === 403 && challenge)) return;
+    this.opts.refusedToken({
+      credentialId,
+      status: res.statusCode,
+      error: challenge?.error ?? null,
+      scope: challenge?.scope ?? null,
+    });
   }
 
   /**
@@ -332,6 +368,18 @@ export class Interceptor {
       headers[name] = value;
     }
     for (const [name, value] of Object.entries(verdict.headers)) headers[name] = value;
+
+    const credentials = this.opts.policy().credentials;
+    const oauthId = verdict.credentialIds.find(
+      (id) => credentials.find((c) => c.id === id)?.oauth === true,
+    );
+    if (oauthId !== undefined) {
+      if (this.oauthRequests.size >= MAX_OAUTH_REQUESTS) {
+        const oldest = this.oauthRequests.keys().next().value;
+        if (oldest !== undefined) this.oauthRequests.delete(oldest);
+      }
+      this.oauthRequests.set(req.id, oauthId);
+    }
 
     return { headers };
   }

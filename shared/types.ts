@@ -691,6 +691,11 @@ export interface EgressCredential {
   placeholder: string;
   /** The real credential. */
   secret: string;
+  /**
+   * True for the token of an OAuth login. The proxy reports a refused token of such a credential to the
+   * orchestrator.
+   */
+  oauth?: boolean;
 }
 
 /**
@@ -738,6 +743,30 @@ export interface EgressStatus {
   denials: Record<string, number>;
   /** Seconds since the proxy booted. */
   uptimeSeconds: number;
+}
+
+/**
+ * A server answer that refused an OAuth token, which the proxy put into a request. The answer is a 401, or a 403 with
+ * a Bearer challenge.
+ */
+export interface EgressRefusedToken {
+  /** The id of the credential. */
+  credentialId: string;
+  /** The HTTP status of the answer. */
+  status: number;
+  /** The `error` parameter of the Bearer challenge, or null. */
+  error: string | null;
+  /** The `scope` parameter of the Bearer challenge, or null. */
+  scope: string | null;
+}
+
+/**
+ * The answer of the proxy to a policy push. The proxy reports each refused token once, so the list holds the refusals
+ * since the last push, at most one for each credential.
+ */
+export interface EgressPushAnswer extends EgressStatus {
+  /** The refused OAuth tokens since the last push. */
+  refusedTokens: EgressRefusedToken[];
 }
 
 /** The egress half of a health probe, as the orchestrator sees the proxy. */
@@ -1110,29 +1139,91 @@ export interface AgentSetDetail extends AgentSetSummary {
 }
 
 /**
+ * The way the agent authenticates at a remote MCP server. The mode is fixed after the user creates the server.
+ *
+ * With `none`, the server has no headers. With `bearer`, it has one secret `Authorization` header. With `headers`, each
+ * header is literal or secret. With `oauth`, it has no headers, and the orchestrator adds the `Authorization` header
+ * with the token of the OAuth login.
+ */
+export type AgentMcpAuth = 'none' | 'bearer' | 'headers' | 'oauth';
+
+/** One header that the agent sends to a remote MCP server. */
+export interface AgentMcpHeader {
+  /** The header name. */
+  name: string;
+  /**
+   * The value. The API returns an empty value for a secret header. In a save, an empty value of a secret header keeps
+   * the stored value.
+   */
+  value: string;
+  /** True when the orchestrator stores the value as a secret, and the box gets only a placeholder. */
+  secret: boolean;
+}
+
+/**
  * A remote MCP server of an agent set. The agent reaches it with the Streamable
  * HTTP transport.
  */
 export interface AgentMcpServer {
   /** The name of the server. It holds lowercase letters, digits and dashes, and at most 32 characters. */
   name: string;
-  /** The http or https URL of the server. */
+  /** The http or https URL of the server. It is fixed after the user creates the server. */
   url: string;
-  /**
-   * The headers that the agent sends to the server. A value can refer to an API
-   * key of the owner as `${NAME}`, where NAME is the environment variable name of
-   * the key.
-   */
-  headers: { name: string; value: string }[];
+  /** The way the agent authenticates at the server. */
+  auth: AgentMcpAuth;
+  /** The headers that the agent sends to the server. */
+  headers: AgentMcpHeader[];
 }
+
+/**
+ * The status of the OAuth token of a remote MCP server. With `disconnected`, the server has no token.
+ */
+export type AgentMcpTokenStatus = 'ok' | 'failing' | 'disconnected';
 
 /** A remote MCP server of an agent set, as the editor shows it. */
 export interface AgentMcpServerState extends AgentMcpServer {
-  /**
-   * The reason the agent will probably not reach the server, for example an API
-   * key without the host of the server, or null when no problem is known.
-   */
-  warning: string | null;
+  /** The status of the OAuth token, or null for a server without OAuth. */
+  status: AgentMcpTokenStatus | null;
+  /** The reason of the last failure of the OAuth token, or null. */
+  lastError: string | null;
+}
+
+/** Body of a request that starts the OAuth login of a remote MCP server. */
+export interface McpConnectBody {
+  /** The origin of the dashboard, for the redirect URI of the login. */
+  origin: string;
+  /** The client ID that the user registered at the authorization server, or undefined to use a stored or new client. */
+  clientId?: string;
+  /** The client secret of the client ID, or undefined for a client without a secret. */
+  clientSecret?: string;
+}
+
+/**
+ * Answer to the start of an OAuth login. It holds the URL that the browser opens, or the request for a client ID,
+ * together with the redirect URI that the client needs.
+ */
+export type McpConnectAnswer =
+  | { authorizationUrl: string }
+  | { needsClient: true; redirectUri: string };
+
+/** Body of the request that ends an OAuth login, with the parameters of the redirect to the dashboard. */
+export interface McpCallbackBody {
+  /** The `state` parameter. */
+  state: string;
+  /** The `code` parameter, or undefined when the authorization server sent an error. */
+  code?: string;
+  /** The `iss` parameter, or undefined when the authorization server sent none. */
+  iss?: string;
+  /** The `error` parameter, or undefined. */
+  error?: string;
+  /** The `error_description` parameter, or undefined. */
+  errorDescription?: string;
+}
+
+/** Answer to the end of an OAuth login. */
+export interface McpCallbackAnswer {
+  /** The id of the agent set of the server, so the dashboard can open the set. */
+  setId: string;
 }
 
 /** A git repository an agent set takes skills from. */

@@ -21,8 +21,8 @@ beforeEach(async () => {
         { name: 'ship', content: '---\nname: ship\n---\n' },
       ],
       mcpServers: [
-        { name: 'docs', url: 'https://docs.example.com/mcp', headers: [] },
-        { name: 'search', url: 'https://search.example.com/mcp', headers: [] },
+        { name: 'docs', url: 'https://docs.example.com/mcp', auth: 'none', headers: [] },
+        { name: 'search', url: 'https://search.example.com/mcp', auth: 'none', headers: [] },
       ],
     },
     [
@@ -35,7 +35,9 @@ beforeEach(async () => {
           { url: 'https://github.com/example/go-skills', skills: ['bench', 'fuzz'] },
           { url: 'https://github.com/example/gone', skills: [], error: 'repository not found' },
         ],
-        mcpServers: [{ name: 'docs', url: 'https://docs.example.org/mcp', headers: [] }],
+        mcpServers: [
+          { name: 'docs', url: 'https://docs.example.org/mcp', auth: 'none', headers: [] },
+        ],
       },
     ],
   );
@@ -201,7 +203,7 @@ test('the editor lists the MCP servers, and the merge names the servers of the b
   }
 });
 
-test('an MCP server with a bearer token from a new API key is written through the dialog', async () => {
+test('an MCP server with a bearer token is written through the dialog, and the token stays secret', async () => {
   const { page, close } = await openPage(stub.url, '/agents/global');
   try {
     await expect.poll(() => page.getByText('MCP servers').first().isVisible()).toBe(true);
@@ -210,34 +212,97 @@ test('an MCP server with a bearer token from a new API key is written through th
     await page.getByLabel('URL', { exact: true }).fill('https://mcp.example.com:8443/mcp');
     await page.getByRole('combobox', { name: 'Authentication' }).click();
     await page.getByRole('option', { name: 'Bearer token' }).click();
-    await page.getByRole('combobox', { name: 'API key' }).click();
-    await page.getByRole('option', { name: 'New key…' }).click();
-
-    // The dialog names the host and the port of the server.
-    await expect.poll(() => page.getByLabel('Hosts').inputValue()).toBe('mcp.example.com:8443');
-    await shoot(page, 'mcp-key-dialog');
-    await page.getByLabel('Environment variable').fill('TRACKER_TOKEN');
-    await page.getByLabel('Hosts').fill('other.example.com');
-    await page.getByLabel('Key', { exact: true }).fill('trk_0123456789abcdef');
-    await page.getByRole('button', { name: 'Add key' }).click();
-
-    // A key for another host is called out, and the server cannot be saved with it.
-    await expect.poll(() => page.getByText('not to mcp.example.com:8443').isVisible()).toBe(true);
     expect(await page.getByRole('button', { name: 'Save' }).isDisabled()).toBe(true);
+    await page.getByLabel('Token').fill('trk_0123456789abcdef');
     await shoot(page, 'mcp-server-dialog');
-    await page.getByRole('button', { name: 'Add host to key' }).click();
-    await expect.poll(() => page.getByText('not to mcp.example.com:8443').count()).toBe(0);
     await page.getByRole('button', { name: 'Save' }).click();
 
     await expect
       .poll(() => page.getByText('https://mcp.example.com:8443/mcp').isVisible())
       .toBe(true);
     const tracker = (await stub.agentSet('global')).mcpServers.find((s) => s.name === 'tracker');
-    expect(tracker?.headers).toEqual([
-      { name: 'Authorization', value: `Bearer \${TRACKER_TOKEN}` },
+    expect(tracker?.auth).toBe('bearer');
+    expect(tracker?.headers).toEqual([{ name: 'Authorization', value: '', secret: true }]);
+
+    // The URL and the auth mode are fixed, and a save with an empty token field works.
+    await page.getByRole('button', { name: 'Edit tracker' }).click();
+    expect(await page.getByLabel('URL', { exact: true }).isDisabled()).toBe(true);
+    expect(await page.getByRole('combobox', { name: 'Authentication' }).isDisabled()).toBe(true);
+    expect(await page.getByLabel('Token').inputValue()).toBe('');
+    await page.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => page.getByRole('dialog').count()).toBe(0);
+  } finally {
+    await close();
+  }
+});
+
+test('custom headers of an MCP server are literal or secret', async () => {
+  const { page, close } = await openPage(stub.url, '/agents/global');
+  try {
+    await expect.poll(() => page.getByText('MCP servers').first().isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Add' }).last().click();
+    await page.getByLabel('Name').last().fill('internal');
+    await page.getByLabel('URL', { exact: true }).fill('https://internal.example.com/mcp');
+    await page.getByRole('combobox', { name: 'Authentication' }).click();
+    await page.getByRole('option', { name: 'Custom headers' }).click();
+    await page.getByLabel('Header 1 name').fill('X-Tenant');
+    await page.getByLabel('Header 1 value').fill('engineering');
+    await page.getByRole('button', { name: 'Add header' }).click();
+    await page.getByLabel('Header 2 name').fill('X-Api-Key');
+    await page.getByLabel('Header 2 value').fill('key-0123456789');
+    await page.getByLabel('Header 2 is secret').check();
+    await shoot(page, 'mcp-headers-dialog');
+    await page.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(() => page.getByText('https://internal.example.com/mcp').isVisible())
+      .toBe(true);
+    const internal = (await stub.agentSet('global')).mcpServers.find((s) => s.name === 'internal');
+    expect(internal?.headers).toEqual([
+      { name: 'X-Tenant', value: 'engineering', secret: false },
+      { name: 'X-Api-Key', value: '', secret: true },
     ]);
-    const key = (await stub.apiKeys()).find((k) => k.name === 'TRACKER_TOKEN');
-    expect(key?.hosts).toEqual(['other.example.com', 'mcp.example.com:8443']);
+  } finally {
+    await close();
+  }
+});
+
+test('an OAuth MCP server connects through the authorization server and shows its status', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/agents/global');
+  try {
+    // The route answers for the authorization server. It accepts the login at
+    // once and redirects the browser to the dashboard.
+    await page.route(`${stub.oauth.issuer}/authorize**`, async (route) => {
+      const params = stub.oauth.authorize(route.request().url());
+      await route.fulfill({
+        status: 302,
+        headers: { location: `${stub.url}/oauth/callback?${params}` },
+      });
+    });
+    await expect.poll(() => page.getByText('MCP servers').first().isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Add' }).last().click();
+    await page.getByLabel('Name').last().fill('remote');
+    await page.getByLabel('URL', { exact: true }).fill(stub.oauth.mcpUrl);
+    await page.getByRole('combobox', { name: 'Authentication' }).click();
+    await page.getByRole('option', { name: 'OAuth' }).click();
+    await expect.poll(() => page.getByText('Not connected').isVisible()).toBe(true);
+    await shoot(page, 'mcp-oauth-dialog');
+    await page.getByRole('button', { name: 'Connect' }).click();
+
+    await expect.poll(() => new URL(page.url()).pathname).toBe('/agents/global');
+    await expect.poll(() => page.getByText('Connected', { exact: true }).isVisible()).toBe(true);
+    const remote = (await stub.agentSet('global')).mcpServers.find((s) => s.name === 'remote');
+    expect(remote?.status).toBe('ok');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('the callback page shows the error of a login that is not known', async () => {
+  const { page, close } = await openPage(stub.url, '/oauth/callback?state=nope&code=x');
+  try {
+    await expect.poll(() => page.getByText('The login is unknown').isVisible()).toBe(true);
   } finally {
     await close();
   }

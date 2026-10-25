@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { AgentStore } from './agents.ts';
 import { ApiKeyStore } from './api-keys.ts';
 import type { Config } from './config.ts';
 import { loadConfig } from './config.ts';
@@ -15,8 +16,10 @@ import {
   EgressManager,
   type EgressMaterial,
   pushPolicy,
+  type RefusedMcpToken,
   resolveEgressMaterial,
 } from './egress.ts';
+import { McpSecretStore } from './mcp-secrets.ts';
 
 /** A real Claude token as the store holds it. */
 const CLAUDE_TOKEN = 'sk-ant-oat01-the-real-claude-token';
@@ -224,6 +227,69 @@ describe('composePolicy', () => {
         headers: [],
         placeholder: key.placeholder,
         secret: 'sk-or-v1-0123456789abcdef',
+      },
+    ]);
+  }, 30_000);
+
+  it('carries each secret of an MCP server on the host of the server and in its header', async () => {
+    const cfg = configFrom();
+    const { store, db } = storeWith(cfg);
+    const secrets = new McpSecretStore(db, () => {});
+    const agents = new AgentStore(db, dataDir(), undefined, undefined, secrets);
+    const work = agents.createSet('alice', 'Work');
+    agents.putMcpServer('alice', work.id, {
+      name: 'github',
+      url: 'https://api.githubcopilot.com/mcp/',
+      auth: 'bearer',
+      headers: [{ name: 'Authorization', value: 'Bearer ghp_0123', secret: true }],
+    });
+    const global = agents.globalId('');
+    agents.putMcpServer('', global, {
+      name: 'todoist',
+      url: 'https://ai.todoist.net:8443/mcp',
+      auth: 'oauth',
+      headers: [],
+    });
+    agents.putMcpServer('', global, {
+      name: 'later',
+      url: 'https://later.example.com/mcp',
+      auth: 'oauth',
+      headers: [],
+    });
+    secrets.putToken(global, 'todoist', {
+      secret: 'Bearer at-1',
+      oauth: '{}',
+      expires_at: null,
+      refreshed_at: 1,
+    });
+    /**
+     * Gives the placeholder of the token row of a server.
+     *
+     * @param setId The set of the server.
+     * @param server The name of the server.
+     * @returns The placeholder, or '' when the row does not exist.
+     */
+    const placeholder = (setId: string, server: string): string =>
+      secrets.get(setId, server, 'authorization')?.placeholder ?? '';
+    const material = await resolveEgressMaterial(db);
+    const policy = composePolicy(cfg, material, rows(store), [], [], secrets.listAll());
+
+    // The OAuth server without a login has no secret, so it is absent.
+    expect(policy.credentials).toEqual([
+      {
+        id: `alice/mcp/${work.id}/github/authorization`,
+        hosts: ['api.githubcopilot.com:443'],
+        headers: ['authorization'],
+        placeholder: placeholder(work.id, 'github'),
+        secret: 'Bearer ghp_0123',
+      },
+      {
+        id: `mcp/${global}/todoist/authorization`,
+        hosts: ['ai.todoist.net:8443'],
+        headers: ['authorization'],
+        placeholder: placeholder(global, 'todoist'),
+        secret: 'Bearer at-1',
+        oauth: true,
       },
     ]);
   }, 30_000);
@@ -599,6 +665,70 @@ describe('EgressManager', () => {
     ]);
     expect(manager.statusFor('')?.credentialIds).toEqual(['github']);
     expect(manager.statusFor('bob')?.credentialIds).toEqual([]);
+  }, 30_000);
+
+  it('gives the refused OAuth tokens of a push answer to onRefused, with their rows', async () => {
+    const refusal = { status: 401, error: 'invalid_token', scope: null };
+    let id = '';
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            applied: true,
+            policyHash: 'x',
+            boxCount: 0,
+            credentialIds: [],
+            denials: {},
+            uptimeSeconds: 1,
+            refusedTokens: [
+              { credentialId: id, ...refusal },
+              { credentialId: 'mcp/gone/docs/authorization', ...refusal },
+            ],
+          }),
+        );
+      });
+    });
+    servers.push(server);
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+    });
+
+    const cfg = configFrom({ EGRESS_CONTROL_URL: `http://127.0.0.1:${port}` });
+    const { store, db } = storeWith(cfg);
+    const secrets = new McpSecretStore(db, () => {});
+    const agents = new AgentStore(db, dataDir(), undefined, undefined, secrets);
+    const global = agents.globalId('');
+    agents.putMcpServer('', global, {
+      name: 'docs',
+      url: 'https://mcp.example.com/mcp',
+      auth: 'oauth',
+      headers: [],
+    });
+    secrets.putToken(global, 'docs', {
+      secret: 'Bearer at-1',
+      oauth: '{}',
+      expires_at: null,
+      refreshed_at: 1,
+    });
+    id = `mcp/${global}/docs/authorization`;
+    const refused: RefusedMcpToken[][] = [];
+    const manager = new EgressManager(
+      cfg,
+      store,
+      new ApiKeyStore(db, () => {}),
+      db,
+      () => [],
+      () => secrets.listAll(),
+      (tokens) => refused.push(tokens),
+    );
+    await manager.sync();
+
+    expect(refused.length).toBe(1);
+    expect(refused[0]?.map((t) => [t.row.server, t.refusal])).toEqual([
+      ['docs', { credentialId: id, ...refusal }],
+    ]);
   }, 30_000);
 
   it('records why a push failed, for the health probe', async () => {

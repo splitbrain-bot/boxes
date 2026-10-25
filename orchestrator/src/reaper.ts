@@ -5,6 +5,7 @@ import { type CredentialStore, refreshCredentials } from './credentials.ts';
 import { type BoxRow, boxesWithActiveTurns, boxTurnActive, type Db } from './db.ts';
 import type { EgressManager } from './egress.ts';
 import { log } from './log.ts';
+import type { McpOAuth } from './mcp-oauth.ts';
 import type { TunnelReconciler } from './tunnels.ts';
 
 /** The interval of the loops that run every minute, in milliseconds. */
@@ -166,16 +167,23 @@ export function startProxyReconciler(
 }
 
 /**
- * Starts the loop that keeps the stored credentials valid, and returns a handle
- * that stops it.
+ * Starts the loop that keeps the stored credentials and the OAuth tokens of
+ * the MCP servers valid, and returns a handle that stops it.
  *
  * It runs every minute. The store refreshes a credential in the last hour before its access token expires.
  *
  * @param credentials The credential store.
+ * @param mcpOAuth The OAuth client of the MCP servers.
  * @returns The handle that stops the loop.
  */
-export function startCredentialRefresh(credentials: CredentialStore): { stop: () => void } {
-  return loop('credential refresh', TICK_MS, () => refreshCredentials(credentials));
+export function startCredentialRefresh(
+  credentials: CredentialStore,
+  mcpOAuth: McpOAuth,
+): { stop: () => void } {
+  return loop('credential refresh', TICK_MS, async () => {
+    await refreshCredentials(credentials);
+    await mcpOAuth.refreshDue();
+  });
 }
 
 /**

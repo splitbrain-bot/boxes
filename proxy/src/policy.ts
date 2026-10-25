@@ -266,6 +266,7 @@ export function policyHash(policy: EgressPolicy): string {
         headers: [...c.headers].sort(),
         placeholder: createHash('sha256').update(c.placeholder).digest('hex'),
         secret: createHash('sha256').update(c.secret).digest('hex'),
+        oauth: c.oauth === true,
       }))
       .sort((a, b) => a.id.localeCompare(b.id)),
   });
@@ -352,7 +353,17 @@ export function parsePolicy(input: unknown): EgressPolicy {
       if (problem !== null) return fail(`credential ${id} hosts: ${problem}`);
     }
     const headers = stringArray(c.headers, `credential ${id} headers`).map((h) => h.toLowerCase());
-    return { id, hosts, headers, placeholder, secret };
+    if (c.oauth !== undefined && typeof c.oauth !== 'boolean') {
+      return fail(`credential ${id} has an oauth flag that is not a boolean`);
+    }
+    return {
+      id,
+      hosts,
+      headers,
+      placeholder,
+      secret,
+      ...(c.oauth === true ? { oauth: true } : {}),
+    };
   });
 
   if (credentials.length > 0 && ca === null) {

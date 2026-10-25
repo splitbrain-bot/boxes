@@ -10,7 +10,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import net from 'node:net';
 import { DEFAULT_PORTS } from '../../shared/hosts.ts';
-import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
+import type { EgressPolicy, EgressRefusedToken, EgressStatus } from '../../shared/types.ts';
 import { createControlServer, resolveControlAddress } from './control.ts';
 import {
   createForwardServer,
@@ -94,6 +94,12 @@ const denials = new Map<DenialCategory, number>();
 /** The targets that the egress profile of each box refused. */
 const refused = new RefusedTargets();
 
+/**
+ * The refused OAuth tokens since the last policy push, by credential id. The
+ * next push answer takes them.
+ */
+const refusedTokens = new Map<string, EgressRefusedToken>();
+
 /** Start time of this process in milliseconds since the epoch, for the uptime in the status. */
 const bootedAt = Date.now();
 
@@ -151,6 +157,14 @@ const interceptor = new Interceptor({
   policy: () => policy,
   upstreamProxyUrl: () => `http://127.0.0.1:${upstreamPort}`,
   denied,
+  refusedToken: (report) => {
+    refusedTokens.set(report.credentialId, report);
+    log('a server refused an OAuth token', {
+      credential: report.credentialId,
+      status: report.status,
+      error: report.error,
+    });
+  },
   log,
 });
 
@@ -214,6 +228,11 @@ const control = createControlServer({
       });
     }),
   status,
+  takeRefusedTokens: () => {
+    const reports = [...refusedTokens.values()];
+    refusedTokens.clear();
+    return reports;
+  },
   denials: (box) => refused.list(box),
   log,
 });

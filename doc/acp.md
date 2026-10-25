@@ -178,9 +178,9 @@ replay to the asking browser only: the replay goes into neither the log nor the 
 
 ### MCP servers
 
-The connection sends the `mcpServers` list in each `session/new`, `session/load` and `session/fork` call. It asks the
-box manager for the list at each call, and the manager puts the current placeholder of each API key in place of the
-`${NAME}` reference. A server whose key is gone is left out, with a warning in the log.
+The connection sends the `mcpServers` list in each `session/new`, `session/load` and `session/fork` call. The
+orchestrator makes the list at each call, with the placeholders of the secrets of each
+[MCP server](agent-sets.md#mcp-servers).
 
 A fork in `claude-agent-acp` copies only the transcript, and the adapter takes no prompt for it before a load. So the
 field `loadAfterFork` of the Claude harness makes the connection send `session/load` for the new session right after

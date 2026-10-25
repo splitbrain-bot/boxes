@@ -21,6 +21,10 @@ import type {
   HealthResponse,
   LoginCodeBody,
   LoginState,
+  McpCallbackAnswer,
+  McpCallbackBody,
+  McpConnectAnswer,
+  McpConnectBody,
   PushKeyResponse,
   PushSubscribeBody,
   ReviewAnnotationBody,
@@ -461,10 +465,10 @@ export const api = {
       method: 'DELETE',
     }),
   /**
-   * Adds or replaces one MCP server of a set.
+   * Adds one MCP server to a set, or changes the headers of a server.
    *
    * @param setId The id of the agent set.
-   * @param body The name, the URL and the headers of the server.
+   * @param body The name, the URL, the auth mode and the headers of the server.
    * @returns The whole set after the change.
    */
   putAgentMcpServer: (setId: string, body: AgentMcpServer) =>
@@ -484,6 +488,30 @@ export const api = {
       `/api/agent-sets/${setId}/mcp-servers?name=${encodeURIComponent(name)}`,
       { method: 'DELETE' },
     ),
+  /**
+   * Starts the OAuth login of an MCP server.
+   *
+   * @param setId The id of the agent set.
+   * @param name The name of the server.
+   * @param body The origin of the dashboard, and the client that the user entered.
+   * @returns The authorization URL, or the request for a client ID.
+   */
+  connectAgentMcpServer: (setId: string, name: string, body: McpConnectBody) =>
+    request<McpConnectAnswer>(
+      `/api/agent-sets/${setId}/mcp-servers/${encodeURIComponent(name)}/connect`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  /**
+   * Ends the OAuth login of an MCP server with the parameters of the redirect.
+   *
+   * @param body The parameters of the redirect.
+   * @returns The id of the agent set of the server.
+   */
+  mcpOAuthCallback: (body: McpCallbackBody) =>
+    request<McpCallbackAnswer>('/api/mcp-oauth/callback', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   /**
    * Adds a repository to take skills from, and pulls it.
    *

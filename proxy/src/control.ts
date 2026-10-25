@@ -3,7 +3,13 @@
 import dgram from 'node:dgram';
 import http from 'node:http';
 import os from 'node:os';
-import type { EgressDenial, EgressPolicy, EgressStatus } from '../../shared/types.ts';
+import type {
+  EgressDenial,
+  EgressPolicy,
+  EgressPushAnswer,
+  EgressRefusedToken,
+  EgressStatus,
+} from '../../shared/types.ts';
 import { parsePolicy, tokensMatch } from './policy.ts';
 
 /**
@@ -21,6 +27,8 @@ export interface ControlOptions {
   apply: (policy: EgressPolicy) => Promise<void>;
   /** Returns the current status. */
   status: () => EgressStatus;
+  /** Returns the refused OAuth tokens since the last call, and clears the list. */
+  takeRefusedTokens: () => EgressRefusedToken[];
   /** Returns the targets that the egress profile of a box refused, the most recent first. */
   denials: (box: string) => EgressDenial[];
   /** Writes one structured log line. */
@@ -165,7 +173,11 @@ export function createControlServer(opts: ControlOptions): ControlServer {
         try {
           const policy = parsePolicy(JSON.parse(body));
           await opts.apply(policy);
-          send(res, 200, opts.status());
+          const answer: EgressPushAnswer = {
+            ...opts.status(),
+            refusedTokens: opts.takeRefusedTokens(),
+          };
+          send(res, 200, answer);
         } catch (err) {
           const message = (err as Error).message;
           opts.log('rejected a pushed policy', { error: message });

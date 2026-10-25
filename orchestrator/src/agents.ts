@@ -17,6 +17,7 @@ import type {
   AgentItem,
   AgentItemBody,
   AgentMcpServer,
+  AgentMcpServerState,
   AgentRepoBody,
   AgentSetDetail,
   AgentSetSummary,
@@ -26,10 +27,10 @@ import type { AgentItemRow, AgentMcpServerRow, AgentRepoRow, AgentSetRow, Db } f
 import { HARNESSES } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
+import { McpSecretStore, OAUTH_HEADER } from './mcp-secrets.ts';
 import {
   MAX_MCP_SERVERS,
-  type McpContext,
-  mcpWarning,
+  type McpSnapshotEntry,
   resolveMcpServers,
   validMcpServer,
 } from './mcp-servers.ts';
@@ -91,7 +92,7 @@ interface Bundle {
   /** The names of the skills in the selected set that replace a skill of the global set. */
   overrides: string[];
   /** Every MCP server, sorted by name. */
-  mcpServers: AgentMcpServer[];
+  mcpServers: McpSnapshotEntry[];
   /** The names of the MCP servers in the selected set that replace a server of the global set. */
   mcpOverrides: string[];
 }
@@ -111,7 +112,7 @@ export class AgentStore {
    * @param dataDir The DATA_DIR that holds the repository checkouts.
    * @param fetcher The function that fetches a repository into its checkout for the owner of its set.
    * @param builtins The function that returns the built-in skills of the orchestrator for a user.
-   * @param mcpContext The function that returns the API keys of a user.
+   * @param secrets The store of the secrets of the MCP servers.
    */
   constructor(
     /** Where the sets are stored. */
@@ -123,8 +124,8 @@ export class AgentStore {
       fetchRepo(dir, url, ref, null, keep),
     /** Returns the built-in skills of the orchestrator for a user. */
     private readonly builtins: (owner: string) => BuiltinSkill[] = () => [],
-    /** Returns the API keys of a user, for the MCP server checks. */
-    private readonly mcpContext: (owner: string) => McpContext = () => ({ keys: [] }),
+    /** The secrets of the MCP servers. */
+    private readonly secrets: McpSecretStore = new McpSecretStore(db, () => undefined),
   ) {}
 
   /** The pulls running now, by repository id. */
@@ -188,7 +189,6 @@ export class AgentStore {
    */
   getSet(owner: string, id: string): AgentSetDetail {
     const row = this.mustGet(owner, id);
-    const ctx = this.mcpContext(owner);
     return {
       ...this.summarize(row),
       agentsMd: row.agents_md,
@@ -202,10 +202,7 @@ export class AgentStore {
         pulledAt: repo.pulled_at,
         error: repo.error,
       })),
-      mcpServers: this.mcpServers(id).map((server) => ({
-        ...server,
-        warning: mcpWarning(server, ctx),
-      })),
+      mcpServers: this.mcpServers(id).map((server) => this.mcpState(server)),
     };
   }
 
@@ -248,15 +245,47 @@ export class AgentStore {
    * @param setId The id of the set.
    * @returns The servers, sorted by name.
    */
-  private mcpServers(setId: string): AgentMcpServer[] {
+  private mcpServers(setId: string): McpSnapshotEntry[] {
     const rows = this.db
       .prepare('SELECT * FROM agent_mcp_servers WHERE set_id = ? ORDER BY name')
       .all(setId) as AgentMcpServerRow[];
     return rows.map((row) => ({
+      setId,
       name: row.name,
       url: row.url,
+      auth: row.auth,
       headers: JSON.parse(row.headers) as AgentMcpServer['headers'],
     }));
+  }
+
+  /**
+   * Gives a stored MCP server in the form that the editor shows, with the
+   * status of its OAuth token.
+   *
+   * @param server The stored server.
+   * @returns The server.
+   */
+  private mcpState({ setId, ...server }: McpSnapshotEntry): AgentMcpServerState {
+    const token =
+      server.auth === 'oauth' ? this.secrets.get(setId, server.name, OAUTH_HEADER) : undefined;
+    return { ...server, status: token?.status ?? null, lastError: token?.last_error ?? null };
+  }
+
+  /**
+   * Gives one stored MCP server of a set of a user.
+   *
+   * @param owner The user.
+   * @param setId The id of the set.
+   * @param name The name of the server.
+   * @returns The server.
+   * @throws {HttpError} A 404 when the user has no such set or the server does not exist.
+   */
+  mcpServer(owner: string, setId: string, name: string): AgentMcpServer {
+    this.mustGet(owner, setId);
+    const found = this.mcpServers(setId).find((server) => server.name === name);
+    if (!found) throw new HttpError(404, 'No such MCP server');
+    const { setId: _, ...server } = found;
+    return server;
   }
 
   /**
@@ -473,23 +502,30 @@ export class AgentStore {
   }
 
   /**
-   * Creates an MCP server, or replaces the server with the same name.
+   * Creates an MCP server, or changes the headers of the server with the same
+   * name. The server and its secret rows change in one transaction.
    *
    * @param owner The user.
    * @param id The id of the set.
-   * @param body The name, the URL and the headers of the server.
+   * @param body The name, the URL, the auth mode and the headers of the server.
    * @returns The changed set.
-   * @throws {HttpError} A 404 when the user has no such set, or a 400 when a field is not valid or
-   *   the set is full.
+   * @throws {HttpError} A 404 when the user has no such set, or a 400 when a field is not valid,
+   *   the URL or the auth mode of the stored server differs, or the set is full.
    */
   putMcpServer(owner: string, id: string, body: AgentMcpServer): AgentSetDetail {
     this.mustGet(owner, id);
-    const server = validMcpServer(body, this.mcpContext(owner));
+    const server = validMcpServer(body);
     const now = Date.now();
 
     const existing = this.db
-      .prepare('SELECT 1 FROM agent_mcp_servers WHERE set_id = ? AND name = ?')
-      .get(id, server.name);
+      .prepare('SELECT * FROM agent_mcp_servers WHERE set_id = ? AND name = ?')
+      .get(id, server.name) as AgentMcpServerRow | undefined;
+    if (existing && (existing.url !== server.url || existing.auth !== server.auth)) {
+      throw new HttpError(
+        400,
+        'The URL and the auth mode of an MCP server are fixed. Delete the server and add it again',
+      );
+    }
     if (!existing) {
       const count = this.db
         .prepare('SELECT COUNT(*) AS n FROM agent_mcp_servers WHERE set_id = ?')
@@ -499,22 +535,27 @@ export class AgentStore {
       }
     }
 
+    // The values of the secret headers go into the secret rows only.
+    const stored = server.headers.map((header) =>
+      header.secret ? { ...header, value: '' } : header,
+    );
     this.db.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO agent_mcp_servers (set_id, name, url, headers, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
+          `INSERT INTO agent_mcp_servers (set_id, name, url, auth, headers, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(set_id, name) DO UPDATE SET
-             url = excluded.url, headers = excluded.headers, updated_at = excluded.updated_at`,
+             headers = excluded.headers, updated_at = excluded.updated_at`,
         )
-        .run(id, server.name, server.url, JSON.stringify(server.headers), now, now);
+        .run(id, server.name, server.url, server.auth, JSON.stringify(stored), now, now);
+      this.secrets.writeForServer(id, server.name, server.auth, server.headers);
       this.db.prepare('UPDATE agent_sets SET updated_at = ? WHERE id = ?').run(now, id);
     })();
     return this.getSet(owner, id);
   }
 
   /**
-   * Removes one MCP server.
+   * Removes one MCP server, together with its secret rows.
    *
    * @param owner The user.
    * @param id The id of the set.
@@ -713,36 +754,38 @@ export class AgentStore {
   }
 
   /**
-   * Gives the merged MCP servers for a box, with the `${NAME}` references in
-   * the header values. The adapters of the box use this list until its next start.
+   * Gives the merged MCP servers for a box. The adapters of the box use this
+   * list until its next start.
    *
    * @param owner The owner of the box.
    * @param setId The id of the set that the box selected, or null for only the global set.
    * @returns The servers, sorted by name.
    */
-  mcpSnapshot(owner: string, setId: string | null): AgentMcpServer[] {
+  mcpSnapshot(owner: string, setId: string | null): McpSnapshotEntry[] {
     return this.merge(owner, setId).mcpServers;
   }
 
   /**
    * Makes the `mcpServers` list for an adapter from the servers of a box, with
-   * the current placeholders of the API keys of the owner. A server whose key
-   * is gone is left out, with a warning in the log.
+   * the placeholders of their secret rows. A server without a stored secret is
+   * left out, with a warning in the log.
    *
    * @param owner The owner of the box.
    * @param servers The servers that the box got at its start.
    * @returns The list for the adapter.
    */
-  mcpServersFor(owner: string, servers: readonly AgentMcpServer[]): McpServer[] {
-    const { keys } = this.mcpContext(owner);
+  mcpServersFor(owner: string, servers: readonly McpSnapshotEntry[]): McpServer[] {
     return resolveMcpServers(
       servers,
-      (name) => keys.find((key) => key.name === name),
-      (server, missingKey) =>
-        log.warn('left out an MCP server, because its API key does not exist', {
+      (setId, server, header) => {
+        const row = this.secrets.get(setId, server, header);
+        return row && row.secret !== '' ? row.placeholder : undefined;
+      },
+      (server, header) =>
+        log.warn('left out an MCP server, because it has no secret for a header', {
           owner,
           server,
-          key: missingKey,
+          header,
         }),
     );
   }

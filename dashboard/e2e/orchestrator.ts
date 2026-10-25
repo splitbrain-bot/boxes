@@ -21,6 +21,7 @@ import {
   type ThreadRow,
   upsertHarnessCatalog,
 } from '../../orchestrator/src/db.ts';
+import { type FakeOAuth, fakeOAuth } from '../../orchestrator/src/fake-oauth.ts';
 import { checkUpgrade } from '../../orchestrator/src/gateway/downstream.ts';
 import { attachTerminal } from '../../orchestrator/src/gateway/terminal.ts';
 import { setLogLevel } from '../../orchestrator/src/log.ts';
@@ -382,6 +383,8 @@ export interface AgentSetSpec {
 export interface TestOrchestrator {
   /** The base URL the orchestrator listens on. */
   url: string;
+  /** The fake MCP server and authorization server that the OAuth client of the orchestrator reaches. */
+  oauth: FakeOAuth;
   /** The ACP gateway attached to the same server, on the same origin. */
   gateway: StubGateway;
   /** The facts the deployment reports about itself. Setting a field changes them. */
@@ -1112,7 +1115,11 @@ export async function startOrchestrator(
   const docker = installFakeDocker(cfg.BOX_IMAGE, FAKE_SELF_CONTAINER);
   const db = openDb(dataDir);
   // The bundle this run just built, rather than the copy a built image holds.
-  const app = buildApp(cfg, db, { bundleDir: resolve(import.meta.dirname, '../dist') });
+  const oauth = fakeOAuth();
+  const app = buildApp(cfg, db, {
+    bundleDir: resolve(import.meta.dirname, '../dist'),
+    mcpFetch: oauth.fetch,
+  });
   installLocalGit((boxId) => ws.workspacePath(dataDir, boxId));
   installLocalFiles((boxId) => ws.workspacePath(dataDir, boxId));
 
@@ -1263,6 +1270,7 @@ export async function startOrchestrator(
 
   const harness: TestOrchestrator = {
     url: `http://127.0.0.1:${port}`,
+    oauth,
     gateway,
     state,
     ...calls,

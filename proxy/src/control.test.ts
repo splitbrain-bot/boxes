@@ -4,7 +4,12 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { EgressDenial, EgressPolicy, EgressStatus } from '../../shared/types.ts';
+import type {
+  EgressDenial,
+  EgressPolicy,
+  EgressRefusedToken,
+  EgressStatus,
+} from '../../shared/types.ts';
 import { createControlServer } from './control.ts';
 import { policyHash } from './policy.ts';
 
@@ -39,22 +44,26 @@ const refusedTargets: EgressDenial[] = [
  * Starts a control server on loopback.
  *
  * @param reject When set, every push fails with this message.
- * @returns The port, the accepted policies, the claim state and the box ids that the denials callback got.
+ * @returns The port, the accepted policies, the claim state, the box ids that the denials callback got, and the
+ *   list of refused tokens that the next push takes.
  */
 async function start(reject?: string): Promise<{
   port: number;
   applied: EgressPolicy[];
   claimed: () => boolean;
   asked: string[];
+  refused: EgressRefusedToken[];
 }> {
   const applied: EgressPolicy[] = [];
   const asked: string[] = [];
+  const refused: EgressRefusedToken[] = [];
   const control = createControlServer({
     apply: async (policy) => {
       if (reject) throw new Error(reject);
       applied.push(policy);
     },
     status: () => ({ ...emptyStatus, applied: applied.length > 0 }),
+    takeRefusedTokens: () => refused.splice(0),
     denials: (box) => {
       asked.push(box);
       return box === 'box-1' ? refusedTargets : [];
@@ -67,7 +76,7 @@ async function start(reject?: string): Promise<{
       resolve((control.server.address() as AddressInfo).port),
     );
   });
-  return { port, applied, claimed: control.claimed, asked };
+  return { port, applied, claimed: control.claimed, asked, refused };
 }
 
 /**
@@ -154,6 +163,22 @@ describe('the control channel', () => {
     const res = await call(port, 'GET', '/status', 'token');
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body)).toMatchObject({ applied: true });
+  });
+
+  it('gives the refused tokens to the next push answer once', async () => {
+    const { port, refused } = await start();
+    const report = {
+      credentialId: 'mcp/s1/docs/authorization',
+      status: 401,
+      error: null,
+      scope: null,
+    };
+    refused.push(report);
+
+    const first = await call(port, 'POST', '/policy', 'token', policy);
+    expect(JSON.parse(first.body)).toMatchObject({ applied: true, refusedTokens: [report] });
+    const second = await call(port, 'POST', '/policy', 'token', policy);
+    expect(JSON.parse(second.body).refusedTokens).toEqual([]);
   });
 
   it('refuses a malformed policy without applying anything', async () => {

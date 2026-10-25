@@ -36,6 +36,8 @@ import {
   createEgressProfileBody,
   createThreadBody,
   loginCodeBody,
+  mcpCallbackBody,
+  mcpConnectBody,
   parseBody,
   patchSettingsBody,
   pushSubscribeBody,
@@ -77,6 +79,8 @@ import { HttpError } from './http-error.ts';
 import { deploymentImages } from './images.ts';
 import { log } from './log.ts';
 import { LoginManager } from './login.ts';
+import { McpOAuth, type OAuthFetch } from './mcp-oauth.ts';
+import { McpSecretStore } from './mcp-secrets.ts';
 import { mcpHostPattern } from './mcp-servers.ts';
 import { Notifier } from './notify.ts';
 import { MAX_FILE_BYTES } from './review/fs.ts';
@@ -269,6 +273,8 @@ export interface BuildOptions {
    * it, the app serves everything at once.
    */
   boot?: BootState;
+  /** The function that sends the requests of the OAuth client of the MCP servers. */
+  mcpFetch?: OAuthFetch;
 }
 
 /** The connected objects of one orchestrator process, for its start code and its tests. */
@@ -287,6 +293,8 @@ export interface Orchestrator {
   credentials: CredentialStore;
   /** The logins that run now, at most one for each user and credential. */
   logins: LoginManager;
+  /** The OAuth client of the MCP servers, which refreshes their tokens. */
+  mcpOAuth: McpOAuth;
   /** The dev tunnels of each box, and the removal of tunnels that no box uses. */
   tunnels: TunnelReconciler;
   /**
@@ -321,7 +329,20 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   const credentials = new CredentialStore(db, () => repushPolicy(), cfg.credentialSet);
   const apiKeys = new ApiKeyStore(db, () => repushPolicy());
   const profiles = new EgressProfileStore(db, () => repushPolicy());
-  const egress = new EgressManager(cfg, credentials, apiKeys, db, () => egressBoxes());
+  const mcpSecrets = new McpSecretStore(db, () => repushPolicy());
+  const egress = new EgressManager(
+    cfg,
+    credentials,
+    apiKeys,
+    db,
+    () => egressBoxes(),
+    () => mcpSecrets.listAll(),
+    (tokens) => {
+      void mcpOAuth.handleRefused(tokens).catch((err: Error) => {
+        log.warn('could not handle the refused tokens of MCP servers', { error: err.message });
+      });
+    },
+  );
   const notifier = new Notifier(db, cfg);
 
   /**
@@ -372,7 +393,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       return fetchRepo(dir, url, ref, row ? deliverableSecret(row) : null, keep);
     },
     (owner) => builtinSkills({ hasCredential: (id) => credentials.get(owner, id) !== undefined }),
-    (owner) => ({ keys: apiKeys.list(owner) }),
+    mcpSecrets,
+  );
+  const mcpOAuth = new McpOAuth(
+    mcpSecrets,
+    (owner, setId, name) => agents.mcpServer(owner, setId, name),
+    opts.mcpFetch,
   );
   // The closure lets the reconciler be built before the manager it reads.
   const tunnels = new TunnelReconciler(
@@ -940,7 +966,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     return agents.deleteItem(userOf(req), setId, name);
   });
 
-  /** Creates an MCP server, or replaces the one already under that name. */
+  /** Creates an MCP server, or changes the headers of the one already under that name. */
   app.put('/api/agent-sets/:setId/mcp-servers', async (req) => {
     const { setId } = req.params as { setId: string };
     const set = agents.putMcpServer(userOf(req), setId, parseBody(agentMcpServerBody, req.body));
@@ -955,6 +981,18 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     repushPolicy();
     return set;
   });
+
+  /** Starts the OAuth login of an MCP server. */
+  app.post('/api/agent-sets/:setId/mcp-servers/:name/connect', async (req) => {
+    const { setId, name } = req.params as { setId: string; name: string };
+    const body = parseBody(mcpConnectBody, req.body);
+    return mcpOAuth.connect(userOf(req), setId, name, body, req.headers.origin);
+  });
+
+  /** Ends an OAuth login with the parameters of the redirect to the dashboard. */
+  app.post('/api/mcp-oauth/callback', async (req) =>
+    mcpOAuth.callback(userOf(req), parseBody(mcpCallbackBody, req.body)),
+  );
 
   /** Adds a repository to take skills from, and pulls it. */
   app.post('/api/agent-sets/:setId/repos', async (req, reply) => {
@@ -1290,6 +1328,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     egress,
     credentials,
     logins,
+    mcpOAuth,
     tunnels,
     setIsolationWarnings: (warnings) => {
       isolationWarnings = warnings;

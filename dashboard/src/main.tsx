@@ -20,6 +20,10 @@ const AgentSetEditor = lazy(async () => ({
 const AgentSets = lazy(async () => ({
   default: (await import('./views/AgentSets.tsx')).AgentSets,
 }));
+/** The page of the redirect after an OAuth login. Loaded on first use. */
+const OAuthCallback = lazy(async () => ({
+  default: (await import('./views/OAuthCallback.tsx')).OAuthCallback,
+}));
 /** The egress profile editor view. Loaded on first use. */
 const EgressProfileEditor = lazy(async () => ({
   default: (await import('./views/EgressProfileEditor.tsx')).EgressProfileEditor,
@@ -119,6 +123,7 @@ function App() {
             <Route path="/new" element={<BoxCreate />} />
             <Route path="/agents" element={<AgentSets />} />
             <Route path="/agents/:setId" element={<AgentSetEditor />} />
+            <Route path="/oauth/callback" element={<OAuthCallback />} />
             <Route path="/egress" element={<EgressProfiles />} />
             <Route path="/egress/:profileId" element={<EgressProfileEditor />} />
             <Route path="/settings" element={<Settings />} />

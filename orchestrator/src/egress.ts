@@ -8,7 +8,8 @@ import type {
   EgressDenial,
   EgressHealth,
   EgressPolicy,
-  EgressStatus,
+  EgressPushAnswer,
+  EgressRefusedToken,
 } from '../../shared/types.ts';
 import type { ApiKeyRow, ApiKeyStore } from './api-keys.ts';
 import type { Config } from './config.ts';
@@ -21,6 +22,8 @@ import {
 } from './credentials.ts';
 import { type Db, readAppKey, writeAppKey } from './db.ts';
 import { log } from './log.ts';
+import type { McpSecretEntry } from './mcp-secrets.ts';
+import { mcpHostPattern } from './mcp-servers.ts';
 
 /** The app key under which the CA and the control token are stored. */
 const APP_KEY = 'egress';
@@ -98,6 +101,24 @@ function apiKeyPolicyId(key: ApiKeyRow): string {
 }
 
 /**
+ * Gives the id of a secret row of an MCP server in the policy.
+ *
+ * @param row The secret row.
+ * @returns The id in the policy.
+ */
+export function mcpPolicyId(row: McpSecretEntry): string {
+  return policyId(row.owner, `mcp/${row.set_id}/${row.server}/${row.header}`);
+}
+
+/** A refused OAuth token that the proxy reported, with its secret row. */
+export interface RefusedMcpToken {
+  /** The secret row of the token. */
+  row: McpSecretEntry;
+  /** The report of the proxy. */
+  refusal: EgressRefusedToken;
+}
+
+/**
  * Builds the policy that the proxy runs, for every user and every box.
  *
  * The policy always carries the CA, as boxes created before the first
@@ -105,7 +126,8 @@ function apiKeyPolicyId(key: ApiKeyRow): string {
  * credential for it has a deliverable secret. One host can have a credential
  * of each user. The proxy selects the credential whose placeholder is in the
  * request. An API key names no header, so the proxy swaps it in whatever
- * header carries its placeholder.
+ * header carries its placeholder. A secret of an MCP server names its header
+ * and the host of its server.
  *
  * A box can always reach the hosts of the credentials with a deliverable
  * secret and of the API keys of its owner, the other hosts that the tools of
@@ -117,6 +139,7 @@ function apiKeyPolicyId(key: ApiKeyRow): string {
  * @param stored The rows of the credential store.
  * @param apiKeys The rows of the API key store.
  * @param boxes The boxes that are not deleted.
+ * @param mcpSecrets The secret rows of the MCP servers.
  * @returns The policy for the proxy.
  */
 export function composePolicy(
@@ -125,6 +148,7 @@ export function composePolicy(
   stored: readonly CredentialRow[],
   apiKeys: readonly ApiKeyRow[],
   boxes: readonly EgressBoxInput[],
+  mcpSecrets: readonly McpSecretEntry[] = [],
 ): EgressPolicy {
   const credentials: EgressCredential[] = [];
   const ownerHosts = new Map<string, string[]>();
@@ -157,6 +181,18 @@ export function composePolicy(
       secret: key.secret,
     });
   }
+  for (const row of mcpSecrets) {
+    const host = mcpHostPattern(row.url);
+    if (row.secret === '' || host === null) continue;
+    credentials.push({
+      id: mcpPolicyId(row),
+      hosts: [host],
+      headers: [row.header],
+      placeholder: row.placeholder,
+      secret: row.secret,
+      ...(row.auth === 'oauth' ? { oauth: true } : {}),
+    });
+  }
 
   const boxPolicies = boxes.map(
     (box): EgressBoxPolicy => ({
@@ -180,15 +216,15 @@ export function composePolicy(
  * @param cfg The configuration of the deployment, with the URL of the control channel.
  * @param material The material with the control token.
  * @param policy The policy to push.
- * @returns The status that the proxy reports back.
+ * @returns The status that the proxy reports back, with the refused OAuth tokens since the last push.
  * @throws Error When the call fails or the proxy answers with an error status.
  */
 export async function pushPolicy(
   cfg: Config,
   material: EgressMaterial,
   policy: EgressPolicy,
-): Promise<EgressStatus> {
-  return controlCall<EgressStatus>(cfg, material, 'POST', '/policy', policy);
+): Promise<EgressPushAnswer> {
+  return controlCall<EgressPushAnswer>(cfg, material, 'POST', '/policy', policy);
 }
 
 /**
@@ -270,6 +306,8 @@ export class EgressManager {
    * @param apiKeys The source of the API keys.
    * @param db The database that holds the CA and the control token.
    * @param boxes The function that returns the boxes that are not deleted, with their profiles and MCP hosts.
+   * @param mcpSecrets The function that returns the secret rows of the MCP servers.
+   * @param onRefused The function that gets the refused OAuth tokens that a push reports.
    */
   constructor(
     /** The deployment's configuration. */
@@ -282,6 +320,10 @@ export class EgressManager {
     private readonly db: Db,
     /** Returns the boxes that are not deleted, read on every compose. */
     private readonly boxes: () => EgressBoxInput[] = () => [],
+    /** Returns the secret rows of the MCP servers, read on every compose. */
+    private readonly mcpSecrets: () => McpSecretEntry[] = () => [],
+    /** Gets the refused OAuth tokens that a push reports. */
+    private readonly onRefused: (tokens: RefusedMcpToken[]) => void = () => undefined,
   ) {}
 
   /** Loads the material, without talking to the proxy. */
@@ -365,6 +407,9 @@ export class EgressManager {
     const own = new Set([
       ...this.credentials.list(owner).map((row) => policyId(owner, row.id)),
       ...this.apiKeys.list(owner).map(apiKeyPolicyId),
+      ...this.mcpSecrets()
+        .filter((row) => row.owner === owner)
+        .map(mcpPolicyId),
     ]);
     return {
       ...this.health,
@@ -387,22 +432,26 @@ export class EgressManager {
   /**
    * Recomposes the policy from the store, pushes it, and records what the
    * proxy reported. The boot, every store write and every reconciler tick call it.
+   * The refused OAuth tokens of the answer go to onRefused.
    *
    * @throws Error When the push fails. The health then records the error.
    */
   async sync(): Promise<void> {
     if (!this.material) await this.prepare();
     const material = this.prepared();
+    const mcpSecrets = this.mcpSecrets();
     const composed = composePolicy(
       this.cfg,
       material,
       this.credentials.listAll(),
       this.apiKeys.listAll(),
       this.boxes(),
+      mcpSecrets,
     );
 
+    let status: EgressPushAnswer;
     try {
-      const status = await pushPolicy(this.cfg, material, composed);
+      status = await pushPolicy(this.cfg, material, composed);
       this.health = {
         inSync: status.applied,
         credentialIds: status.credentialIds,
@@ -419,5 +468,12 @@ export class EgressManager {
       };
       throw err;
     }
+
+    const rows = new Map(mcpSecrets.map((row) => [mcpPolicyId(row), row]));
+    const refused = (status.refusedTokens ?? []).flatMap((refusal) => {
+      const row = rows.get(refusal.credentialId);
+      return row ? [{ row, refusal }] : [];
+    });
+    if (refused.length > 0) this.onRefused(refused);
   }
 }

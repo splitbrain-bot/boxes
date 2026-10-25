@@ -8,9 +8,9 @@ The proxy does two things. It controls which hosts the tools in a box can connec
 to those hosts. A real credential thus never enters a box container.
 
 The proxy keeps its rules in memory. It has no configuration file and no database. The orchestrator sends the rules to
-the proxy at start, and again after each change to a credential, an API key, a profile or a box. Only the Compose
-network `boxes_default` can connect to this control channel. The orchestrator and the proxy share that network, and the
-box networks have no route to it.
+the proxy at start, and again after each change to a credential, an API key, an MCP server, a profile or a box. Only
+the Compose network `boxes_default` can connect to this control channel. The orchestrator and the proxy share that
+network, and the box networks have no route to it.
 
 ```mermaid
 flowchart TB
@@ -63,6 +63,7 @@ Each credential is valid for a fixed set of hosts:
 | GitLab | `gitlab.com`, or the host in `GITLAB_HOST` |
 | Dev Tunnels | `*.rel.tunnels.api.visualstudio.com` |
 | Other API keys | the hosts set for each key |
+| Secrets of [MCP servers](agent-sets.md#mcp-servers) | the host and the port of the MCP server |
 
 ## The deployment certificate authority
 
@@ -215,6 +216,12 @@ A protocol upgrade is forwarded with its headers unchanged, so the engine refuse
 This is why the box image sets `supports_websockets = false` for Codex: the harness uses HTTPS directly instead of
 retrying a refused upgrade.
 
+The proxy reports to the orchestrator when an MCP server refuses an OAuth token. The orchestrator then refreshes the
+token or marks the login as failing. An answer 401, or an answer 403 with a Bearer challenge, is a refusal, and the
+proxy keeps the scopes that the challenge asks for. The proxy cannot call the orchestrator, so it returns the refusals
+in the answer to the next policy push. The engine reads the status when the answer starts, so an event stream reaches
+the client without delay.
+
 The engine resolves no name of its own. It sends every request to the upstream tunnel, and the tunnel vets the
 destination and opens the socket.
 
@@ -231,7 +238,8 @@ policy, so the reconciler pushes it again every minute.
 
 `composePolicy` builds one policy for each box that is not deleted, with its id, its token, the mode of its profile and
 its hosts. The hosts are those of the profile, the credentials and the API keys of the owner, and the MCP servers of the
-box. The policy holds the credentials and the API keys of every [user](users.md), so one host can have one credential of
-each user. The proxy selects the credential whose placeholder is in the request. In the policy, the id of a credential
-has its owner as a prefix, for example `alice/claude`, because the ids must be unique. A credential of the empty user
-has no prefix.
+box. The policy holds the credentials, the API keys and the secrets of the MCP servers of every [user](users.md), so one
+host can have more than one credential. The proxy selects the credential whose placeholder is in the request. In the
+policy, the id of a credential has its owner as a prefix, for example `alice/claude`, because the ids must be unique. A
+credential of the empty user has no prefix. The credential of a secret of an MCP server names only the header of the
+secret, and its id is `<owner>/mcp/<set>/<server>/<header>`.
