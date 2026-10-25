@@ -131,6 +131,10 @@ clears the base back to each repository's own HEAD. The answer says where the ex
 | DELETE | `/api/agent-sets/:setId` | 204 |
 | PUT | `/api/agent-sets/:setId/items` | `AgentSetDetail` |
 | DELETE | `/api/agent-sets/:setId/items?name=<n>` | `AgentSetDetail` |
+| PUT | `/api/agent-sets/:setId/mcp-servers` | `AgentSetDetail` |
+| DELETE | `/api/agent-sets/:setId/mcp-servers?name=<n>` | `AgentSetDetail` |
+| POST | `/api/agent-sets/:setId/mcp-servers/:name/connect` | `McpConnectAnswer` |
+| POST | `/api/mcp-oauth/callback` | `McpCallbackAnswer` |
 | POST | `/api/agent-sets/:setId/repos` | 201, `AgentSetDetail` |
 | DELETE | `/api/agent-sets/:setId/repos/:repoId` | `AgentSetDetail` |
 | POST | `/api/agent-sets/:setId/repos/:repoId/pull` | `AgentSetDetail` |
@@ -141,6 +145,20 @@ mutation answers with the whole set.
 
 `PUT …/items` accepts an `AgentItemBody` with `name` and `content`, and creates or replaces the skill under that name.
 DELETE removes it.
+
+`PUT …/mcp-servers` accepts an `AgentMcpServer` with `name`, `url`, `auth` and `headers`. It creates the
+[MCP server](agent-sets.md#mcp-servers), or it changes the headers of the server with that name. Each header has
+`name`, `value` and `secret`. A secret header with an empty value keeps the stored value. The answer contains each
+secret header with an empty value. DELETE removes the server.
+
+`POST …/connect` accepts `{ "origin": "…", "clientId"?, "clientSecret"? }` and starts the
+[OAuth login](agent-sets.md#mcp-servers) of the server. `origin` is the origin of the dashboard, and it must be equal
+to the `Origin` header of the request. The answer contains the `authorizationUrl` for the browser. When the server
+needs a client from the user, the answer contains `needsClient: true` and the `redirectUri` for the client.
+
+`POST /api/mcp-oauth/callback` accepts `{ "state": "…", "code"?, "iss"?, "error"?, "errorDescription"? }` with the
+parameters of the redirect. It stores the token and answers with the `setId` of the server. The orchestrator accepts
+one callback for each login, in the 10 minutes after the connect.
 
 `POST …/repos` accepts an `AgentRepoBody` with `url` and an optional `ref`, adds the repository, and pulls it. A failed
 pull is not an error of the request: the set's `repos` list shows it. `POST …/pull` pulls the repository again.

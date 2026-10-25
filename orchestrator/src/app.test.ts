@@ -19,9 +19,11 @@ import { buildApp, type Orchestrator } from './app.ts';
 import { config, loadConfig } from './config.ts';
 import { type Db, openDb, upsertHarnessCatalog } from './db.ts';
 import * as dk from './docker.ts';
+import { fakeOAuth } from './fake-oauth.ts';
 import { setFileServiceSpawnerForTests } from './files.ts';
 import { inProcessFileService } from './files-in-process.ts';
 import type { LoginExecSpec } from './login.ts';
+import type { OAuthFetch } from './mcp-oauth.ts';
 import { runtime } from './runtime/runtime.ts';
 import * as ws from './workspaces.ts';
 
@@ -841,15 +843,11 @@ test('the preview shows the merge, overrides named', async () => {
 });
 
 test('an MCP server is written, refused and removed over the API', async () => {
-  await orchestrator.app.inject({
-    method: 'PUT',
-    url: '/api/api-keys/GITHUB_MCP_TOKEN',
-    payload: { hosts: ['api.githubcopilot.com'], secret: 'ghp_0123456789abcdef' },
-  });
   const server = {
     name: 'github',
     url: 'https://api.githubcopilot.com/mcp/',
-    headers: [{ name: 'Authorization', value: `Bearer \${GITHUB_MCP_TOKEN}` }],
+    auth: 'bearer',
+    headers: [{ name: 'Authorization', value: 'Bearer ghp_0123456789abcdef', secret: true }],
   };
 
   const put = await orchestrator.app.inject({
@@ -859,15 +857,32 @@ test('an MCP server is written, refused and removed over the API', async () => {
   });
   assert.equal(put.statusCode, 200);
   assert.deepEqual((put.json() as { mcpServers: unknown[] }).mcpServers, [
-    { ...server, warning: null },
+    {
+      ...server,
+      headers: [{ name: 'Authorization', value: '', secret: true }],
+      status: null,
+      lastError: null,
+    },
   ]);
+  assert.ok(!put.body.includes('ghp_'));
 
   const literal = await orchestrator.app.inject({
     method: 'PUT',
     url: '/api/agent-sets/global/mcp-servers',
-    payload: { ...server, headers: [{ name: 'Authorization', value: 'Bearer ghp_literal' }] },
+    payload: {
+      ...server,
+      auth: 'headers',
+      headers: [{ name: 'Authorization', value: 'Bearer ghp_literal' }],
+    },
   });
   assert.equal(literal.statusCode, 400);
+  const moved = await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/agent-sets/global/mcp-servers',
+    payload: { ...server, url: 'https://api.githubcopilot.com/v2/' },
+  });
+  assert.equal(moved.statusCode, 400);
+  assert.match(moved.body, /fixed/);
 
   const preview = (
     await orchestrator.app.inject({ url: '/api/agent-sets/global/preview' })
@@ -1053,6 +1068,15 @@ test('a box changes its egress profile, and moves to the default when its profil
 interface PushedPolicy {
   /** The policy of each box. */
   boxes: Array<{ box: string; open: boolean; hosts: string[] }>;
+  /** The credentials, with the fields that the tests read. */
+  credentials: Array<{
+    id: string;
+    hosts: string[];
+    headers: string[];
+    placeholder: string;
+    secret: string;
+    oauth?: boolean;
+  }>;
 }
 
 /**
@@ -1060,10 +1084,14 @@ interface PushedPolicy {
  * channel. The fake records each policy push and answers each denials read.
  *
  * @param denials The answer to a read of the refused hosts of a box.
+ * @param refusedTokens Gives the refused OAuth tokens for the answer to a push.
+ * @param mcpFetch The fetch function of the OAuth client.
  * @returns The bodies of the policy pushes and the URLs of the denials reads.
  */
 async function withFakeProxy(
   denials: unknown[],
+  refusedTokens: () => unknown[] = () => [],
+  mcpFetch?: OAuthFetch,
 ): Promise<{ policies: PushedPolicy[]; reads: string[] }> {
   const policies: PushedPolicy[] = [];
   const reads: string[] = [];
@@ -1086,6 +1114,7 @@ async function withFakeProxy(
           credentialIds: [],
           denials: {},
           uptimeSeconds: 1,
+          refusedTokens: refusedTokens(),
         }),
       );
     });
@@ -1101,6 +1130,7 @@ async function withFakeProxy(
       EGRESS_CONTROL_URL: `http://127.0.0.1:${port}`,
     }),
     db,
+    { mcpFetch },
   );
   orchestrator.app.addHook('onClose', async () => {
     server.close();
@@ -1136,7 +1166,15 @@ test('a removed MCP server leaves the policy, also before the next start of the 
   insertBox('abc123');
   // The adapters still have the server from the last start of the box.
   db.prepare("UPDATE boxes SET mcp_servers = ? WHERE id = 'abc123'").run(
-    JSON.stringify([{ name: 'docs', url: 'https://docs.example.com/mcp', headers: [] }]),
+    JSON.stringify([
+      {
+        setId: 'global',
+        name: 'docs',
+        url: 'https://docs.example.com/mcp',
+        auth: 'none',
+        headers: [],
+      },
+    ]),
   );
   const { policies } = await withFakeProxy([]);
   const hostsOfBox = (): string[] | undefined =>
@@ -1145,7 +1183,7 @@ test('a removed MCP server leaves the policy, also before the next start of the 
   await orchestrator.app.inject({
     method: 'PUT',
     url: '/api/agent-sets/global/mcp-servers',
-    payload: { name: 'docs', url: 'https://docs.example.com/mcp', headers: [] },
+    payload: { name: 'docs', url: 'https://docs.example.com/mcp', auth: 'none', headers: [] },
   });
   await untilTrue(
     'the push with the server',
@@ -1160,6 +1198,119 @@ test('a removed MCP server leaves the policy, also before the next start of the 
     'the push without the server',
     () => hostsOfBox()?.includes('docs.example.com:443') === false,
   );
+});
+
+test('an OAuth login runs through the connect and the callback routes, and its token reaches the policy', async () => {
+  const fake = fakeOAuth();
+  const { policies } = await withFakeProxy([], () => [], fake.fetch);
+  const origin = 'https://boxes.example.com';
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/agent-sets/global/mcp-servers',
+    payload: { name: 'docs', url: fake.mcpUrl, auth: 'oauth', headers: [] },
+  });
+
+  const noOrigin = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/agent-sets/global/mcp-servers/docs/connect',
+    payload: { origin },
+  });
+  assert.equal(noOrigin.statusCode, 400);
+
+  const connect = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/agent-sets/global/mcp-servers/docs/connect',
+    headers: { origin },
+    payload: { origin },
+  });
+  assert.equal(connect.statusCode, 200);
+  const { authorizationUrl } = connect.json() as { authorizationUrl: string };
+  const params = fake.authorize(authorizationUrl);
+
+  const callback = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/mcp-oauth/callback',
+    payload: { state: params.get('state'), code: params.get('code'), iss: params.get('iss') },
+  });
+  assert.equal(callback.statusCode, 200);
+  const setId = orchestrator.agents.globalId('');
+  assert.deepEqual(callback.json(), { setId });
+
+  const set = (await orchestrator.app.inject({ url: '/api/agent-sets/global' })).json() as {
+    mcpServers: Array<{ status: string | null }>;
+  };
+  assert.equal(set.mcpServers[0]?.status, 'ok');
+  assert.ok(!JSON.stringify(set).includes('at-3'));
+
+  const id = `mcp/${setId}/docs/authorization`;
+  await untilTrue('the push with the token', () =>
+    (policies.at(-1)?.credentials ?? []).some((c) => c.id === id),
+  );
+  const credential = policies.at(-1)?.credentials.find((c) => c.id === id);
+  assert.deepEqual(
+    [credential?.hosts, credential?.headers, credential?.secret, credential?.oauth],
+    [['mcp.example.com:443'], ['authorization'], 'Bearer at-3', true],
+  );
+
+  const replay = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/mcp-oauth/callback',
+    payload: { state: params.get('state'), code: params.get('code'), iss: params.get('iss') },
+  });
+  assert.equal(replay.statusCode, 400);
+});
+
+test('a token that the proxy reports as refused gets a refresh', async () => {
+  const fake = fakeOAuth();
+  let reports: unknown[] = [];
+  await withFakeProxy(
+    [],
+    () => {
+      const taken = reports;
+      reports = [];
+      return taken;
+    },
+    fake.fetch,
+  );
+  const origin = 'https://boxes.example.com';
+  await orchestrator.app.inject({
+    method: 'PUT',
+    url: '/api/agent-sets/global/mcp-servers',
+    payload: { name: 'docs', url: fake.mcpUrl, auth: 'oauth', headers: [] },
+  });
+  const connect = await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/agent-sets/global/mcp-servers/docs/connect',
+    headers: { origin },
+    payload: { origin },
+  });
+  const params = fake.authorize((connect.json() as { authorizationUrl: string }).authorizationUrl);
+  await orchestrator.app.inject({
+    method: 'POST',
+    url: '/api/mcp-oauth/callback',
+    payload: { state: params.get('state'), code: params.get('code'), iss: params.get('iss') },
+  });
+  // The token is older than the minimum age for a refresh after a refused token.
+  db.prepare('UPDATE agent_mcp_secrets SET refreshed_at = 0').run();
+
+  const setId = orchestrator.agents.globalId('');
+  reports = [
+    {
+      credentialId: `mcp/${setId}/docs/authorization`,
+      status: 401,
+      error: 'invalid_token',
+      scope: null,
+    },
+  ];
+  await orchestrator.egress.sync();
+  /**
+   * Reads the stored secret of the server.
+   *
+   * @returns The secret.
+   */
+  const secret = (): string =>
+    (db.prepare('SELECT secret FROM agent_mcp_secrets').get() as { secret: string }).secret;
+  await untilTrue('the refresh', () => secret() === 'Bearer at-4');
 });
 
 test('the refused hosts of a box come from the proxy', async () => {
@@ -1213,7 +1364,7 @@ test('starting a container to reach into installs the current configuration firs
   await orchestrator.app.inject({
     method: 'PUT',
     url: '/api/agent-sets/global/mcp-servers',
-    payload: { name: 'docs', url: 'https://docs.example.com/mcp', headers: [] },
+    payload: { name: 'docs', url: 'https://docs.example.com/mcp', auth: 'none', headers: [] },
   });
 
   await orchestrator.manager.execTarget('abc123');
@@ -1227,7 +1378,15 @@ test('starting a container to reach into installs the current configuration firs
         }
       ).mcp_servers,
     ),
-    [{ name: 'docs', url: 'https://docs.example.com/mcp', headers: [] }],
+    [
+      {
+        setId: orchestrator.agents.globalId(''),
+        name: 'docs',
+        url: 'https://docs.example.com/mcp',
+        auth: 'none',
+        headers: [],
+      },
+    ],
   );
 
   // config() is cached for the process, so the test uses the DATA_DIR of the
@@ -2094,9 +2253,16 @@ test('each user has their own credentials, settings and agent sets', async () =>
     method: 'PUT',
     url: `/api/agent-sets/${aliceSets[0]?.id}/mcp-servers`,
     headers: as('bob'),
-    payload: { name: 'docs', url: 'https://docs.example.com/mcp', headers: [] },
+    payload: { name: 'docs', url: 'https://docs.example.com/mcp', auth: 'none', headers: [] },
   });
   assert.equal(foreignMcp.statusCode, 404);
+  const foreignConnect = await orchestrator.app.inject({
+    method: 'POST',
+    url: `/api/agent-sets/${aliceSets[0]?.id}/mcp-servers/docs/connect`,
+    headers: { ...as('bob'), origin: 'https://boxes.example.com' },
+    payload: { origin: 'https://boxes.example.com' },
+  });
+  assert.equal(foreignConnect.statusCode, 404);
   const foreignDelete = await orchestrator.app.inject({
     method: 'DELETE',
     url: `/api/agent-sets/${aliceSets[0]?.id}/mcp-servers?name=docs`,

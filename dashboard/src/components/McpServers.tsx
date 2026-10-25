@@ -1,6 +1,7 @@
 /** The MCP servers section of the set editor. */
 import { Pencil, Plus, Trash2 } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useState } from 'react';
+import { CopyField } from '@/components/CopyField';
 import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -21,53 +22,34 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { hostMatches } from '../../../shared/hosts.ts';
-import type { AgentMcpServer, AgentMcpServerState, ApiKeySummary } from '../../../shared/types.ts';
+import type {
+  AgentMcpAuth,
+  AgentMcpHeader,
+  AgentMcpServer,
+  AgentMcpServerState,
+  McpConnectBody,
+} from '../../../shared/types.ts';
 
-/** The ways of authentication that the dialog offers. */
-type AuthKind = 'none' | 'bearer' | 'headers';
-
-/** The pattern of an Authorization value that is a bearer token from one API key. */
-const BEARER = /^Bearer \$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
-
-/** The pattern of a reference to an API key in a header value. */
-const KEY_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
-
-/**
- * The select value that opens the dialog for a new key. The space keeps it
- * apart from every variable name.
- */
-const NEW_KEY = 'new key';
-
-/** The host and the port of a server URL. */
-interface Target {
-  /** The hostname or IP literal, without brackets. */
-  host: string;
-  /** The port, with the default port of the scheme when the URL names none. */
-  port: number;
-  /** The host pattern for an API key: the host, with the port when the URL names one. */
-  pattern: string;
-}
+/** The text of each status of an OAuth token. */
+const TOKEN_STATUS = {
+  ok: 'Connected',
+  failing: 'Failing',
+  disconnected: 'Not connected',
+} as const;
 
 /**
- * Reads the host and the port of a server URL.
+ * Checks if a text is an http or https URL.
  *
  * @param raw The URL as typed.
- * @returns The target, or null when the text is not an http or https URL.
+ * @returns True for an http or https URL.
  */
-function targetOf(raw: string): Target | null {
-  let url: URL;
+function validUrl(raw: string): boolean {
   try {
-    url = new URL(raw.trim());
+    const url = new URL(raw.trim());
+    return url.protocol === 'https:' || url.protocol === 'http:';
   } catch {
-    return null;
+    return false;
   }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-  return {
-    host: url.hostname.replace(/^\[(.*)\]$/, '$1'),
-    port: url.port !== '' ? Number(url.port) : url.protocol === 'https:' ? 443 : 80,
-    pattern: url.port !== '' ? url.host : url.hostname,
-  };
 }
 
 /**
@@ -106,8 +88,8 @@ export function McpSection({
       </div>
       <p className="text-xs text-muted-foreground">
         Remote MCP servers that give the agent more tools. Each thread gets them over the Streamable
-        HTTP transport. A secret, such as a token, goes into an API key. The egress proxy puts it
-        into the requests, so it never goes into a box.
+        HTTP transport. The orchestrator stores the secrets of a server, and the egress proxy puts
+        them into the requests, so a secret never goes into a box.
       </p>
 
       {servers.length === 0 ? (
@@ -125,7 +107,14 @@ export function McpSection({
             {overridden.has(server.name) ? (
               <span className="text-xs text-muted-foreground">replaces the global one</span>
             ) : null}
-            {server.warning ? <span className="text-xs text-warn">{server.warning}</span> : null}
+            {server.status === 'ok' ? (
+              <span className="text-xs text-muted-foreground">{TOKEN_STATUS.ok}</span>
+            ) : server.status ? (
+              <span className="text-xs text-warn">
+                {TOKEN_STATUS[server.status]}
+                {server.lastError ? `: ${server.lastError}` : ''}
+              </span>
+            ) : null}
           </div>
           <Button
             type="button"
@@ -157,108 +146,110 @@ export function McpSection({
 /**
  * Dialog that edits one MCP server.
  *
- * The user selects an API key, and the dialog writes the reference to it. The
- * name is fixed once the server exists, like the name of a skill.
+ * The name, the URL and the auth mode are fixed once the server exists. A
+ * secret field of a stored server starts empty, and an empty field keeps the
+ * stored secret.
  *
  * @param server The server to edit, or null for a new server.
- * @param keys The API keys of the user.
  * @param busy True while a save runs, which disables the buttons.
  * @param error The error of the last save, or null.
  * @param onCancel Closes the dialog without a save.
  * @param onSave Saves the server.
- * @param onSaveKey Stores an API key. Resolves to true when that succeeded.
+ * @param onConnect Saves the server and starts its OAuth login. Resolves to the redirect URI when the user must
+ *   enter a client ID, or to null.
  */
 export function McpDialog({
   server,
-  keys,
   busy,
   error,
   onCancel,
   onSave,
-  onSaveKey,
+  onConnect,
 }: {
-  server: AgentMcpServer | null;
-  keys: ApiKeySummary[];
+  server: AgentMcpServerState | null;
   busy: boolean;
   error: string | null;
   onCancel: () => void;
   onSave: (body: AgentMcpServer) => void;
-  onSaveKey: (name: string, hosts: string[], secret?: string) => Promise<boolean>;
+  onConnect: (
+    body: AgentMcpServer,
+    client: Omit<McpConnectBody, 'origin'>,
+  ) => Promise<string | null>;
 }) {
-  const initial = server?.headers ?? [];
-  const bearer =
-    initial.length === 1 && initial[0]?.name.toLowerCase() === 'authorization'
-      ? BEARER.exec(initial[0].value)
-      : null;
-
   const [name, setName] = useState(server?.name ?? '');
   const [url, setUrl] = useState(server?.url ?? '');
-  const [auth, setAuth] = useState<AuthKind>(
-    initial.length === 0 ? 'none' : bearer ? 'bearer' : 'headers',
+  const [auth, setAuth] = useState<AgentMcpAuth>(server?.auth ?? 'none');
+  const [token, setToken] = useState('');
+  const [headers, setHeaders] = useState<AgentMcpHeader[]>(
+    server?.auth === 'headers' && server.headers.length > 0
+      ? server.headers
+      : [{ name: '', value: '', secret: false }],
   );
-  const [bearerKey, setBearerKey] = useState(bearer?.[1] ?? '');
-  const [headers, setHeaders] = useState(
-    initial.length > 0 && !bearer ? initial : [{ name: '', value: '' }],
-  );
-  /** The header row that gets the new key, or 'bearer', while the key dialog is open. */
-  const [newKeyFor, setNewKeyFor] = useState<number | 'bearer' | null>(null);
-  /** The value fields of the header rows, for the insert at the cursor. */
-  const valueFields = useRef<Array<HTMLInputElement | null>>([]);
-
-  const target = targetOf(url);
-
-  /** The headers that the save sends, from the selected way of authentication. */
-  const body: AgentMcpServer['headers'] =
-    auth === 'none'
-      ? []
-      : auth === 'bearer'
-        ? [{ name: 'Authorization', value: `Bearer \${${bearerKey}}` }]
-        : headers.filter((h) => h.name.trim() !== '' || h.value !== '');
-  const referenced = [
-    ...new Set(body.flatMap((h) => [...h.value.matchAll(KEY_REFERENCE)].map((m) => m[1] ?? ''))),
-  ];
-  /** The referenced keys without a host pattern for the host and the port of the server. */
-  const mismatched = target
-    ? keys.filter(
-        (key) =>
-          referenced.includes(key.name) &&
-          !key.hosts.some((pattern) => hostMatches(target.host, target.port, pattern)),
-      )
-    : [];
+  /** The redirect URI that the client of the user needs, after the server asked for a client ID. */
+  const [redirectUri, setRedirectUri] = useState<string | null>(null);
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
 
   /**
-   * Puts a reference to a key at the cursor of the value field of one header.
+   * Checks if the header of a row has a stored secret, so an empty value keeps the secret.
    *
    * @param row The index of the header.
-   * @param key The environment variable name of the key.
+   * @returns True when the stored server has a secret header with the same name.
    */
-  const insertKey = (row: number, key: string): void => {
-    const field = valueFields.current[row];
-    setHeaders((rows) =>
-      rows.map((h, i) => {
-        if (i !== row) return h;
-        const start = field?.selectionStart ?? h.value.length;
-        const end = field?.selectionEnd ?? start;
-        return { ...h, value: `${h.value.slice(0, start)}\${${key}}${h.value.slice(end)}` };
-      }),
+  const stored = (row: number): boolean => {
+    const header = headers[row];
+    return (
+      server?.auth === 'headers' &&
+      header !== undefined &&
+      server.headers.some((h) => h.secret && h.name.toLowerCase() === header.name.toLowerCase())
     );
+  };
+
+  /** The server that a save sends. */
+  const body: AgentMcpServer = {
+    name: name.trim(),
+    url: url.trim(),
+    auth,
+    headers:
+      auth === 'bearer'
+        ? [
+            {
+              name: 'Authorization',
+              value: token.trim() === '' ? '' : `Bearer ${token.trim()}`,
+              secret: true,
+            },
+          ]
+        : auth === 'headers'
+          ? headers.filter((h) => h.name.trim() !== '' || h.value !== '')
+          : [],
   };
 
   /**
    * Sets one field of one header.
    *
    * @param row The index of the header.
-   * @param field The field to set.
-   * @param value The new value.
+   * @param change The fields to set.
    */
-  const setHeader = (row: number, field: 'name' | 'value', value: string): void =>
-    setHeaders((rows) => rows.map((h, i) => (i === row ? { ...h, [field]: value } : h)));
+  const setHeader = (row: number, change: Partial<AgentMcpHeader>): void =>
+    setHeaders((rows) => rows.map((h, i) => (i === row ? { ...h, ...change } : h)));
 
   const ready =
     name.trim() !== '' &&
-    target !== null &&
-    (auth !== 'bearer' || bearerKey !== '') &&
-    mismatched.length === 0;
+    validUrl(url) &&
+    (auth !== 'bearer' || token.trim() !== '' || server?.auth === 'bearer');
+  const connected = server?.status === 'ok' || server?.status === 'failing';
+
+  /** Saves the server and starts the login, with the client of the user when the server asked for one. */
+  const connect = async (): Promise<void> => {
+    const client = redirectUri
+      ? {
+          clientId: clientId.trim(),
+          ...(clientSecret.trim() ? { clientSecret: clientSecret.trim() } : {}),
+        }
+      : {};
+    const asked = await onConnect(body, client);
+    if (asked) setRedirectUri(asked);
+  };
 
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
@@ -283,7 +274,7 @@ export function McpDialog({
             />
             <p className="text-xs text-muted-foreground">
               {server
-                ? 'A name is fixed once it exists. Delete it and add it again to rename it.'
+                ? 'The name, the URL and the authentication are fixed once the server exists. Delete the server and add it again to change them.'
                 : 'Lowercase letters, digits and dashes. A server of this set replaces a global server with the same name.'}
             </p>
           </div>
@@ -293,6 +284,7 @@ export function McpDialog({
             <Input
               id="mcp-url"
               value={url}
+              disabled={server !== null}
               placeholder="https://api.githubcopilot.com/mcp/"
               onChange={(e) => setUrl(e.target.value)}
             />
@@ -300,7 +292,11 @@ export function McpDialog({
 
           <div className="flex flex-col gap-2">
             <Label htmlFor="mcp-auth">Authentication</Label>
-            <Select value={auth} onValueChange={(value) => setAuth(value as AuthKind)}>
+            <Select
+              value={auth}
+              disabled={server !== null}
+              onValueChange={(value) => setAuth(value as AgentMcpAuth)}
+            >
               <SelectTrigger id="mcp-auth" className="w-full">
                 <SelectValue />
               </SelectTrigger>
@@ -308,33 +304,27 @@ export function McpDialog({
                 <SelectItem value="none">None</SelectItem>
                 <SelectItem value="bearer">Bearer token</SelectItem>
                 <SelectItem value="headers">Custom headers</SelectItem>
+                <SelectItem value="oauth">OAuth</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           {auth === 'bearer' ? (
             <div className="flex flex-col gap-2">
-              <Label htmlFor="mcp-key">API key</Label>
-              <Select
-                value={bearerKey}
-                onValueChange={(value) =>
-                  value === NEW_KEY ? setNewKeyFor('bearer') : setBearerKey(value)
+              <Label htmlFor="mcp-token">Token</Label>
+              <Input
+                id="mcp-token"
+                type="password"
+                autoComplete="off"
+                className="font-mono"
+                value={token}
+                placeholder={
+                  server?.auth === 'bearer' ? 'Leave empty to keep the stored token' : ''
                 }
-              >
-                <SelectTrigger id="mcp-key" className="w-full font-mono">
-                  <SelectValue placeholder="Select a key" />
-                </SelectTrigger>
-                <SelectContent>
-                  {keys.map((key) => (
-                    <SelectItem key={key.name} value={key.name} className="font-mono">
-                      {key.name}
-                    </SelectItem>
-                  ))}
-                  <SelectItem value={NEW_KEY}>New key…</SelectItem>
-                </SelectContent>
-              </Select>
+                onChange={(e) => setToken(e.target.value)}
+              />
               <p className="text-xs text-muted-foreground">
-                The agent sends <code>Authorization: Bearer</code> with the key.
+                The agent sends <code>Authorization: Bearer</code> with the token.
               </p>
             </div>
           ) : null}
@@ -343,50 +333,37 @@ export function McpDialog({
             <div className="flex flex-col gap-2">
               <span className="text-sm font-medium">Headers</span>
               <p className="text-xs text-muted-foreground">
-                Put each secret into an API key, and insert the key into the value. A literal value,
+                Mark each header with a secret value, such as a key, as secret. A literal value,
                 such as a tenant name, goes into the box as it is.
               </p>
               {headers.map((header, row) => (
                 // biome-ignore lint/suspicious/noArrayIndexKey: the rows have no id
-                <div key={row} className="flex flex-col gap-2 sm:flex-row">
+                <div key={row} className="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <Input
                     aria-label={`Header ${row + 1} name`}
                     value={header.name}
                     placeholder="X-API-Key"
                     className="font-mono sm:w-48"
-                    onChange={(e) => setHeader(row, 'name', e.target.value)}
+                    onChange={(e) => setHeader(row, { name: e.target.value })}
                   />
                   <Input
-                    ref={(el) => {
-                      valueFields.current[row] = el;
-                    }}
                     aria-label={`Header ${row + 1} value`}
+                    type={header.secret ? 'password' : 'text'}
+                    autoComplete="off"
                     value={header.value}
-                    placeholder="${INTERNAL_API_KEY}"
+                    placeholder={header.secret && stored(row) ? 'Leave empty to keep' : ''}
                     className="font-mono sm:flex-1"
-                    onChange={(e) => setHeader(row, 'value', e.target.value)}
+                    onChange={(e) => setHeader(row, { value: e.target.value })}
                   />
-                  <Select
-                    value=""
-                    onValueChange={(value) =>
-                      value === NEW_KEY ? setNewKeyFor(row) : insertKey(row, value)
-                    }
-                  >
-                    <SelectTrigger
-                      aria-label={`Insert key into header ${row + 1}`}
-                      className="sm:w-36"
-                    >
-                      <SelectValue placeholder="Insert key" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {keys.map((key) => (
-                        <SelectItem key={key.name} value={key.name} className="font-mono">
-                          {key.name}
-                        </SelectItem>
-                      ))}
-                      <SelectItem value={NEW_KEY}>New key…</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <label className="flex items-center gap-1 text-xs">
+                    <input
+                      type="checkbox"
+                      aria-label={`Header ${row + 1} is secret`}
+                      checked={header.secret}
+                      onChange={(e) => setHeader(row, { secret: e.target.checked })}
+                    />
+                    Secret
+                  </label>
                   <Button
                     type="button"
                     variant="ghost"
@@ -404,7 +381,9 @@ export function McpDialog({
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => setHeaders((rows) => [...rows, { name: '', value: '' }])}
+                  onClick={() =>
+                    setHeaders((rows) => [...rows, { name: '', value: '', secret: false }])
+                  }
                 >
                   <Plus />
                   Add header
@@ -413,27 +392,40 @@ export function McpDialog({
             </div>
           ) : null}
 
-          {target
-            ? mismatched.map((key) => (
-                <div key={key.name} className="flex flex-col gap-2 rounded-md border px-3 py-2">
-                  <p className="text-xs text-danger">
-                    The egress proxy puts the key <code>{key.name}</code> only into requests to{' '}
-                    {key.hosts.join(', ')}, and not to {target.pattern}.
+          {auth === 'oauth' ? (
+            <div className="flex flex-col gap-2">
+              <span className="text-sm font-medium">OAuth</span>
+              <p className="text-xs text-muted-foreground">
+                {server?.status ? TOKEN_STATUS[server.status] : TOKEN_STATUS.disconnected}
+                {server?.lastError ? `: ${server.lastError}` : ''}
+              </p>
+              {redirectUri ? (
+                <div className="flex flex-col gap-2 rounded-md border px-3 py-2">
+                  <p className="text-xs text-muted-foreground">
+                    The authorization server has no client registration. Register a client with this
+                    redirect URI, and enter its client ID.
                   </p>
-                  <div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => void onSaveKey(key.name, [...key.hosts, target.pattern])}
-                    >
-                      Add host to key
-                    </Button>
-                  </div>
+                  <CopyField label="Redirect URI" value={redirectUri} />
+                  <Label htmlFor="mcp-client-id">Client ID</Label>
+                  <Input
+                    id="mcp-client-id"
+                    className="font-mono"
+                    value={clientId}
+                    onChange={(e) => setClientId(e.target.value)}
+                  />
+                  <Label htmlFor="mcp-client-secret">Client secret (optional)</Label>
+                  <Input
+                    id="mcp-client-secret"
+                    type="password"
+                    autoComplete="off"
+                    className="font-mono"
+                    value={clientSecret}
+                    onChange={(e) => setClientSecret(e.target.value)}
+                  />
                 </div>
-              ))
-            : null}
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         <DialogFooter>
@@ -442,103 +434,21 @@ export function McpDialog({
           </Button>
           <Button
             type="button"
+            variant={auth === 'oauth' ? 'outline' : 'default'}
             disabled={busy || !ready}
-            onClick={() => onSave({ name: name.trim(), url: url.trim(), headers: body })}
+            onClick={() => onSave(body)}
           >
             {busy ? 'Saving…' : 'Save'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-
-      {newKeyFor !== null ? (
-        <KeyDialog
-          pattern={target?.pattern ?? ''}
-          busy={busy}
-          onCancel={() => setNewKeyFor(null)}
-          onSave={async (key, hosts, secret) => {
-            if (!(await onSaveKey(key, hosts, secret))) return;
-            if (newKeyFor === 'bearer') setBearerKey(key);
-            else insertKey(newKeyFor, key);
-            setNewKeyFor(null);
-          }}
-        />
-      ) : null}
-    </Dialog>
-  );
-}
-
-/**
- * Dialog that adds an API key, with the same fields as the Other API keys card
- * on the Settings page.
- *
- * @param pattern The host pattern of the server, which the hosts field starts with.
- * @param busy True while the save runs, which disables the buttons.
- * @param onCancel Closes the dialog without a save.
- * @param onSave Stores the key.
- */
-function KeyDialog({
-  pattern,
-  busy,
-  onCancel,
-  onSave,
-}: {
-  pattern: string;
-  busy: boolean;
-  onCancel: () => void;
-  onSave: (name: string, hosts: string[], secret: string) => void;
-}) {
-  const [name, setName] = useState('');
-  const [hosts, setHosts] = useState(pattern);
-  const [secret, setSecret] = useState('');
-  const list = hosts.split(/[\s,]+/).filter((h) => h !== '');
-
-  return (
-    <Dialog open onOpenChange={(open) => !open && onCancel()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>New API key</DialogTitle>
-          <DialogDescription>
-            The key goes into the Other API keys on the Settings page. The egress proxy puts it only
-            into requests to its hosts.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="mcp-key-name">Environment variable</Label>
-          <Input
-            id="mcp-key-name"
-            className="font-mono"
-            placeholder="GITHUB_MCP_TOKEN"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-          <Label htmlFor="mcp-key-hosts">Hosts</Label>
-          <Input
-            id="mcp-key-hosts"
-            placeholder="mcp.example.com"
-            value={hosts}
-            onChange={(e) => setHosts(e.target.value)}
-          />
-          <Label htmlFor="mcp-key-secret">Key</Label>
-          <Input
-            id="mcp-key-secret"
-            type="password"
-            autoComplete="off"
-            className="font-mono"
-            value={secret}
-            onChange={(e) => setSecret(e.target.value)}
-          />
-        </div>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
-            Cancel
-          </Button>
-          <Button
-            type="button"
-            disabled={busy || name.trim() === '' || list.length === 0 || secret.trim() === ''}
-            onClick={() => onSave(name.trim(), list, secret.trim())}
-          >
-            Add key
-          </Button>
+          {auth === 'oauth' ? (
+            <Button
+              type="button"
+              disabled={busy || !ready || (redirectUri !== null && clientId.trim() === '')}
+              onClick={() => void connect()}
+            >
+              {connected ? 'Reconnect' : 'Connect'}
+            </Button>
+          ) : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

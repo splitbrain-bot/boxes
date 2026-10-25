@@ -58,8 +58,17 @@ const db = openDb(cfg.DATA_DIR);
 const boot = new BootState();
 
 /** The HTTP app and the services it built. */
-const { app, manager, agents, credentials, egress, logins, tunnels, setIsolationWarnings } =
-  buildApp(cfg, db, { boot });
+const {
+  app,
+  manager,
+  agents,
+  credentials,
+  egress,
+  logins,
+  mcpOAuth,
+  tunnels,
+  setIsolationWarnings,
+} = buildApp(cfg, db, { boot });
 
 /**
  * Largest ACP frame the gateway accepts from a client, in bytes.
@@ -233,7 +242,7 @@ async function main(): Promise<void> {
   loops.push(startReaper(db, cfg, manager));
   loops.push(startImageRefresher(cfg, manager));
   loops.push(startProxyReconciler(manager, egress, setIsolationWarnings));
-  loops.push(startCredentialRefresh(credentials));
+  loops.push(startCredentialRefresh(credentials, mcpOAuth));
   loops.push(startTunnelReconciler(tunnels));
   loops.push(startSkillRepoRefresh(agents));
 

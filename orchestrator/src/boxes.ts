@@ -1,7 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import {
-  type AgentMcpServer,
   type BoxDetail,
   type BoxSummary,
   type BoxTunnel,
@@ -40,6 +39,7 @@ import { DEFAULT_HARNESS, harness } from './harness.ts';
 import { HttpError } from './http-error.ts';
 import { log } from './log.ts';
 import { LOGIN_CONTAINER_MAX_AGE_MS } from './login.ts';
+import type { McpSnapshotEntry } from './mcp-servers.ts';
 import type { Notifier } from './notify.ts';
 import { boxProcesses } from './processes.ts';
 import {
@@ -417,14 +417,14 @@ export class BoxManager {
 
   /**
    * Gives the MCP servers of a box for its adapters, from the list of its last
-   * start, with the current placeholders of the API keys.
+   * start, with the placeholders of their secrets.
    *
    * @param id The id of the box.
    * @returns The `mcpServers` list for a session call.
    */
   private mcpServersOf(id: string): McpServer[] {
     const row = this.mustGet(id);
-    return this.agents.mcpServersFor(row.owner, JSON.parse(row.mcp_servers) as AgentMcpServer[]);
+    return this.agents.mcpServersFor(row.owner, JSON.parse(row.mcp_servers) as McpSnapshotEntry[]);
   }
 
   /**

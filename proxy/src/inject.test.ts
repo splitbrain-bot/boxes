@@ -12,7 +12,7 @@ import { networkInterfaces } from 'node:os';
 import tls from 'node:tls';
 import { generateCACertificate } from 'mockttp';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import type { EgressPolicy } from '../../shared/types.ts';
+import type { EgressPolicy, EgressRefusedToken } from '../../shared/types.ts';
 import { Interceptor } from './inject.ts';
 
 /** The placeholder that stands for the credential in a box. */
@@ -53,6 +53,9 @@ let policy: EgressPolicy;
 
 /** Count of the log lines in which the engine reports that it started. */
 let starts = 0;
+
+/** The refused OAuth tokens that the engine reported. */
+let refusedTokens: EgressRefusedToken[] = [];
 
 /** The unwrapped TLS client, for the connections these tests make themselves. */
 const connectTls = tls.connect;
@@ -97,6 +100,20 @@ beforeAll(async () => {
 
   origin = https.createServer({ key: ca.key, cert: ca.cert }, (req, res) => {
     received.push({ url: req.url ?? '', headers: req.headers });
+    const refusals: Record<string, [number, Record<string, string>]> = {
+      '/expired': [401, { 'www-authenticate': 'Bearer error="invalid_token"' }],
+      '/scope': [
+        403,
+        { 'www-authenticate': 'Bearer error="insufficient_scope", scope="write admin"' },
+      ],
+      '/forbidden': [403, {}],
+    };
+    const refusal = refusals[req.url ?? ''];
+    if (refusal) {
+      res.writeHead(refusal[0], refusal[1]);
+      res.end('refused\n');
+      return;
+    }
     if (req.url === '/events') {
       // An event stream sends its first event and stays open until the test ends it.
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -141,6 +158,7 @@ beforeAll(async () => {
     policy: () => policy,
     upstreamProxyUrl: () => `http://127.0.0.1:${tunnelPort}`,
     denied: () => {},
+    refusedToken: (report) => refusedTokens.push(report),
     log: (msg) => {
       if (msg === 'interception engine started') starts += 1;
     },
@@ -150,6 +168,7 @@ beforeAll(async () => {
 afterEach(() => {
   received = [];
   connects = [];
+  refusedTokens = [];
   endStream();
 });
 
@@ -432,6 +451,85 @@ describe('the interception engine', () => {
     // The origin has not ended the stream yet, so the engine passed the first event on as it came.
     expect(first).toBe('data: first\n\n');
     expect(received[0]?.headers.authorization).toBe(`Bearer ${SECRET}`);
+    socket.destroy();
+  }, 30_000);
+
+  it('reports a 401 and a 403 with a Bearer challenge to an OAuth token', async () => {
+    policy = githubPolicy({
+      credentials: [
+        { ...githubPolicy().credentials[0]!, id: 'mcp/s1/docs/authorization', oauth: true },
+      ],
+    });
+    await interceptor.apply();
+    const headers = { authorization: `Bearer ${PLACEHOLDER}` };
+
+    expect(
+      (await throughEngine(interceptor.port()!, headers, 'api.github.com', '/expired')).status,
+    ).toBe(401);
+    expect(
+      (await throughEngine(interceptor.port()!, headers, 'api.github.com', '/scope')).status,
+    ).toBe(403);
+    expect(
+      (await throughEngine(interceptor.port()!, headers, 'api.github.com', '/forbidden')).status,
+    ).toBe(403);
+    // A request without the placeholder carries no OAuth token.
+    await throughEngine(interceptor.port()!, {}, 'api.github.com', '/expired');
+
+    expect(refusedTokens).toEqual([
+      {
+        credentialId: 'mcp/s1/docs/authorization',
+        status: 401,
+        error: 'invalid_token',
+        scope: null,
+      },
+      {
+        credentialId: 'mcp/s1/docs/authorization',
+        status: 403,
+        error: 'insufficient_scope',
+        scope: 'write admin',
+      },
+    ]);
+  }, 30_000);
+
+  it('reports no refused token for a credential without OAuth', async () => {
+    policy = githubPolicy();
+    await interceptor.apply();
+
+    const res = await throughEngine(
+      interceptor.port()!,
+      { authorization: `Bearer ${PLACEHOLDER}` },
+      'api.github.com',
+      '/expired',
+    );
+
+    expect(res.status).toBe(401);
+    expect(refusedTokens).toEqual([]);
+  }, 30_000);
+
+  it('streams an event stream with an OAuth token to the client before the stream ends', async () => {
+    policy = githubPolicy({
+      credentials: [{ ...githubPolicy().credentials[0]!, oauth: true }],
+    });
+    await interceptor.apply();
+
+    const socket = await tunnelThroughEngine(interceptor.port()!, 'api.github.com:443');
+    const first = await new Promise<string>((resolve, reject) => {
+      const req = https.request(
+        {
+          createConnection: () => connectTls({ socket, servername: 'api.github.com', ca: ca.cert }),
+          host: 'api.github.com',
+          path: '/events',
+          method: 'GET',
+          headers: { accept: 'text/event-stream', authorization: `Bearer ${PLACEHOLDER}` },
+        },
+        (res) => res.once('data', (chunk) => resolve(String(chunk))),
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    expect(first).toBe('data: first\n\n');
+    expect(refusedTokens).toEqual([]);
     socket.destroy();
   }, 30_000);
 

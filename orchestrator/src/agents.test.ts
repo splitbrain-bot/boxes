@@ -12,10 +12,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { extract } from 'tar-stream';
 import { afterEach, beforeEach, test } from 'vitest';
+import type { AgentMcpHeader, AgentMcpServer } from '../../shared/types.ts';
 import { AgentStore } from './agents.ts';
-import type { ApiKeyRow } from './api-keys.ts';
 import { type Db, openDb } from './db.ts';
 import { HttpError } from './http-error.ts';
+import { McpSecretStore } from './mcp-secrets.ts';
 import { mcpHostPattern } from './mcp-servers.ts';
 
 /** The temporary DATA_DIR of each test. */
@@ -537,68 +538,113 @@ test('each user has their own sets and global set, and a pull uses the owner of 
   assert.deepEqual(store.bundle('alice', set.id).skills, []);
 });
 
-/**
- * Makes an API key row of the empty user.
- *
- * @param name The environment variable name of the key.
- * @param hosts The hosts of the key.
- * @returns The row, with a fixed placeholder.
- */
-function apiKey(name: string, hosts: string[]): ApiKeyRow {
-  return {
-    owner: '',
-    name,
-    hosts,
-    secret: `secret-of-${name}`,
-    placeholder: `placeholder-of-${name}`,
-    created_at: 0,
-    updated_at: 0,
-  };
-}
-
-/** The API keys that the MCP store of a test reads. */
-let keys: ApiKeyRow[];
+/** The secret rows of the MCP servers of the store of a test. */
+let secrets: McpSecretStore;
 
 /**
- * Makes a store that reads {@link keys}.
+ * Makes a store with its own store of secret rows.
  *
  * @returns The store.
  */
 function mcpStore(): AgentStore {
-  keys = [apiKey('GITHUB_MCP_TOKEN', ['api.githubcopilot.com', 'mcp.example.com:8443'])];
-  return new AgentStore(db, dir, undefined, undefined, () => ({ keys }));
+  secrets = new McpSecretStore(db, () => undefined);
+  return new AgentStore(db, dir, undefined, undefined, secrets);
 }
 
-/** A server with a bearer token from an API key. */
-const GITHUB_MCP = {
+/** A server with a bearer token. */
+const GITHUB_MCP: AgentMcpServer = {
   name: 'github',
   url: 'https://api.githubcopilot.com/mcp/',
-  headers: [{ name: 'Authorization', value: `Bearer \${GITHUB_MCP_TOKEN}` }],
+  auth: 'bearer',
+  headers: [{ name: 'Authorization', value: 'Bearer ghp_one', secret: true }],
 };
 
-test('an MCP server is stored with its references and replaced under its name', () => {
+/**
+ * Gives the stored secret rows of a server.
+ *
+ * @param setId The set of the server.
+ * @param server The name of the server.
+ * @returns The secret and the placeholder of each row, by header.
+ */
+function rowsOf(setId: string, server: string): Record<string, [string, string]> {
+  return Object.fromEntries(
+    secrets.forServer(setId, server).map((row) => [row.header, [row.secret, row.placeholder]]),
+  );
+}
+
+test('a bearer token of an MCP server goes into a secret row, and an empty value keeps it', () => {
   const mcp = mcpStore();
   const set = mcp.createSet('', 'Work');
 
-  mcp.putMcpServer('', set.id, { ...GITHUB_MCP, name: ' GitHub ' });
-  const after = mcp.putMcpServer('', set.id, {
-    ...GITHUB_MCP,
-    headers: [...GITHUB_MCP.headers, { name: 'X-Tenant', value: 'engineering' }],
-  });
-
-  assert.deepEqual(after.mcpServers, [
+  const saved = mcp.putMcpServer('', set.id, { ...GITHUB_MCP, name: ' GitHub ' });
+  assert.deepEqual(saved.mcpServers, [
     {
       ...GITHUB_MCP,
-      headers: [...GITHUB_MCP.headers, { name: 'X-Tenant', value: 'engineering' }],
-      warning: null,
+      headers: [{ name: 'Authorization', value: '', secret: true }],
+      status: null,
+      lastError: null,
     },
   ]);
   const stored = db.prepare('SELECT headers FROM agent_mcp_servers').get() as { headers: string };
-  assert.ok(!stored.headers.includes('placeholder-of'));
-  assert.ok(!stored.headers.includes('secret-of'));
+  assert.ok(!stored.headers.includes('ghp_one'));
+  const first = rowsOf(set.id, 'github').authorization;
+  assert.equal(first?.[0], 'Bearer ghp_one');
+  assert.match(first?.[1] ?? '', /^[0-9a-f]{64}$/);
+
+  mcp.putMcpServer('', set.id, {
+    ...GITHUB_MCP,
+    headers: [{ name: 'Authorization', value: '', secret: true }],
+  });
+  assert.deepEqual(rowsOf(set.id, 'github').authorization, first);
+
+  mcp.putMcpServer('', set.id, {
+    ...GITHUB_MCP,
+    headers: [{ name: 'Authorization', value: 'Bearer ghp_two', secret: true }],
+  });
+  assert.deepEqual(rowsOf(set.id, 'github').authorization, ['Bearer ghp_two', first?.[1]]);
 
   assert.deepEqual(mcp.deleteMcpServer('', set.id, 'github').mcpServers, []);
+  assert.deepEqual(rowsOf(set.id, 'github'), {});
   assert.throws(() => mcp.deleteMcpServer('', set.id, 'github'), /No such MCP server/);
+});
+
+test('a custom header keeps a literal value in the server and a secret value in a secret row', () => {
+  const mcp = mcpStore();
+  const id = mcp.globalId('');
+  const server: AgentMcpServer = {
+    name: 'internal',
+    url: 'https://mcp.example.com:8443/mcp',
+    auth: 'headers',
+    headers: [
+      { name: 'X-Tenant', value: 'engineering', secret: false },
+      { name: 'X-Api-Key', value: 'key-one', secret: true },
+    ],
+  };
+
+  mcp.putMcpServer('', id, server);
+  assert.deepEqual(mcp.getSet('', id).mcpServers[0]?.headers, [
+    { name: 'X-Tenant', value: 'engineering', secret: false },
+    { name: 'X-Api-Key', value: '', secret: true },
+  ]);
+  assert.deepEqual(Object.keys(rowsOf(id, 'internal')), ['x-api-key']);
+
+  // A new secret header needs a value. A removed secret header loses its row.
+  assert.throws(
+    () =>
+      mcp.putMcpServer('', id, {
+        ...server,
+        headers: [...server.headers, { name: 'X-Other', value: '', secret: true }],
+      }),
+    /enter the value of the secret header X-Other/,
+  );
+  mcp.putMcpServer('', id, { ...server, headers: [server.headers[0] as AgentMcpHeader] });
+  assert.deepEqual(rowsOf(id, 'internal'), {});
+
+  // A deleted set takes its servers and their secret rows with it.
+  const set = mcp.createSet('', 'Work');
+  mcp.putMcpServer('', set.id, GITHUB_MCP);
+  mcp.deleteSet('', set.id);
+  assert.deepEqual(rowsOf(set.id, 'github'), {});
 });
 
 test('an MCP server is checked at save', () => {
@@ -610,76 +656,130 @@ test('an MCP server is checked at save', () => {
    * @param over The fields to replace.
    * @returns The changed set.
    */
-  const put = (over: Partial<typeof GITHUB_MCP>) =>
+  const put = (over: Partial<AgentMcpServer>) =>
     mcp.putMcpServer('', id, { ...GITHUB_MCP, ...over });
   /**
-   * Makes the headers field with one header.
+   * Makes the fields of a server with custom headers and one header.
    *
    * @param name The header name.
    * @param value The header value.
-   * @returns The field.
+   * @param secret True for a secret header.
+   * @returns The fields.
    */
-  const header = (name: string, value: string) => ({ headers: [{ name, value }] });
+  const header = (name: string, value: string, secret = false): Partial<AgentMcpServer> => ({
+    auth: 'headers',
+    headers: [{ name, value, secret }],
+  });
+  /** The fields of a server without authentication. */
+  const none: Partial<AgentMcpServer> = { auth: 'none', headers: [] };
 
   assert.throws(() => put({ name: 'a'.repeat(33) }), /32 characters/);
   assert.throws(() => put({ name: '-x' }), /lowercase/);
+  assert.throws(() => put({ auth: 'basic' as AgentMcpServer['auth'] }), /auth must be one of/);
   assert.throws(() => put({ url: 'mcp.example.com' }), /absolute/);
   assert.throws(() => put({ url: 'ftp://mcp.example.com/' }), /absolute/);
   assert.throws(() => put({ url: 'https://user:pw@api.githubcopilot.com/' }), /credentials/);
-  assert.throws(() => put({ url: 'https://10.0.0.5/mcp', headers: [] }), /private address/);
-  assert.throws(() => put({ url: 'https://[::1]/mcp', headers: [] }), /private address/);
-  assert.throws(() => put({ url: 'http://api.githubcopilot.com/mcp/' }), /https/);
+  assert.throws(() => put({ ...none, url: 'https://10.0.0.5/mcp' }), /private address/);
+  assert.throws(() => put({ ...none, url: 'https://[::1]/mcp' }), /private address/);
+  assert.throws(() => put({ url: 'http://api.githubcopilot.com/mcp/' }), /secret header/);
+  assert.throws(
+    () => put({ ...header('X-Key', 'k', true), url: 'http://mcp.example.com/' }),
+    /https/,
+  );
+  assert.throws(
+    () => put({ auth: 'oauth', headers: [], url: 'http://mcp.example.com/' }),
+    /OAuth token goes only over https/,
+  );
   assert.throws(() => put(header('Bad Name', 'x')), /not a valid header name/);
   assert.throws(() => put(header('Mcp-Session-Id', 'x')), /sets Mcp-Session-Id itself/);
-  assert.throws(() => put(header('Authorization', 'Bearer ghp_literal')), /into an API key/);
-  assert.throws(() => put(header('X-Key', `\${UNKNOWN}`)), /no API key UNKNOWN/);
-  assert.throws(() => put(header('X-Key', '${GITHUB_MCP_TOKEN')), /not a reference/);
+  assert.throws(() => put(header('Authorization', 'Bearer ghp_literal')), /must be secret/);
   assert.throws(() => put(header('X-Key', 'a\r\nX-Other: b')), /control character/);
   assert.throws(() => put(header('X-Key', 'x'.repeat(4097))), /longer than 4096/);
   assert.throws(
     () =>
       put({
-        ...header('Authorization', `Bearer \${GITHUB_MCP_TOKEN}`),
-        url: 'https://other.example.com/',
+        auth: 'headers',
+        headers: [
+          { name: 'X-Key', value: 'a', secret: false },
+          { name: 'x-key', value: 'b', secret: false },
+        ],
       }),
-    /do not include other.example.com/,
-  );
-  assert.throws(
-    () => put({ headers: [GITHUB_MCP.headers[0]!, { name: 'authorization', value: 'x' }] }),
     /given twice/,
   );
   assert.throws(
-    () => put({ headers: Array.from({ length: 21 }, (_, i) => ({ name: `X-${i}`, value: 'v' })) }),
+    () =>
+      put({
+        auth: 'headers',
+        headers: Array.from({ length: 21 }, (_, i) => ({
+          name: `X-${i}`,
+          value: 'v',
+          secret: false,
+        })),
+      }),
     /at most 20 headers/,
   );
+  assert.throws(() => put({ auth: 'none' }), /auth mode none has no headers/);
+  assert.throws(() => put({ auth: 'oauth' }), /auth mode oauth has no headers/);
+  assert.throws(() => put({ headers: [] }), /exactly one Authorization header/);
+  assert.throws(
+    () => put({ headers: [{ name: 'X-Key', value: 'k', secret: true }] }),
+    /exactly one Authorization header/,
+  );
 
-  // A port that a key names for the host, any other port, and a server without authentication.
-  assert.doesNotThrow(() => put({ url: 'https://mcp.example.com:8443/mcp' }));
-  assert.doesNotThrow(() => put({ url: 'https://other.example.com:9000/', headers: [] }));
-  assert.doesNotThrow(() => put({ name: 'open', url: 'http://open.example.com/mcp', headers: [] }));
+  assert.doesNotThrow(() => put({ ...none, name: 'open', url: 'http://open.example.com/mcp' }));
+  assert.doesNotThrow(() => put({ name: 'oauth', auth: 'oauth', headers: [] }));
+  assert.doesNotThrow(() => put({ ...header('X-Tenant', 'a'), name: 'tenant', url: 'http://t/' }));
 
-  for (let i = 0; i < 18; i++)
-    put({ name: `s${i}`, headers: [], url: 'https://open.example.com/' });
+  for (let i = 0; i < 17; i++) put({ ...none, name: `s${i}`, url: 'https://open.example.com/' });
   assert.throws(() => put({ name: 'one-too-many' }), /at most 20 MCP servers/);
 });
 
-test('an MCP server shows a warning when the agent will probably not reach it', () => {
+test('the URL and the auth mode of an MCP server are fixed', () => {
   const mcp = mcpStore();
   const id = mcp.globalId('');
   mcp.putMcpServer('', id, GITHUB_MCP);
-  mcp.putMcpServer('', id, { name: 'open', url: 'https://open.example.com/mcp', headers: [] });
 
-  keys = [apiKey('GITHUB_MCP_TOKEN', ['github.com'])];
-  assert.deepEqual(
-    mcp.getSet('', id).mcpServers.map((server) => server.warning),
-    ['The hosts of the API key GITHUB_MCP_TOKEN do not include api.githubcopilot.com', null],
+  assert.throws(
+    () => mcp.putMcpServer('', id, { ...GITHUB_MCP, url: 'https://api.githubcopilot.com/v2/' }),
+    /URL and the auth mode of an MCP server are fixed/,
   );
+  assert.throws(
+    () => mcp.putMcpServer('', id, { ...GITHUB_MCP, auth: 'oauth', headers: [] }),
+    /URL and the auth mode of an MCP server are fixed/,
+  );
+  assert.deepEqual(rowsOf(id, 'github').authorization?.[0], 'Bearer ghp_one');
+});
 
-  keys = [];
-  assert.deepEqual(
-    mcp.getSet('', id).mcpServers.map((server) => server.warning),
-    ['The API key GITHUB_MCP_TOKEN does not exist, so the agent does not get this server', null],
-  );
+test('an OAuth server gets a row without a token, and the editor shows its status', () => {
+  const mcp = mcpStore();
+  const id = mcp.globalId('');
+  const server: AgentMcpServer = {
+    name: 'todoist',
+    url: 'https://ai.todoist.net/mcp',
+    auth: 'oauth',
+    headers: [],
+  };
+
+  const saved = mcp.putMcpServer('', id, server);
+  assert.deepEqual(saved.mcpServers, [{ ...server, status: 'disconnected', lastError: null }]);
+  const [secret, placeholder] = rowsOf(id, 'todoist').authorization ?? [];
+  assert.equal(secret, '');
+
+  secrets.putToken(id, 'todoist', {
+    secret: 'Bearer at-1',
+    oauth: '{}',
+    expires_at: null,
+    refreshed_at: 1,
+  });
+  secrets.markStatus(id, 'todoist', 'failing', 'the server refused the token');
+  mcp.putMcpServer('', id, server);
+  assert.deepEqual(mcp.getSet('', id).mcpServers, [
+    { ...server, status: 'failing', lastError: 'the server refused the token' },
+  ]);
+  assert.deepEqual(rowsOf(id, 'todoist').authorization, ['Bearer at-1', placeholder]);
+  assert.deepEqual(mcp.mcpServer('', id, 'todoist'), server);
+  assert.throws(() => mcp.mcpServer('', id, 'other'), /No such MCP server/);
+  assert.throws(() => mcp.mcpServer('bob', id, 'todoist'), /not found/);
 });
 
 test('the egress proxy gets the host and the port of an MCP server', () => {
@@ -694,13 +794,22 @@ test('the MCP servers of a set replace the servers of the global set with the sa
   const mcp = mcpStore();
   const globalId = mcp.globalId('');
   const set = mcp.createSet('', 'Work');
-  mcp.putMcpServer('', globalId, GITHUB_MCP);
-  mcp.putMcpServer('', globalId, {
-    name: 'docs',
-    url: 'https://docs.example.com/mcp',
+  /**
+   * Makes a server without authentication.
+   *
+   * @param name The name of the server.
+   * @param url The URL of the server.
+   * @returns The server.
+   */
+  const open = (name: string, url: string): AgentMcpServer => ({
+    name,
+    url,
+    auth: 'none',
     headers: [],
   });
-  mcp.putMcpServer('', set.id, { name: 'docs', url: 'https://docs.example.org/mcp', headers: [] });
+  mcp.putMcpServer('', globalId, GITHUB_MCP);
+  mcp.putMcpServer('', globalId, open('docs', 'https://docs.example.com/mcp'));
+  mcp.putMcpServer('', set.id, open('docs', 'https://docs.example.org/mcp'));
 
   const preview = mcp.bundle('', set.id);
   assert.deepEqual(preview.mcpServers, [
@@ -710,28 +819,82 @@ test('the MCP servers of a set replace the servers of the global set with the sa
   assert.deepEqual(preview.mcpOverrides, ['docs']);
   assert.deepEqual(mcp.bundle('', null).mcpOverrides, []);
   assert.deepEqual(
-    mcp.mcpSnapshot('', set.id).map((server) => server.url),
-    ['https://docs.example.org/mcp', GITHUB_MCP.url],
+    mcp.mcpSnapshot('', set.id).map((server) => [server.setId, server.url]),
+    [
+      [set.id, 'https://docs.example.org/mcp'],
+      [globalId, GITHUB_MCP.url],
+    ],
   );
 });
 
-test('the references of an MCP server become the placeholders, and a server without its key is left out', () => {
+test('the secrets of an MCP server become placeholders, and a server without a secret is left out', () => {
   const mcp = mcpStore();
-  const servers = [
-    GITHUB_MCP,
-    {
-      name: 'gone',
-      url: 'https://gone.example.com/',
-      headers: [{ name: 'X-Key', value: `\${GONE}` }],
-    },
-  ];
+  const id = mcp.globalId('');
+  mcp.putMcpServer('', id, GITHUB_MCP);
+  mcp.putMcpServer('', id, {
+    name: 'tenant',
+    url: 'https://mcp.example.com/',
+    auth: 'headers',
+    headers: [
+      { name: 'X-Tenant', value: 'engineering', secret: false },
+      { name: 'X-Key', value: 'key-one', secret: true },
+    ],
+  });
+  mcp.putMcpServer('', id, {
+    name: 'todoist',
+    url: 'https://ai.todoist.net/mcp',
+    auth: 'oauth',
+    headers: [],
+  });
+  /**
+   * Gives the placeholder of a secret row of the global set.
+   *
+   * @param server The name of the server.
+   * @param header The header name in lower case.
+   * @returns The placeholder, or '' when the row does not exist.
+   */
+  const placeholder = (server: string, header: string): string =>
+    rowsOf(id, server)[header]?.[1] ?? '';
+  const snapshot = mcp.mcpSnapshot('', null);
 
-  assert.deepEqual(mcp.mcpServersFor('', servers), [
+  assert.deepEqual(mcp.mcpServersFor('', snapshot), [
     {
       type: 'http',
       name: 'github',
       url: GITHUB_MCP.url,
-      headers: [{ name: 'Authorization', value: 'Bearer placeholder-of-GITHUB_MCP_TOKEN' }],
+      headers: [{ name: 'Authorization', value: placeholder('github', 'authorization') }],
+    },
+    {
+      type: 'http',
+      name: 'tenant',
+      url: 'https://mcp.example.com/',
+      headers: [
+        { name: 'X-Tenant', value: 'engineering' },
+        { name: 'X-Key', value: placeholder('tenant', 'x-key') },
+      ],
     },
   ]);
+
+  secrets.putToken(id, 'todoist', {
+    secret: 'Bearer at-1',
+    oauth: '{}',
+    expires_at: null,
+    refreshed_at: 1,
+  });
+  mcp.deleteMcpServer('', id, 'github');
+  assert.deepEqual(
+    mcp
+      .mcpServersFor('', snapshot)
+      .map((server) => [server.name, 'headers' in server ? server.headers : null]),
+    [
+      [
+        'tenant',
+        [
+          { name: 'X-Tenant', value: 'engineering' },
+          { name: 'X-Key', value: placeholder('tenant', 'x-key') },
+        ],
+      ],
+      ['todoist', [{ name: 'Authorization', value: placeholder('todoist', 'authorization') }]],
+    ],
+  );
 });

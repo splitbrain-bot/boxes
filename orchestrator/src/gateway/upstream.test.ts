@@ -5,7 +5,12 @@ import { join } from 'node:path';
 import { Duplex, Readable } from 'node:stream';
 import Docker from 'dockerode';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { REPLAY_METHOD, type ReplayParams, type TurnStateParams } from '../../../shared/types.ts';
+import {
+  type AgentMcpServer,
+  REPLAY_METHOD,
+  type ReplayParams,
+  type TurnStateParams,
+} from '../../../shared/types.ts';
 import { AgentStore } from '../agents.ts';
 import { ApiKeyStore } from '../api-keys.ts';
 import { BoxManager } from '../boxes.ts';
@@ -16,6 +21,7 @@ import * as dk from '../docker.ts';
 import { EgressManager } from '../egress.ts';
 import { EgressProfileStore } from '../egress-profiles.ts';
 import { setLogLevel } from '../log.ts';
+import { McpSecretStore } from '../mcp-secrets.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
 import { DockerRuntime } from '../runtime/docker.ts';
 import { setRuntime } from '../runtime/runtime.ts';
@@ -253,8 +259,12 @@ let dir: string;
 let db: Db;
 /** The box manager of the current test. */
 let manager: BoxManager;
-/** The API keys of the test. The agent store reads them for the MCP servers. */
+/** The API keys of the test. */
 let apiKeys: ApiKeyStore;
+/** The agent store of the test. */
+let agents: AgentStore;
+/** The secret rows of the MCP servers of the test. */
+let mcpSecrets: McpSecretStore;
 
 /** Every event the gateway announced, in order. */
 let announced: NotifyEvent[];
@@ -324,14 +334,14 @@ beforeEach(async () => {
     db,
   );
   await egress.prepare();
+  mcpSecrets = new McpSecretStore(db, () => {});
+  agents = new AgentStore(db, cfg.DATA_DIR, undefined, undefined, mcpSecrets);
   manager = new BoxManager(
     db,
     cfg,
     egress,
     new RecordingNotifier(db, cfg),
-    new AgentStore(db, cfg.DATA_DIR, undefined, undefined, (owner) => ({
-      keys: apiKeys.list(owner),
-    })),
+    agents,
     new EgressProfileStore(db),
   );
   // config() is memoised for the process, so the manager's DATA_DIR is the
@@ -3312,27 +3322,33 @@ test('pinning to the thread a spawn already brought back does not replay it twic
 });
 
 /**
- * Gives the box s1 MCP servers, as its last start would have stored them.
+ * Stores MCP servers in the global set, and gives them to the box s1, as its
+ * last start would have stored them.
  *
- * @param servers The merged servers, with the `${NAME}` references in the header values.
+ * @param servers The servers.
  */
-function boxMcpServers(servers: unknown[]): void {
-  db.prepare("UPDATE boxes SET mcp_servers = ? WHERE id = 's1'").run(JSON.stringify(servers));
+function boxMcpServers(servers: AgentMcpServer[]): void {
+  const id = agents.globalId('');
+  for (const server of servers) agents.putMcpServer('', id, server);
+  db.prepare("UPDATE boxes SET mcp_servers = ? WHERE id = 's1'").run(
+    JSON.stringify(agents.mcpSnapshot('', null)),
+  );
 }
 
-test('each session call carries the MCP servers of the box, with the placeholder of the key', async () => {
-  const secret = 'mcp-0123456789abcdef0123456789';
-  const key = apiKeys.put('', 'MCP_TOKEN', ['mcp.example.com'], secret);
+test('each session call carries the MCP servers of the box, with the placeholder of the secret', async () => {
+  const secret = 'Bearer mcp-0123456789abcdef0123456789';
   boxMcpServers([
     {
       name: 'docs',
       url: 'https://mcp.example.com/mcp',
+      auth: 'headers',
       headers: [
-        { name: 'Authorization', value: `Bearer \${MCP_TOKEN}` },
-        { name: 'X-Tenant', value: 'engineering' },
+        { name: 'Authorization', value: secret, secret: true },
+        { name: 'X-Tenant', value: 'engineering', secret: false },
       ],
     },
   ]);
+  const placeholder = mcpSecrets.get(agents.globalId(''), 'docs', 'authorization')?.placeholder;
   const sent: Array<{ method: string; session: unknown; mcpServers: unknown }> = [];
   const seen: string[] = [];
   fakeDocker({
@@ -3357,7 +3373,7 @@ test('each session call carries the MCP servers of the box, with the placeholder
       name: 'docs',
       url: 'https://mcp.example.com/mcp',
       headers: [
-        { name: 'Authorization', value: `Bearer ${key.placeholder}` },
+        { name: 'Authorization', value: placeholder },
         { name: 'X-Tenant', value: 'engineering' },
       ],
     },
@@ -3392,14 +3408,10 @@ test('a Codex fork gets no load after it', async () => {
   );
 });
 
-test('an MCP server whose API key is gone is left out', async () => {
+test('an MCP server without a stored secret is left out', async () => {
   boxMcpServers([
-    {
-      name: 'docs',
-      url: 'https://mcp.example.com/mcp',
-      headers: [{ name: 'Authorization', value: `Bearer \${GONE_TOKEN}` }],
-    },
-    { name: 'open', url: 'https://open.example.com/mcp', headers: [] },
+    { name: 'docs', url: 'https://mcp.example.com/mcp', auth: 'oauth', headers: [] },
+    { name: 'open', url: 'https://open.example.com/mcp', auth: 'none', headers: [] },
   ]);
   const sent: unknown[] = [];
   const seen: string[] = [];

@@ -517,6 +517,17 @@ describe('parsePolicy', () => {
     expect(parsed.boxes).toEqual([validBox]);
   });
 
+  it('keeps the oauth flag of a credential, and refuses a flag that is not a boolean', () => {
+    const parsed = parsePolicy({ ...valid, credentials: [{ ...GITHUB, oauth: true }, GITHUB] });
+    expect(parsed.credentials.map((c) => c.oauth)).toEqual([true, undefined]);
+    expect(policyHash(parsed)).not.toBe(
+      policyHash(parsePolicy({ ...valid, credentials: [GITHUB, GITHUB] })),
+    );
+    expect(() => parsePolicy({ ...valid, credentials: [{ ...GITHUB, oauth: 'yes' }] })).toThrow(
+      /oauth flag/,
+    );
+  });
+
   it('trims and lowercases the hosts of a box', () => {
     expect(withBox({ open: true, hosts: [' GitHub.com ', '*.Example.com'] }).boxes).toEqual([
       { ...validBox, open: true, hosts: ['github.com', '*.example.com'] },

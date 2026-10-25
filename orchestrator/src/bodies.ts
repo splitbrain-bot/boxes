@@ -151,7 +151,26 @@ export const agentRepoBody = z.object({
 export const agentMcpServerBody = z.object({
   name: z.string(),
   url: z.string(),
-  headers: z.array(z.object({ name: z.string(), value: z.string() })).default([]),
+  auth: z.enum(['none', 'bearer', 'headers', 'oauth']),
+  headers: z
+    .array(z.object({ name: z.string(), value: z.string(), secret: z.boolean().default(false) }))
+    .default([]),
+});
+
+/** The body of POST /api/agent-sets/:setId/mcp-servers/:name/connect, which starts an OAuth login. */
+export const mcpConnectBody = z.object({
+  origin: z.string(),
+  clientId: z.string().optional(),
+  clientSecret: z.string().optional(),
+});
+
+/** The body of POST /api/mcp-oauth/callback, with the parameters of the redirect of an OAuth login. */
+export const mcpCallbackBody = z.object({
+  state: z.string(),
+  code: z.string().optional(),
+  iss: z.string().optional(),
+  error: z.string().optional(),
+  errorDescription: z.string().optional(),
 });
 
 /** The body of PUT /api/agent-sets/:setId/items, with the skill to write. */

@@ -24,9 +24,9 @@ import type {
   AgentBundlePreview,
   AgentItem,
   AgentMcpServer,
+  AgentMcpServerState,
   AgentRepo,
   AgentSetDetail,
-  ApiKeySummary,
 } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 
@@ -53,13 +53,11 @@ export function AgentSetEditor() {
   const [editing, setEditing] = useState<{ item: AgentItem | null } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<AgentItem | null>(null);
   const [confirmRepo, setConfirmRepo] = useState<AgentRepo | null>(null);
-  const [editingMcp, setEditingMcp] = useState<{ server: AgentMcpServer | null } | null>(null);
+  const [editingMcp, setEditingMcp] = useState<{ server: AgentMcpServerState | null } | null>(null);
   const [confirmMcp, setConfirmMcp] = useState<AgentMcpServer | null>(null);
-  /** The API keys of the user, which an MCP server can refer to. */
-  const [keys, setKeys] = useState<ApiKeySummary[]>([]);
 
   /**
-   * Loads the set, the API keys and, for a non-global set, the merged result.
+   * Loads the set and, for a non-global set, the merged result.
    *
    * @param seed Fills the AGENTS.md and name buffers from the answer. Only the
    *   first load seeds them, so a reload after another save keeps unsaved text.
@@ -73,7 +71,6 @@ export function AgentSetEditor() {
           setAgentsMd(detail.agentsMd);
           setName(detail.name);
         }
-        setKeys(await api.listApiKeys());
         setPreview(detail.global ? null : await api.agentSetPreview(setId));
         setError(null);
       } catch (err) {
@@ -226,7 +223,6 @@ export function AgentSetEditor() {
       {editingMcp ? (
         <McpDialog
           server={editingMcp.server}
-          keys={keys}
           busy={busy}
           error={error}
           onCancel={() => {
@@ -236,7 +232,19 @@ export function AgentSetEditor() {
           onSave={async (body) => {
             if (await act(() => api.putAgentMcpServer(setId, body))) setEditingMcp(null);
           }}
-          onSaveKey={(name, hosts, secret) => act(() => api.putApiKey(name, hosts, secret))}
+          onConnect={async (body, client) => {
+            let redirectUri: string | null = null;
+            await act(async () => {
+              await api.putAgentMcpServer(setId, body);
+              const answer = await api.connectAgentMcpServer(setId, body.name, {
+                origin: window.location.origin,
+                ...client,
+              });
+              if ('authorizationUrl' in answer) window.location.assign(answer.authorizationUrl);
+              else redirectUri = answer.redirectUri;
+            });
+            return redirectUri;
+          }}
         />
       ) : null}
 

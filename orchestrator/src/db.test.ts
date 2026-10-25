@@ -778,3 +778,31 @@ test('boxes from before the egress profiles each get a proxy token and keep thei
     upgraded.close();
   }
 });
+
+test('the MCP servers from before the secret rows are deleted, also from the boxes', () => {
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('CREATE TABLE agent_mcp_secrets'));
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  const old = JSON.stringify([{ name: 'Authorization', value: `Bearer \${GITHUB_MCP_TOKEN}` }]);
+  db.prepare(
+    `INSERT INTO agent_mcp_servers (set_id, name, url, headers, created_at, updated_at)
+     VALUES ('global', 'github', 'https://api.githubcopilot.com/mcp/', ?, 1, 1)`,
+  ).run(old);
+  db.prepare(
+    `INSERT INTO boxes (id, name, owner, status, ws_token, created_at, last_active_at, mcp_servers)
+     VALUES ('b1', 'box', '', 'stopped', 'ws', 1, 1, ?)`,
+  ).run(JSON.stringify([{ name: 'github', url: 'https://api.githubcopilot.com/mcp/' }]));
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    assert.deepEqual(upgraded.prepare('SELECT * FROM agent_mcp_servers').all(), []);
+    assert.deepEqual(upgraded.prepare('SELECT mcp_servers FROM boxes').all(), [
+      { mcp_servers: '[]' },
+    ]);
+    assert.deepEqual(upgraded.prepare('SELECT * FROM agent_mcp_secrets').all(), []);
+  } finally {
+    upgraded.close();
+  }
+});

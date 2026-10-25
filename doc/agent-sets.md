@@ -28,8 +28,8 @@ content merge differently:
   2. a skill from a repository of the selected set, in the order of the repository list
   3. a skill of the global set
   4. a skill from a repository of the global set, in the order of the repository list
-- An MCP server is addressed by its name. A server of the selected set replaces a server of the global set with the
-  same name.
+- An MCP server is addressed by its name. An MCP server of the selected set replaces an MCP server of the global set
+  with the same name.
 
 The editor of a named set shows the merged result under "Merged result".
 
@@ -65,27 +65,31 @@ A set takes skills from at most 20 repositories, and the orchestrator takes at m
 ## MCP servers
 
 An MCP server gives the agent more tools. MCP is the Model Context Protocol, and a remote MCP server answers it over
-HTTP. Boxes supports remote servers with the Streamable HTTP transport only. Boxes does not support servers that run as
-a local process in the box, servers with the older SSE transport, or servers that need an OAuth login.
+HTTP. Boxes supports remote MCP servers with the Streamable HTTP transport only. Boxes does not support MCP servers that
+run as a local process in the box, or MCP servers with the older SSE transport.
 
-Each server has a name, a URL, and a list of HTTP headers. The name must be lowercase letters, digits, and dashes, and
-it can have at most 32 characters. The URL must use `https`, or `http` for a server without a secret. A server has at
-most 20 headers, and a header value can have at most 4096 characters.
+Each MCP server has a name, a URL, and an authentication method. The name must be lowercase letters, digits, and dashes,
+and it can have at most 32 characters. The name, the URL and the authentication method are fixed. To change one of
+them, delete the MCP server and add it again.
 
-The agent reaches a server through the [egress proxy](egress.md), and the proxy always allows the host and the port of
-the server. The orchestrator refuses a URL with a private IP address.
+The URL must use `https`. An MCP server without secrets can also use `http`, because the egress proxy puts secrets only
+into `https` requests. Boxes does not support MCP servers or authorization servers at private IP addresses. The
+[egress proxy](egress.md) always allows the host and the port of an MCP server.
 
-### Secrets in headers
+An MCP server uses a bearer token, custom headers, an OAuth login, or no authentication. An MCP server has at most 20
+custom headers, and a header value can have at most 4096 characters. A header value is literal or secret, and an
+`Authorization` header must be secret. The orchestrator stores a bearer token and each secret value with the MCP
+server, and a box gets only a placeholder, as for a [credential](credentials.md#the-path-of-a-credential-into-a-box).
 
-A secret, for example a token, goes into an [API key](credentials.md#other-api-keys), and never into the set. A header
-value refers to a key as `${NAME}`, where `NAME` is the environment variable name of the key. The orchestrator and the
-egress proxy put in the key on the way to the server, so the key never goes into a box. For a bearer token, the editor
-builds the header `Authorization: Bearer ${NAME}` from a selected key. Other headers can mix a key reference with
-literal text, and a literal value goes into the box as it is.
+For an OAuth login, the user starts the login in the dashboard and logs in at the authorization server of the MCP
+server. The orchestrator then stores the token and keeps it fresh. The agent gets an MCP server with an OAuth login only
+after the first login. When a refresh fails or the MCP server refuses the token, the orchestrator marks the login as
+failing with the reason, and the user logs in again.
 
-The orchestrator refuses a server when a referenced key does not exist, or when the hosts of the key do not include the
-host and the port of the server. It also refuses an `Authorization` header without a key reference. For other header
-names, it cannot tell a secret from a literal value, so put each secret into an API key.
+Many authorization servers accept the orchestrator as a client without a registration by the user. For the other
+authorization servers, for example GitHub, the user registers a client at the authorization server, for example a
+GitHub App. The registration needs the redirect URI `<dashboard origin>/oauth/callback`. The dashboard then asks for
+the client ID and the optional client secret.
 
 ## File installation into a box
 
@@ -94,8 +98,8 @@ At each box start, the [file service](files.md) in the box installs the merged s
 
 The practical effects:
 
-- Changes to a set reach a box the next time the box starts. A running box keeps what it has. This also applies to the
-  MCP servers. A new placeholder of an API key, however, applies at the next session call of a thread.
+- Changes to a set reach a box the next time the box starts. A running box keeps what it has. A new secret or a new
+  OAuth login of an MCP server applies without a restart of the box.
 - An item deleted from a set is removed from the box at the next start. A built-in skill whose condition no longer
   holds is removed in the same way.
 - When a set is deleted, the boxes that selected it keep what is already installed, and get the global set alone at the
@@ -108,8 +112,8 @@ can be opened in its editor.
 
 ## Technical internals
 
-The implementation is `orchestrator/src/agents.ts`, over the `agent_sets`, `agent_items`, `agent_repos` and
-`agent_mcp_servers` tables. The database is the source of truth; the files are derived from it.
+The implementation is `orchestrator/src/agents.ts`, over the `agent_sets`, `agent_items`, `agent_repos`,
+`agent_mcp_servers` and `agent_mcp_secrets` tables. The database is the source of truth; the files are derived from it.
 
 ### Repository checkouts
 
@@ -152,7 +156,13 @@ deleted with it, together with the repository checkouts.
 
 ### MCP servers
 
-`orchestrator/src/mcp-servers.ts` checks a server at save and makes the `mcpServers` list for the
-[gateway](acp.md#mcp-servers). The `agent_mcp_servers` table stores the headers with the `${NAME}` references. At each
-box start, the orchestrator writes the merged servers into the `mcp_servers` column of the box, so the list survives a
-restart of the orchestrator.
+`orchestrator/src/mcp-servers.ts` checks an MCP server at save and makes the `mcpServers` list for the
+[ACP gateway](acp.md#mcp-servers). At each box start, the orchestrator copies the merged MCP servers into the
+`mcp_servers` column of the box, so the list survives a restart of the orchestrator.
+
+The `agent_mcp_secrets` table (`orchestrator/src/mcp-secrets.ts`) holds each secret with its full header value and its
+placeholder. The placeholder stays the same while the secret exists, so a new token needs no new session.
+
+`orchestrator/src/mcp-oauth.ts` is the OAuth client, based on `oauth4webapi`. It runs one refresh of a token at a time,
+because a rotated refresh token works only once. The reconciler refreshes the tokens. The orchestrator also handles the
+refused tokens that the [egress proxy](egress.md#interception) reports.

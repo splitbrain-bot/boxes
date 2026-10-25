@@ -432,7 +432,7 @@ export const DEVTUNNELS_CLIENT_ID = 'Iv1.e7b89e013f801f03';
 export const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token';
 
 /** The time before expiry at which an access token is refreshed, in milliseconds. */
-const REFRESH_WINDOW_MS = 60 * 60_000;
+export const REFRESH_WINDOW_MS = 60 * 60_000;
 
 /** The maximum age of a login before a refresh without a near expiry, as Codex does it. */
 const REFRESH_MAX_AGE_MS = 8 * 24 * 60 * 60_000;

@@ -1,18 +1,16 @@
 /**
  * Checks and resolution of the remote MCP servers of the agent sets.
  *
- * A header value refers to an API key of the owner as `${NAME}`, and the stored
- * value keeps the reference. Only the placeholder of the key reaches an adapter,
- * and only the egress proxy puts in the key.
+ * Only the placeholder of a secret reaches an adapter, and only the egress
+ * proxy puts in the secret.
  */
 
 import net from 'node:net';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { isBlockedAddress } from '../../shared/cidr.ts';
-import { hostMatches } from '../../shared/hosts.ts';
-import type { AgentMcpServer } from '../../shared/types.ts';
-import type { ApiKeyRow } from './api-keys.ts';
+import type { AgentMcpAuth, AgentMcpServer } from '../../shared/types.ts';
 import { HttpError } from './http-error.ts';
+import { OAUTH_HEADER } from './mcp-secrets.ts';
 
 /** The maximum number of MCP servers in one set. */
 export const MAX_MCP_SERVERS = 20;
@@ -33,8 +31,8 @@ const MAX_URL = 2048;
  */
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
-/** The pattern of a reference to an API key in a header value. */
-const KEY_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+/** The auth modes of a server. */
+const AUTH_MODES: readonly AgentMcpAuth[] = ['none', 'bearer', 'headers', 'oauth'];
 
 /** The pattern of an HTTP header name, which is an HTTP token. */
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
@@ -51,10 +49,10 @@ const RESERVED_HEADERS = new Set([
   'mcp-protocol-version',
 ]);
 
-/** The API keys of an owner, which the checks of a server read. */
-export interface McpContext {
-  /** The API keys of the owner. */
-  keys: readonly ApiKeyRow[];
+/** A merged server of a box, with the id of its set. */
+export interface McpSnapshotEntry extends AgentMcpServer {
+  /** The id of the set of the server. */
+  setId: string;
 }
 
 /** The host and the port that the agent connects to for a server. */
@@ -97,24 +95,13 @@ export function mcpHostPattern(url: string): string | null {
 }
 
 /**
- * Lists the names of the API keys that a header value refers to.
- *
- * @param value The header value.
- * @returns The names, in the order of the references.
- */
-function referencesOf(value: string): string[] {
-  return [...value.matchAll(KEY_REFERENCE)].map((match) => match[1] ?? '');
-}
-
-/**
  * Checks a server that a user saves.
  *
- * @param body The server from the request.
- * @param ctx The keys of the owner.
+ * @param body The server from the request. The value of a secret header is empty to keep the stored value.
  * @returns The server, with a trimmed name in lower case, a trimmed URL and trimmed header names.
  * @throws {HttpError} A 400 when a field is not valid.
  */
-export function validMcpServer(body: AgentMcpServer, ctx: McpContext): AgentMcpServer {
+export function validMcpServer(body: AgentMcpServer): AgentMcpServer {
   const name = body.name.trim().toLowerCase();
   if (!NAME_PATTERN.test(name)) {
     throw new HttpError(
@@ -122,6 +109,9 @@ export function validMcpServer(body: AgentMcpServer, ctx: McpContext): AgentMcpS
       'name must be lowercase letters, digits and dashes, start with a letter or digit, ' +
         'and be 32 characters or fewer',
     );
+  }
+  if (!AUTH_MODES.includes(body.auth)) {
+    throw new HttpError(400, `auth must be one of ${AUTH_MODES.join(', ')}`);
   }
 
   const rawUrl = body.url.trim();
@@ -143,6 +133,9 @@ export function validMcpServer(body: AgentMcpServer, ctx: McpContext): AgentMcpS
   const target = targetOf(url);
   if (net.isIP(target.host) !== 0 && isBlockedAddress(target.host)) {
     throw new HttpError(400, 'url must not name a private address');
+  }
+  if (body.auth === 'oauth' && url.protocol !== 'https:') {
+    throw new HttpError(400, 'url must use https, because an OAuth token goes only over https');
   }
 
   if (body.headers.length > MAX_HEADERS) {
@@ -169,98 +162,68 @@ export function validMcpServer(body: AgentMcpServer, ctx: McpContext): AgentMcpS
     if (/[\x00-\x08\x0a-\x1f\x7f]/.test(value)) {
       throw new HttpError(400, `headers: the value of ${headerName} holds a control character`);
     }
-    if (value.replace(KEY_REFERENCE, '').includes('${')) {
-      throw new HttpError(
-        400,
-        `headers: the value of ${headerName} holds a \${ that is not a reference to an API key`,
-      );
+    if (lower === OAUTH_HEADER && !header.secret) {
+      throw new HttpError(400, 'headers: the Authorization header must be secret');
     }
-
-    const refs = referencesOf(value);
-    if (lower === 'authorization' && refs.length === 0) {
-      throw new HttpError(
-        400,
-        'headers: put the token of the Authorization header into an API key, and refer to it',
-      );
+    if (header.secret && url.protocol !== 'https:') {
+      throw new HttpError(400, 'url must use https, because a secret header goes only over https');
     }
-    if (refs.length > 0 && url.protocol !== 'https:') {
-      throw new HttpError(400, 'url must use https, because an API key goes only over https');
-    }
-    for (const ref of refs) {
-      const key = ctx.keys.find((k) => k.name === ref);
-      if (!key) throw new HttpError(400, `headers: there is no API key ${ref}`);
-      if (!key.hosts.some((pattern) => hostMatches(target.host, target.port, pattern))) {
-        throw new HttpError(
-          400,
-          `headers: the hosts of the API key ${ref} do not include ${url.host}`,
-        );
-      }
-    }
-    return { name: headerName, value };
+    return { name: headerName, value, secret: header.secret };
   });
 
-  return { name, url: rawUrl, headers };
+  if ((body.auth === 'none' || body.auth === 'oauth') && headers.length > 0) {
+    throw new HttpError(400, `headers: a server with the auth mode ${body.auth} has no headers`);
+  }
+  if (
+    body.auth === 'bearer' &&
+    (headers.length !== 1 || headers[0]?.name.toLowerCase() !== OAUTH_HEADER)
+  ) {
+    throw new HttpError(400, 'headers: a bearer server has exactly one Authorization header');
+  }
+
+  return { name, url: rawUrl, auth: body.auth, headers };
 }
 
 /**
- * Finds the reason the agent will probably not reach a stored server. The
- * keys can change after the save.
+ * Makes the `mcpServers` list for an adapter. Each secret header gets the
+ * placeholder of its secret row, and an OAuth server gets the Authorization
+ * header with the placeholder of its token. A server without a stored secret
+ * is left out, because it would get no credential.
  *
- * @param server The stored server.
- * @param ctx The keys of the owner.
- * @returns The reason, or null when no problem is known.
- */
-export function mcpWarning(server: AgentMcpServer, ctx: McpContext): string | null {
-  let url: URL;
-  try {
-    url = new URL(server.url);
-  } catch {
-    return 'The URL is not valid';
-  }
-  const target = targetOf(url);
-  const refs = server.headers.flatMap((header) => referencesOf(header.value));
-  for (const ref of refs) {
-    const key = ctx.keys.find((k) => k.name === ref);
-    if (!key) return `The API key ${ref} does not exist, so the agent does not get this server`;
-    if (!key.hosts.some((pattern) => hostMatches(target.host, target.port, pattern))) {
-      return `The hosts of the API key ${ref} do not include ${url.host}`;
-    }
-  }
-  return null;
-}
-
-/**
- * Makes the `mcpServers` list for an adapter. Each API key reference becomes
- * the placeholder of the key. A server that refers to a key that does not
- * exist is left out, because it would get no credential.
- *
- * @param servers The merged servers of the box, with the `${NAME}` references in the header values.
- * @param key The function that gives an API key of the owner by name.
- * @param skipped Receives the name of each left-out server and the name of its missing key.
+ * @param servers The merged servers of the box.
+ * @param placeholder The function that gives the placeholder of a secret row with a secret, or undefined.
+ * @param skipped Receives the name of each left-out server and the header without a secret.
  * @returns The list for the adapter.
  */
 export function resolveMcpServers(
-  servers: readonly AgentMcpServer[],
-  key: (name: string) => ApiKeyRow | undefined,
-  skipped: (server: string, missingKey: string) => void,
+  servers: readonly McpSnapshotEntry[],
+  placeholder: (setId: string, server: string, header: string) => string | undefined,
+  skipped: (server: string, header: string) => void,
 ): McpServer[] {
   const resolved: McpServer[] = [];
   for (const server of servers) {
-    const missing = server.headers
-      .flatMap((header) => referencesOf(header.value))
-      .find((ref) => key(ref) === undefined);
-    if (missing !== undefined) {
-      skipped(server.name, missing);
+    const headers = server.headers.map((header) => ({
+      name: header.name,
+      value: header.secret
+        ? placeholder(server.setId, server.name, header.name.toLowerCase())
+        : header.value,
+    }));
+    if (server.auth === 'oauth') {
+      headers.push({
+        name: 'Authorization',
+        value: placeholder(server.setId, server.name, OAUTH_HEADER),
+      });
+    }
+    const missing = headers.find((header) => header.value === undefined);
+    if (missing) {
+      skipped(server.name, missing.name);
       continue;
     }
     resolved.push({
       type: 'http',
       name: server.name,
       url: server.url,
-      headers: server.headers.map((header) => ({
-        name: header.name,
-        value: header.value.replace(KEY_REFERENCE, (_, ref: string) => key(ref)?.placeholder ?? ''),
-      })),
+      headers: headers.map((header) => ({ name: header.name, value: header.value ?? '' })),
     });
   }
   return resolved;
