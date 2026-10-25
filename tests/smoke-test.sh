@@ -482,8 +482,10 @@ must_output "closed profile: the refusal names the egress profile" 'Not allowed 
   sh -c 'curl -sS -m 15 -v https://example.com 2>&1'
 must_fail "closed profile: an address literal that is not in the profile is denied" \
   curl -fsS -m 15 https://1.1.1.1
+# No -f: a 403 of the registry is still the host answering. A refused
+# CONNECT makes curl fail.
 must_pass "closed profile: a host in the profile is reachable" \
-  curl -fsS -m 15 https://registry.npmjs.org/
+  curl -sS -m 15 -o /dev/null https://registry.npmjs.org/
 if [ -n "$REAL_GH" ]; then
   # No -f: a rate limited 403 is still GitHub answering.
   must_pass "closed profile: the GitHub credential host is always allowed" \

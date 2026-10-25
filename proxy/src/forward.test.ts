@@ -438,6 +438,25 @@ describe('the front door', () => {
     });
   });
 
+  it.each([
+    ['a refusal', basic('closed-box', CLOSED_TOKEN)],
+    ['a 407', null],
+  ])('keeps running when a client resets the socket during %s', async (_name, auth) => {
+    const { port } = await frontDoor();
+    for (let i = 0; i < 20; i++) {
+      await new Promise<void>((resolve) => {
+        const socket = net.connect({ host: '127.0.0.1', port }, () => {
+          const header = auth === null ? '' : `Proxy-Authorization: ${auth}\r\n`;
+          socket.write(`CONNECT other.example.com:443 HTTP/1.1\r\n${header}\r\n`, () => {
+            socket.resetAndDestroy();
+            resolve();
+          });
+        });
+      });
+    }
+    expect(await connect(port, 'api.example.com:443')).toBe('HTTP/1.1 200 Connection Established');
+  });
+
   it('lets an open box reach any host on port 443, but not on another port', async () => {
     const { port, engine, denials } = await frontDoor();
     // The open mode allows api.example.com without a pattern for it.

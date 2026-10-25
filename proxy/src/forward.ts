@@ -393,6 +393,8 @@ export function createForwardServer(opts: ForwardOptions): http.Server {
   // CONNECT tunnels.
 
   server.on('connect', (req, clientSocket: net.Socket, head: Buffer) => {
+    // A client can reset the socket while a refusal is written, and an error without a listener stops the process.
+    clientSocket.on('error', () => clientSocket.destroy());
     const refuse = (code: number, reason: string): void => {
       try {
         clientSocket.write(`HTTP/1.1 ${code} ${reason}\r\n\r\n`);
