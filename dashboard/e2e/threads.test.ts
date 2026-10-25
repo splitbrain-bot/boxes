@@ -275,3 +275,47 @@ test('marking a thread done crosses it out on the list, and the mark comes off a
     await close();
   }
 });
+
+/**
+ * Holds a touch on the middle of an element for one second, through the Chrome DevTools Protocol.
+ *
+ * @param page The page with the element.
+ * @param target The element.
+ */
+async function longPress(
+  page: import('playwright').Page,
+  target: import('playwright').Locator,
+): Promise<void> {
+  const box = await target.boundingBox();
+  if (!box) throw new Error('The element has no box.');
+  const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
+  await page.waitForTimeout(1000);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await cdp.detach();
+}
+
+test('a right click or a long press on the list toggles the done mark without opening the thread', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/');
+  try {
+    const name = page.getByRole('link', { name: 'Thread 1' }).getByText('Thread 1');
+    await expect.poll(() => name.isVisible()).toBe(true);
+
+    await name.click({ button: 'right' });
+    await expect.poll(() => decoration(name)).toBe('line-through');
+    await name.click({ button: 'right' });
+    await expect.poll(() => decoration(name)).toBe('none');
+
+    await longPress(page, name);
+    await expect.poll(() => decoration(name)).toBe('line-through');
+    expect(new URL(page.url()).pathname).toBe('/');
+    await longPress(page, name);
+    await expect.poll(() => decoration(name)).toBe('none');
+    expect(new URL(page.url()).pathname).toBe('/');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});

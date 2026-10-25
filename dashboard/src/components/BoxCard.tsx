@@ -1,5 +1,5 @@
 import { FileSearch, HardDrive, Info, Plus, Square, SquareTerminal } from 'lucide-react';
-import { useState } from 'react';
+import { type PointerEvent, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { BoxWorkList } from '@/components/BoxWorkList';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
@@ -14,6 +14,9 @@ import type { BoxSummary, BoxWork, ThreadSummary } from '../../../shared/types.t
 import { api } from '../api.ts';
 import { refresh, useBoxes } from '../stores/boxes.ts';
 import { type BadgeKind, DOT, StatusBadge } from './StatusBadge';
+
+/** The time in milliseconds that a touch must stay on a thread row to toggle its done mark. */
+const LONG_PRESS_MS = 500;
 
 /**
  * A count with the thing it counts: "1 approval", "3 approvals".
@@ -59,7 +62,8 @@ export function boxBadges(s: BoxSummary): Array<{ kind: BadgeKind; label: string
 /**
  * Card for one box in the list, with a row per thread.
  *
- * A row opens its thread. The card itself opens nothing. The info corner
+ * A row opens its thread. A right click or a long press on a row toggles the
+ * done mark of the thread. The card itself opens nothing. The info corner
  * leads to the details and controls of the box.
  *
  * @param box The box.
@@ -80,6 +84,11 @@ export function BoxCard({ box }: { box: BoxSummary }) {
   const [boxWork, setBoxWork] = useState<BoxWork[] | 'reading' | 'unreadable'>('reading');
   // The harness labels come from the health probe that the list already polls.
   const { harnesses } = useBoxes();
+  /**
+   * The current touch on a thread row. `timer` is its long press timer, and `fired` is
+   * true after the press toggled the done mark.
+   */
+  const press = useRef<{ timer: number; fired: boolean } | null>(null);
 
   /**
    * Runs one thread call and opens the thread it made.
@@ -107,6 +116,61 @@ export function BoxCard({ box }: { box: BoxSummary }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  /**
+   * Toggles the done mark of a thread and refreshes the box list.
+   *
+   * @param thread The thread.
+   */
+  async function toggleDone(thread: ThreadSummary): Promise<void> {
+    setError(null);
+    try {
+      await api.setThreadDone(box.id, thread.id, !thread.done);
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  /**
+   * Toggles the done mark once per press.
+   *
+   * A long press on Android sends a context menu event and also runs out the timer.
+   *
+   * @param thread The thread of the pressed row.
+   */
+  function pressMark(thread: ThreadSummary): void {
+    const current = press.current;
+    if (current) {
+      if (current.fired) return;
+      current.fired = true;
+      window.clearTimeout(current.timer);
+    }
+    void toggleDone(thread);
+  }
+
+  /**
+   * Starts the long press timer for a touch on a thread row.
+   *
+   * iOS sends no context menu event for a long press, so the timer toggles the mark.
+   *
+   * @param event The pointer event.
+   * @param thread The thread of the row.
+   */
+  function pressStart(event: PointerEvent, thread: ThreadSummary): void {
+    if (press.current) window.clearTimeout(press.current.timer);
+    press.current = null;
+    if (event.pointerType !== 'touch') return;
+    press.current = {
+      fired: false,
+      timer: window.setTimeout(() => pressMark(thread), LONG_PRESS_MS),
+    };
+  }
+
+  /** Stops the long press timer when the touch ends or the page scrolls. */
+  function pressEnd(): void {
+    if (press.current) window.clearTimeout(press.current.timer);
   }
 
   /**
@@ -196,7 +260,19 @@ export function BoxCard({ box }: { box: BoxSummary }) {
             <Link
               key={thread.id}
               to={`/boxes/${box.id}/threads/${thread.id}`}
-              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm no-underline hover:bg-accent"
+              onPointerDown={(e) => pressStart(e, thread)}
+              onPointerUp={pressEnd}
+              onPointerCancel={pressEnd}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                pressMark(thread);
+              }}
+              onClick={(e) => {
+                // The release of a long press must not open the thread.
+                if (press.current?.fired) e.preventDefault();
+                press.current = null;
+              }}
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm no-underline select-none [-webkit-touch-callout:none] hover:bg-accent"
             >
               <span
                 role="img"
