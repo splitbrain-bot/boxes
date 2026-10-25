@@ -293,11 +293,14 @@ export interface Runtime {
   startLogin(credentialId: string): Promise<Login>;
 
   /**
-   * Gives the address of the front door of the egress proxy.
+   * Gives the proxy URL of a box. The box id is the user and the token of the
+   * box is the password, so the proxy can identify the box.
    *
-   * @returns The URL of the proxy, as a box sees it.
+   * @param boxId The id of the box.
+   * @param token The token of the box at the proxy.
+   * @returns The URL of the front door of the proxy, as a box sees it.
    */
-  proxyUrl(): string;
+  proxyUrl(boxId: string, token: string): string;
   /**
    * Reads facts about a box for the details page.
    *

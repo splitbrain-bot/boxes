@@ -14,6 +14,7 @@ import { CredentialStore } from '../credentials.ts';
 import { type Db, openDb, readHarnessCatalog } from '../db.ts';
 import * as dk from '../docker.ts';
 import { EgressManager } from '../egress.ts';
+import { EgressProfileStore } from '../egress-profiles.ts';
 import { setLogLevel } from '../log.ts';
 import { Notifier, type NotifyEvent } from '../notify.ts';
 import { DockerRuntime } from '../runtime/docker.ts';
@@ -330,8 +331,8 @@ beforeEach(async () => {
     new RecordingNotifier(db, cfg),
     new AgentStore(db, cfg.DATA_DIR, undefined, undefined, (owner) => ({
       keys: apiKeys.list(owner),
-      allowedHosts: [],
     })),
+    new EgressProfileStore(db),
   );
   // config() is memoised for the process, so the manager's DATA_DIR is the
   // first test's `dir`, not necessarily this test's.

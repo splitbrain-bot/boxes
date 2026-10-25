@@ -32,6 +32,7 @@ import {
 } from './db.ts';
 import { BOX_SIZE_TTL_MS, BoxUsage } from './diskusage.ts';
 import type { EgressManager } from './egress.ts';
+import type { EgressProfileStore } from './egress-profiles.ts';
 import { fileService, OutdatedImageError } from './files.ts';
 import { PendingStore } from './gateway/pending.ts';
 import { NOTHING_TO_FORK, THREAD_NOT_FOUND, UpstreamBox } from './gateway/upstream.ts';
@@ -48,7 +49,7 @@ import {
   runtime,
   WORKSPACE_DIR,
 } from './runtime/runtime.ts';
-import { generateWsToken } from './secret.ts';
+import { generateProxyToken, generateWsToken } from './secret.ts';
 import { readSettings } from './settings.ts';
 import { setUpBox } from './setup.ts';
 import type { BoxReading } from './tunnels.ts';
@@ -131,6 +132,7 @@ export class BoxManager {
    * @param egress The egress manager.
    * @param notifier The sender of push notifications.
    * @param agents The store of agent sets.
+   * @param profiles The store of egress profiles.
    * @param tunnelsOf The function that returns the dev tunnel ports of a box.
    */
   constructor(
@@ -144,6 +146,8 @@ export class BoxManager {
     private readonly notifier: Notifier,
     /** The agent sets. The app creates the store, so the routes and the lifecycle share it. */
     private readonly agents: AgentStore,
+    /** The egress profiles. The app creates the store, so the routes and the boxes share it. */
+    private readonly profiles: EgressProfileStore,
     /** Returns the dev tunnel ports of a box, from the last read of the tunnel reconciler. */
     private readonly tunnelsOf: (boxId: string) => BoxTunnel[] = () => [],
   ) {
@@ -397,14 +401,14 @@ export class BoxManager {
    * @returns The id and the environment of the box.
    */
   private boxSpec(id: string): BoxSpec {
-    const { owner } = this.mustGet(id);
+    const { owner, proxy_token } = this.mustGet(id);
     return {
       boxId: id,
       env: boxEnv({
         placeholderFor: (credential) => this.egress.placeholderFor(owner, credential),
         methodFor: (credential) => this.egress.methodFor(owner, credential),
         gitlabHost: this.cfg.GITLAB_HOST,
-        proxyUrl: runtime().proxyUrl(),
+        proxyUrl: runtime().proxyUrl(id, proxy_token),
         hasCa: this.egress.caCertificate() !== '',
         apiKeys: this.egress.apiKeyEnv(owner),
       }),
@@ -453,7 +457,7 @@ export class BoxManager {
    * Creates the storage and the container of a new box. Any failed step
    * tears the whole box down and marks it as an error.
    *
-   * @param body The name, the agent set and the first thread of the box.
+   * @param body The name, the agent set, the egress profile and the first thread of the box.
    * @param owner The user who owns the new box.
    * @returns The detail of the new box.
    * @throws {HttpError} A 400 for a request that is not valid, a 503 when the box image is
@@ -476,6 +480,7 @@ export class BoxManager {
     if (agentSetId && !this.agents.has(owner, agentSetId)) {
       throw new HttpError(400, `Unknown agent set: ${agentSetId}`);
     }
+    const egressProfileId = this.selectedProfile(owner, body.egressProfile);
 
     // The check comes before any allocation, so an unknown harness gets a 400
     // without cost.
@@ -508,6 +513,8 @@ export class BoxManager {
       agent_set_id: agentSetId,
       // The box has its own token, which opens only the WebSocket of this box.
       ws_token: generateWsToken(),
+      egress_profile_id: egressProfileId,
+      proxy_token: generateProxyToken(),
       created_at: now,
       last_active_at: now,
       disk_bytes: null,
@@ -519,11 +526,13 @@ export class BoxManager {
     this.db
       .prepare(
         `INSERT INTO boxes (id, name, owner, profile, status, agent_set_id,
-           ws_token, created_at, last_active_at)
+           ws_token, egress_profile_id, proxy_token, created_at, last_active_at)
          VALUES (@id, @name, @owner, @profile, @status, @agent_set_id,
-           @ws_token, @created_at, @last_active_at)`,
+           @ws_token, @egress_profile_id, @proxy_token, @created_at, @last_active_at)`,
       )
       .run(row);
+    // The proxy must know the box before the box makes its first request.
+    await this.syncEgress();
 
     const slog = log.box(id);
     try {
@@ -546,6 +555,52 @@ export class BoxManager {
     }
 
     return this.detail(id);
+  }
+
+  /**
+   * Checks the egress profile that a request selects for a box of a user.
+   *
+   * @param owner The owner of the box.
+   * @param requested The id of the profile, or null, undefined or empty for the default profile.
+   * @returns The id to store, or null for the default profile.
+   * @throws {HttpError} A 400 when the user has no profile with this id.
+   */
+  private selectedProfile(owner: string, requested: string | null | undefined): string | null {
+    const id = requested?.trim() ?? '';
+    if (id === '' || id === this.profiles.defaultId(owner)) return null;
+    if (!this.profiles.has(owner, id)) throw new HttpError(400, `Unknown egress profile: ${id}`);
+    return id;
+  }
+
+  /**
+   * Selects the egress profile of a box. The proxy applies the change to the
+   * next connection of the box, and the box keeps running.
+   *
+   * @param id The id of the box.
+   * @param requested The id of the profile, or null for the default profile.
+   * @returns The detail of the box.
+   * @throws {HttpError} A 404 when the box does not exist, or a 400 when the owner has no profile with this id.
+   */
+  async setEgressProfile(id: string, requested: string | null): Promise<BoxDetail> {
+    const row = this.mustGet(id);
+    const profile = this.selectedProfile(row.owner, requested);
+    this.db.prepare('UPDATE boxes SET egress_profile_id = ? WHERE id = ?').run(profile, id);
+    void this.syncEgress();
+    return this.detail(id);
+  }
+
+  /**
+   * Pushes the egress policy to the proxy. A failure goes to the log, because
+   * the reconciler pushes the policy again every minute.
+   */
+  private async syncEgress(): Promise<void> {
+    try {
+      await this.egress.sync();
+    } catch (err) {
+      log.warn('could not push the egress policy after a box changed; will retry', {
+        error: (err as Error).message,
+      });
+    }
   }
 
   /**
@@ -772,6 +827,7 @@ export class BoxManager {
     for (const table of ['pending_requests', 'threads']) {
       this.db.prepare(`DELETE FROM ${table} WHERE box_id = ?`).run(id);
     }
+    void this.syncEgress();
     log.box(id).info('box deleted', { name: row.name });
   }
 
@@ -1023,6 +1079,7 @@ export class BoxManager {
       this.pending.countForBox(id),
       boxTurnActive(this.db, id),
     );
+    const profile = this.profiles.forBox(row.owner, row.egress_profile_id);
     return {
       ...summary,
       runtimeDetails: await runtime().details(id),
@@ -1031,6 +1088,8 @@ export class BoxManager {
       // `upstreams.get` does not create an upstream. A box without an upstream
       // has no reading, so the list is empty.
       boxWork: [...(this.upstreams.get(id)?.boxWork ?? [])],
+      egressProfileId: profile.id,
+      egressProfileName: profile.name,
     };
   }
 

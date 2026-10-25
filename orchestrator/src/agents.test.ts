@@ -16,6 +16,7 @@ import { AgentStore } from './agents.ts';
 import type { ApiKeyRow } from './api-keys.ts';
 import { type Db, openDb } from './db.ts';
 import { HttpError } from './http-error.ts';
+import { mcpHostPattern } from './mcp-servers.ts';
 
 /** The temporary DATA_DIR of each test. */
 let dir: string;
@@ -558,21 +559,14 @@ function apiKey(name: string, hosts: string[]): ApiKeyRow {
 /** The API keys that the MCP store of a test reads. */
 let keys: ApiKeyRow[];
 
-/** The egress allowlist that the MCP store of a test reads. */
-let allowlist: string[];
-
 /**
- * Makes a store that reads {@link keys} and {@link allowlist}.
+ * Makes a store that reads {@link keys}.
  *
  * @returns The store.
  */
 function mcpStore(): AgentStore {
   keys = [apiKey('GITHUB_MCP_TOKEN', ['api.githubcopilot.com', 'mcp.example.com:8443'])];
-  allowlist = [];
-  return new AgentStore(db, dir, undefined, undefined, () => ({
-    keys,
-    allowedHosts: allowlist,
-  }));
+  return new AgentStore(db, dir, undefined, undefined, () => ({ keys }));
 }
 
 /** A server with a bearer token from an API key. */
@@ -635,7 +629,6 @@ test('an MCP server is checked at save', () => {
   assert.throws(() => put({ url: 'https://10.0.0.5/mcp', headers: [] }), /private address/);
   assert.throws(() => put({ url: 'https://[::1]/mcp', headers: [] }), /private address/);
   assert.throws(() => put({ url: 'http://api.githubcopilot.com/mcp/' }), /https/);
-  assert.throws(() => put({ url: 'https://other.example.com:9000/', headers: [] }), /port 9000/);
   assert.throws(() => put(header('Bad Name', 'x')), /not a valid header name/);
   assert.throws(() => put(header('Mcp-Session-Id', 'x')), /sets Mcp-Session-Id itself/);
   assert.throws(() => put(header('Authorization', 'Bearer ghp_literal')), /into an API key/);
@@ -660,8 +653,9 @@ test('an MCP server is checked at save', () => {
     /at most 20 headers/,
   );
 
-  // A port that a key names for the host, and a server without authentication.
+  // A port that a key names for the host, any other port, and a server without authentication.
   assert.doesNotThrow(() => put({ url: 'https://mcp.example.com:8443/mcp' }));
+  assert.doesNotThrow(() => put({ url: 'https://other.example.com:9000/', headers: [] }));
   assert.doesNotThrow(() => put({ name: 'open', url: 'http://open.example.com/mcp', headers: [] }));
 
   for (let i = 0; i < 18; i++)
@@ -675,22 +669,25 @@ test('an MCP server shows a warning when the agent will probably not reach it', 
   mcp.putMcpServer('', id, GITHUB_MCP);
   mcp.putMcpServer('', id, { name: 'open', url: 'https://open.example.com/mcp', headers: [] });
 
-  allowlist = ['registry.npmjs.org'];
   keys = [apiKey('GITHUB_MCP_TOKEN', ['github.com'])];
   assert.deepEqual(
     mcp.getSet('', id).mcpServers.map((server) => server.warning),
-    [
-      'The hosts of the API key GITHUB_MCP_TOKEN do not include api.githubcopilot.com',
-      'The egress proxy does not allow open.example.com. Ask the admin to add it to the allowlist',
-    ],
+    ['The hosts of the API key GITHUB_MCP_TOKEN do not include api.githubcopilot.com', null],
   );
 
-  allowlist = ['*.example.com'];
   keys = [];
   assert.deepEqual(
     mcp.getSet('', id).mcpServers.map((server) => server.warning),
     ['The API key GITHUB_MCP_TOKEN does not exist, so the agent does not get this server', null],
   );
+});
+
+test('the egress proxy gets the host and the port of an MCP server', () => {
+  assert.equal(mcpHostPattern('https://API.githubcopilot.com/mcp/'), 'api.githubcopilot.com:443');
+  assert.equal(mcpHostPattern('http://open.example.com/mcp'), 'open.example.com:80');
+  assert.equal(mcpHostPattern('https://mcp.example.com:8443/mcp'), 'mcp.example.com:8443');
+  assert.equal(mcpHostPattern('https://[2001:db8::1]/mcp'), '[2001:db8::1]:443');
+  assert.equal(mcpHostPattern('not a url'), null);
 });
 
 test('the MCP servers of a set replace the servers of the global set with the same name', () => {

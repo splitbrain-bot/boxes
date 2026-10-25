@@ -76,7 +76,7 @@ with `devenv up`.
 - Builds are not sandboxed here. Almost everything comes prebuilt from the
   binary cache; what does not is built as you, in your environment.
 - Downloads go through the box's proxy. If nix reports that it cannot reach
-  `cache.nixos.org` or `channels.nixos.org`, the deployment's allowlist
+  `cache.nixos.org` or `channels.nixos.org`, the egress profile of the box
   blocks them: tell the user rather than working around it.
 - `docker` is not available. Use nix for what you would otherwise run in a
   container.

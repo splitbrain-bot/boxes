@@ -50,8 +50,8 @@ access.
 
 The Nix store and user profile [persist](storage.md) when a box stops or restarts, so installed tools remain available.
 
-Nix fetches packages through the box [egress proxy](egress.md). A restrictive egress allowlist must permit
-`cache.nixos.org` and `channels.nixos.org`.
+Nix fetches packages through the box [egress proxy](egress.md), so a closed
+[egress profile](egress-profiles.md) must list `cache.nixos.org` and `channels.nixos.org`.
 
 Skill instructions: [nix](../box-image/skills/nix/SKILL.md)
 

@@ -13,7 +13,7 @@ One port, `PORT`, carries all of it:
 | Path | Contents |
 | --- | --- |
 | `/` | the dashboard bundle |
-| `/api` | the [REST API](rests.md) |
+| `/api` | the [REST API](rest.md) |
 | `/ws/boxes/:id/…/acp` | the [ACP gateway](acp.md) |
 | `/ws/boxes/:id/terminal` | the [terminal](terminal.md) |
 | `/healthz`, `/readyz` | liveness and readiness |

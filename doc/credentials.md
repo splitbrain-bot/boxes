@@ -83,7 +83,7 @@ You can add API keys for other services, for example OpenRouter. Each key has th
   `PATH`.
 - **Hosts**: the hosts the proxy sends the key to. A host is an exact name, e.g., `openrouter.ai`, or a name that starts
   with `*.`. The name `*.example.com` includes `api.example.com`, but it does not include `example.com` or
-  `a.b.example.com`, and a host can end in a port, as in the [allowlist](egress.md#allowlist).
+  `a.b.example.com`, and a host can end in a port, as in an [egress profile](egress-profiles.md#modes-and-hosts).
 - **Key**: the secret. To change only the hosts, leave it empty.
 
 The placeholder has the same prefix and the same length as the key, so a client that checks the format of its key

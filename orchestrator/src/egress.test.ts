@@ -11,6 +11,7 @@ import { type CredentialId, type CredentialRow, CredentialStore } from './creden
 import { type Db, openDb } from './db.ts';
 import {
   composePolicy,
+  type EgressBoxInput,
   EgressManager,
   type EgressMaterial,
   pushPolicy,
@@ -98,6 +99,25 @@ function rows(store: CredentialStore): CredentialRow[] {
   return store.list('');
 }
 
+/**
+ * Returns a box as composePolicy takes it, owned by the empty user, in a
+ * closed profile without hosts.
+ *
+ * @param over The fields that replace the defaults.
+ * @returns The box.
+ */
+function boxInput(over: Partial<EgressBoxInput> = {}): EgressBoxInput {
+  return {
+    id: 'b1',
+    owner: '',
+    token: 'f00d',
+    open: false,
+    hosts: [],
+    mcpHosts: [],
+    ...over,
+  };
+}
+
 describe('resolveEgressMaterial', () => {
   it('generates a CA and a control token, and stores them in the database', async () => {
     const { db } = storeWith(configFrom());
@@ -138,7 +158,7 @@ describe('composePolicy', () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg, { github: GH_TOKEN });
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store), []);
+    const policy = composePolicy(cfg, material, rows(store), [], []);
 
     expect(policy.credentials.map((c) => c.id)).toEqual(['github']);
     expect(policy.credentials[0]?.secret).toBe(GH_TOKEN);
@@ -156,7 +176,7 @@ describe('composePolicy', () => {
       'sk-or-v1-0123456789abcdef',
     );
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, store.listAll(), [key]);
+    const policy = composePolicy(cfg, material, store.listAll(), [key], []);
 
     // The proxy selects the credential whose placeholder is in the request.
     expect(policy.credentials.map((c) => [c.id, c.secret, c.placeholder])).toEqual([
@@ -179,7 +199,7 @@ describe('composePolicy', () => {
       JSON.stringify({ access_token: 'ghu_theaccesstoken', refresh_token: 'ghr_refresh' }),
     );
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store), []);
+    const policy = composePolicy(cfg, material, rows(store), [], []);
 
     expect(policy.credentials).toHaveLength(1);
     expect(policy.credentials[0]?.secret).toBe('ghu_theaccesstoken');
@@ -195,7 +215,7 @@ describe('composePolicy', () => {
       'sk-or-v1-0123456789abcdef',
     );
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store), [key]);
+    const policy = composePolicy(cfg, material, rows(store), [key], []);
 
     expect(policy.credentials).toEqual([
       {
@@ -212,7 +232,7 @@ describe('composePolicy', () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg);
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store), []);
+    const policy = composePolicy(cfg, material, rows(store), [], []);
 
     expect(policy.credentials).toEqual([]);
     // A box keeps the CA it was created with for its whole life, and a
@@ -221,31 +241,108 @@ describe('composePolicy', () => {
     expect(policy.ca?.cert).toContain('BEGIN CERTIFICATE');
   }, 30_000);
 
-  it('leaves the allowlist off when none is configured', async () => {
+  it('gives each box its token, its mode and the hosts of its profile', async () => {
+    const cfg = configFrom();
+    const { store, db } = storeWith(cfg);
+    const material = await resolveEgressMaterial(db);
+    const policy = composePolicy(
+      cfg,
+      material,
+      rows(store),
+      [],
+      [
+        boxInput({ id: 'b1', token: 'aa', open: true }),
+        boxInput({ id: 'b2', token: 'bb', hosts: ['registry.npmjs.org', '*.example.com:8443'] }),
+      ],
+    );
+
+    expect(policy.boxes).toEqual([
+      { box: 'b1', token: 'aa', open: true, hosts: [] },
+      { box: 'b2', token: 'bb', open: false, hosts: ['registry.npmjs.org', '*.example.com:8443'] },
+    ]);
+  }, 30_000);
+
+  it('adds the hosts of the credentials of the owner, also those the tools need', async () => {
     const cfg = configFrom();
     const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
     const material = await resolveEgressMaterial(db);
-    expect(composePolicy(cfg, material, rows(store), []).allowedHosts).toEqual([]);
+    const policy = composePolicy(
+      cfg,
+      material,
+      store.listAll(),
+      [],
+      [boxInput({ hosts: ['registry.npmjs.org'] })],
+    );
+    const hosts = policy.boxes[0]?.hosts ?? [];
+
+    expect(hosts).toContain('registry.npmjs.org');
+    expect(hosts).toContain('api.github.com');
+    expect(hosts).toContain('platform.claude.com');
+    expect(hosts).toContain('codeload.github.com');
   }, 30_000);
 
-  it('adds the hosts a configured credential needs but never travels to', async () => {
-    const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
-    const { store, db } = storeWith(cfg, { claude: CLAUDE_TOKEN, github: GH_TOKEN });
+  it('adds the hosts of the API keys and the MCP servers of the box', async () => {
+    const cfg = configFrom();
+    const { store, db } = storeWith(cfg);
+    const key = new ApiKeyStore(db, () => {}).put(
+      '',
+      'OPENROUTER_API_KEY',
+      ['openrouter.ai'],
+      'sk-or-v1-0123456789abcdef',
+    );
     const material = await resolveEgressMaterial(db);
-    const { allowedHosts } = composePolicy(cfg, material, rows(store), []);
+    const policy = composePolicy(
+      cfg,
+      material,
+      rows(store),
+      [key],
+      [boxInput({ hosts: ['openrouter.ai'], mcpHosts: ['mcp.example.com:443'] })],
+    );
 
-    expect(allowedHosts).toContain('registry.npmjs.org');
-    expect(allowedHosts).toContain('platform.claude.com');
-    expect(allowedHosts).toContain('codeload.github.com');
-    // The proxy allows the hosts of the credential itself, so the list leaves them out.
-    expect(allowedHosts).not.toContain('api.github.com');
+    // A host that is in two lists is in the policy one time.
+    expect(policy.boxes[0]?.hosts).toEqual(['openrouter.ai', 'mcp.example.com:443']);
+  }, 30_000);
+
+  it('adds no hosts of the credentials and the API keys of other users', async () => {
+    const cfg = configFrom();
+    const { store, db } = storeWith(cfg);
+    store.put('alice', 'github', 'token', GH_TOKEN);
+    const key = new ApiKeyStore(db, () => {}).put(
+      'alice',
+      'OPENROUTER_API_KEY',
+      ['openrouter.ai'],
+      'sk-or-v1-0123456789abcdef',
+    );
+    const material = await resolveEgressMaterial(db);
+    const policy = composePolicy(
+      cfg,
+      material,
+      store.listAll(),
+      [key],
+      [
+        boxInput({ id: 'alice-box', owner: 'alice' }),
+        boxInput({ id: 'bob-box', owner: 'bob', mcpHosts: ['mcp.example.com:443'] }),
+      ],
+    );
+    /**
+     * Gives the hosts of a box in the policy.
+     *
+     * @param id The id of the box.
+     * @returns The hosts, or an empty list for a box that is not in the policy.
+     */
+    const hostsOf = (id: string): string[] => policy.boxes.find((b) => b.box === id)?.hosts ?? [];
+
+    expect(hostsOf('alice-box')).toContain('api.github.com');
+    expect(hostsOf('alice-box')).toContain('openrouter.ai');
+    expect(hostsOf('alice-box')).not.toContain('mcp.example.com:443');
+    expect(hostsOf('bob-box')).toEqual(['mcp.example.com:443']);
   }, 30_000);
 
   it('intercepts the GitLab the deployment names, and only that one', async () => {
     const cfg = configFrom({ GITLAB_HOST: 'gitlab.example.com' });
     const { store, db } = storeWith(cfg, { gitlab: GITLAB_TOKEN });
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store), []);
+    const policy = composePolicy(cfg, material, rows(store), [], []);
 
     const gitlab = policy.credentials.find((c) => c.id === 'gitlab');
     expect(gitlab?.hosts).toEqual(['gitlab.example.com']);
@@ -261,7 +358,7 @@ describe('composePolicy', () => {
     // authenticates traffic to chatgpt.com, which the proxy does not intercept.
     store.put('', 'openai', 'oauth', '{"tokens":{"access_token":"a.b.c"}}');
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store), []);
+    const policy = composePolicy(cfg, material, rows(store), [], []);
 
     expect(policy.credentials.find((c) => c.id === 'openai')).toBeUndefined();
     // The row still has a placeholder, because a box gets one for every
@@ -270,10 +367,11 @@ describe('composePolicy', () => {
   }, 30_000);
 
   it('intercepts the OpenAI key host, and only that one', async () => {
-    const cfg = configFrom({ EGRESS_ALLOWED_HOSTS: 'registry.npmjs.org' });
+    const cfg = configFrom();
     const { store, db } = storeWith(cfg, { openai: OPENAI_KEY });
     const material = await resolveEgressMaterial(db);
-    const policy = composePolicy(cfg, material, rows(store), []);
+    const policy = composePolicy(cfg, material, rows(store), [], [boxInput()]);
+    const hosts = policy.boxes[0]?.hosts ?? [];
 
     const openai = policy.credentials.find((c) => c.id === 'openai');
     expect(openai?.hosts).toEqual(['api.openai.com']);
@@ -282,14 +380,14 @@ describe('composePolicy', () => {
     expect(openai?.placeholder).toBe(store.get('', 'openai')?.placeholder);
 
     // Codex logs in and refreshes at auth.openai.com and may talk to
-    // chatgpt.com. Both stay reachable under a narrow allowlist, and the key
-    // is sent to neither.
-    expect(policy.allowedHosts).toContain('auth.openai.com');
-    expect(policy.allowedHosts).toContain('chatgpt.com');
+    // chatgpt.com. Both stay reachable in a closed profile, and the key is
+    // sent to neither.
+    expect(hosts).toContain('auth.openai.com');
+    expect(hosts).toContain('chatgpt.com');
     expect(openai?.hosts).not.toContain('chatgpt.com');
-    // The deployment allows these itself. The credential does not imply them.
-    expect(policy.allowedHosts).not.toContain('files.openai.com');
-    expect(policy.allowedHosts).not.toContain('ab.chatgpt.com');
+    // Only an egress profile adds these hosts.
+    expect(hosts).not.toContain('files.openai.com');
+    expect(hosts).not.toContain('ab.chatgpt.com');
   }, 30_000);
 });
 
@@ -336,7 +434,7 @@ describe('the control channel, from the orchestrator side', () => {
   const okStatus = {
     applied: true,
     policyHash: 'abc',
-    allowedHostCount: 0,
+    boxCount: 0,
     credentialIds: ['claude', 'github'],
     denials: {},
     uptimeSeconds: 1,
@@ -344,7 +442,7 @@ describe('the control channel, from the orchestrator side', () => {
 
   it('pushes the policy with its bearer', async () => {
     const { cfg, material, store, seen } = await fakeProxy({ status: 200, body: okStatus });
-    const policy = composePolicy(cfg, material, rows(store), []);
+    const policy = composePolicy(cfg, material, rows(store), [], []);
 
     await expect(pushPolicy(cfg, material, policy)).resolves.toEqual(okStatus);
     expect(seen[0]?.method).toBe('POST');
@@ -359,7 +457,7 @@ describe('the control channel, from the orchestrator side', () => {
       body: { error: 'invalid policy: a bare * ...' },
     });
     await expect(
-      pushPolicy(cfg, material, composePolicy(cfg, material, rows(store), [])),
+      pushPolicy(cfg, material, composePolicy(cfg, material, rows(store), [], [])),
     ).rejects.toThrow(/proxy answered 400: invalid policy/);
   }, 30_000);
 });
@@ -425,7 +523,7 @@ describe('EgressManager', () => {
           JSON.stringify({
             applied: true,
             policyHash: 'x',
-            allowedHostCount: 0,
+            boxCount: 0,
             credentialIds: [],
             denials: {},
             uptimeSeconds: 1,
@@ -469,7 +567,7 @@ describe('EgressManager', () => {
           JSON.stringify({
             applied: true,
             policyHash: 'x',
-            allowedHostCount: 0,
+            boxCount: 0,
             credentialIds: ids,
             denials: {},
             uptimeSeconds: 1,

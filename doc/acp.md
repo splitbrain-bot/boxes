@@ -50,7 +50,7 @@ it. One thread is therefore one session, and the orchestrator holds the two ends
 The dashboard runs in the browser. To show a thread, it opens one WebSocket to the orchestrator and speaks ACP over it.
 Two browsers on one thread are two connections, as the phone and the desktop are in the diagram above.
 
-The WebSocket connection is authenticated with a token that the dashboard obtains through the [REST API](rests.md)
+The WebSocket connection is authenticated with a token that the dashboard obtains through the [REST API](rest.md)
 before it opens the connection. The token belongs to the box: it is valid for all threads of that box and for its
 terminal.
 

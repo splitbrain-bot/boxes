@@ -9,10 +9,14 @@ import type {
   BoxDetail,
   BoxSummary,
   CreateBoxBody,
+  CreateEgressProfileBody,
   CreateThreadBody,
   CredentialId,
   CredentialMethod,
   CredentialSummary,
+  EgressDenial,
+  EgressProfileDetail,
+  EgressProfileSummary,
   HarnessInfo,
   HealthResponse,
   LoginCodeBody,
@@ -29,6 +33,7 @@ import type {
   StartLoginResponse,
   StoredAttachment,
   ThreadSummary,
+  UpdateEgressProfileBody,
 } from '../../shared/types.ts';
 
 /**
@@ -323,6 +328,71 @@ export const api = {
    * @param id The id of the box.
    */
   deleteReview: (id: string) => request<void>(`/api/boxes/${id}/review`, { method: 'DELETE' }),
+
+  /**
+   * Selects the egress profile of a box.
+   *
+   * @param id The id of the box.
+   * @param egressProfile The id of the profile, or null for the default profile.
+   * @returns The box after the change.
+   */
+  setBoxEgressProfile: (id: string, egressProfile: string | null) =>
+    request<BoxDetail>(`/api/boxes/${id}/egress-profile`, {
+      method: 'PUT',
+      body: JSON.stringify({ egressProfile }),
+    }),
+  /**
+   * Lists the targets that the egress profile of a box refused.
+   *
+   * @param id The id of the box.
+   * @returns The refused targets, the most recent first.
+   */
+  boxDenials: (id: string) => request<EgressDenial[]>(`/api/boxes/${id}/denials`),
+
+  /**
+   * Lists every egress profile.
+   *
+   * @returns The summary of each profile, the default profile first.
+   */
+  listEgressProfiles: () => request<EgressProfileSummary[]>('/api/egress-profiles'),
+  /**
+   * Reads one egress profile.
+   *
+   * @param profileId The id of the profile.
+   * @returns The profile with its hosts.
+   */
+  getEgressProfile: (profileId: string) =>
+    request<EgressProfileDetail>(`/api/egress-profiles/${profileId}`),
+  /**
+   * Creates an egress profile.
+   *
+   * @param body The name, and optionally the mode and the hosts.
+   * @returns The new profile.
+   */
+  createEgressProfile: (body: CreateEgressProfileBody) =>
+    request<EgressProfileDetail>('/api/egress-profiles', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * Changes the name, the mode or the hosts of an egress profile.
+   *
+   * @param profileId The id of the profile.
+   * @param body The fields to change.
+   * @returns The profile after the change.
+   */
+  updateEgressProfile: (profileId: string, body: UpdateEgressProfileBody) =>
+    request<EgressProfileDetail>(`/api/egress-profiles/${profileId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * Deletes an egress profile.
+   *
+   * @param profileId The id of the profile.
+   */
+  deleteEgressProfile: (profileId: string) =>
+    request<void>(`/api/egress-profiles/${profileId}`, { method: 'DELETE' }),
 
   /**
    * Lists every agent set.

@@ -122,46 +122,6 @@ test('a genuinely invalid value still fails the boot', () => {
   });
 });
 
-test('the allowlist is off by default and parses either separator', () => {
-  withDataDir((dir) => {
-    assert.deepEqual(loadConfig({ DATA_DIR: dir }).egressAllowedHosts, []);
-    assert.deepEqual(
-      loadConfig({
-        DATA_DIR: dir,
-        EGRESS_ALLOWED_HOSTS: 'GitHub.com, *.githubusercontent.com  registry.npmjs.org,',
-      }).egressAllowedHosts,
-      ['github.com', '*.githubusercontent.com', 'registry.npmjs.org'],
-    );
-  });
-});
-
-test('an allowlist entry that would allow everything is refused at boot', () => {
-  withDataDir((dir) => {
-    assert.throws(
-      () => loadConfig({ DATA_DIR: dir, EGRESS_ALLOWED_HOSTS: 'github.com,*' }),
-      /bare \*/,
-    );
-    assert.throws(
-      () => loadConfig({ DATA_DIR: dir, EGRESS_ALLOWED_HOSTS: 'api.*.com' }),
-      /leading \*\./,
-    );
-  });
-});
-
-test('an allowlist entry can name a port in the valid range', () => {
-  withDataDir((dir) => {
-    assert.deepEqual(
-      loadConfig({ DATA_DIR: dir, EGRESS_ALLOWED_HOSTS: 'mcp.example.com:8443' })
-        .egressAllowedHosts,
-      ['mcp.example.com:8443'],
-    );
-    assert.throws(
-      () => loadConfig({ DATA_DIR: dir, EGRESS_ALLOWED_HOSTS: 'mcp.example.com:70000' }),
-      /no valid port/,
-    );
-  });
-});
-
 test('no secret comes from the environment any more', () => {
   withDataDir((dir) => {
     // Credentials are in the database. The config ignores each PROFILE_DEFAULT_* variable.
@@ -237,8 +197,8 @@ test('the OpenAI credential travels to the API-key endpoint alone', () => {
   // Codex sends it as a bearer token.
   assert.deepEqual(openai?.headers, ['authorization']);
   // `chatgpt.com` is the subscription endpoint and rejects an API key. Codex
-  // logs in and refreshes at `auth.openai.com`. Both stay reachable under a
-  // narrow allowlist, and neither is intercepted.
+  // logs in and refreshes at `auth.openai.com`. Both stay reachable in a
+  // closed profile, and neither is intercepted.
   assert.deepEqual(openai?.alsoAllow, ['auth.openai.com', 'chatgpt.com']);
   assert.ok(!openai?.hosts.includes('chatgpt.com'));
   // The placeholder starts like an OpenAI key, so a client that checks the format

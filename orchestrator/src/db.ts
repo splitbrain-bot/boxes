@@ -44,6 +44,16 @@ export interface BoxRow {
   agent_set_id: string | null;
   /** The bearer token that a WebSocket upgrade must give. It opens only this box. */
   ws_token: string;
+  /**
+   * The egress profile of this box, or null for the default profile of the
+   * owner. The database clears it when the profile is deleted.
+   */
+  egress_profile_id: string | null;
+  /**
+   * The token that identifies the box at the egress proxy. It is the password
+   * in the proxy URL of the box, and it identifies only this box.
+   */
+  proxy_token: string;
   /** Epoch milliseconds of creation. */
   created_at: number;
   /** Epoch milliseconds of the last activity. The idle reaper reads it. */
@@ -184,6 +194,26 @@ export interface AgentSetRow {
   name: string;
   /** The AGENTS.md of this set, or '' when it has none. */
   agents_md: string;
+  /** Epoch milliseconds of creation. */
+  created_at: number;
+  /** Epoch milliseconds of the last change. */
+  updated_at: number;
+}
+
+/** A row of the egress_profiles table. */
+export interface EgressProfileRow {
+  /** The profile id. */
+  id: string;
+  /** The username of the owner, or the empty user. */
+  owner: string;
+  /** 1 for the default profile of the owner, else 0. Each owner has at most one. */
+  is_default: number;
+  /** The display name. */
+  name: string;
+  /** 1 for the open mode, 0 for the closed mode. */
+  open: number;
+  /** The host patterns of the profile, as a JSON array. */
+  hosts: string;
   /** Epoch milliseconds of creation. */
   created_at: number;
   /** Epoch milliseconds of the last change. */
@@ -695,6 +725,26 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (set_id, name)
   );
   ALTER TABLE boxes ADD COLUMN mcp_servers TEXT NOT NULL DEFAULT '[]';
+  `,
+  // Adds the egress profiles of each user, the selected profile of each box,
+  // and the token that identifies a box at the egress proxy.
+  `
+  CREATE TABLE egress_profiles (
+    id         TEXT PRIMARY KEY,
+    owner      TEXT NOT NULL,
+    is_default INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    open       INTEGER NOT NULL,
+    hosts      TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_egress_profiles_owner ON egress_profiles(owner);
+  CREATE UNIQUE INDEX idx_egress_profiles_default ON egress_profiles(owner) WHERE is_default = 1;
+  ALTER TABLE boxes ADD COLUMN egress_profile_id TEXT
+    REFERENCES egress_profiles(id) ON DELETE SET NULL;
+  ALTER TABLE boxes ADD COLUMN proxy_token TEXT NOT NULL DEFAULT '';
+  UPDATE boxes SET proxy_token = lower(hex(randomblob(32)));
   `,
 ];
 

@@ -168,7 +168,7 @@ afterAll(async () => {
  */
 function githubPolicy(over: Partial<EgressPolicy> = {}): EgressPolicy {
   return {
-    allowedHosts: [],
+    boxes: [],
     ca,
     credentials: [
       {

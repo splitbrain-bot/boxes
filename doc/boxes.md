@@ -9,6 +9,7 @@ Select **New** on the box list. The form asks for:
 
 - a name (100 characters or fewer),
 - an optional agent set, merged over the global set (see [agent sets](agent-sets.md)),
+- the [egress profile](egress-profiles.md), with the default profile preselected,
 - the agent and settings of the first [thread](threads.md).
 
 The orchestrator then creates the box's private network, its directories in the data volume, and the container, and
@@ -39,7 +40,9 @@ The info icon on a card opens the box's details page.
 
 The details page shows the box's identity and runtime state: the facts of the runtime (on Docker the container id, the
 network name with its subnet, and the image id), agent set, last activity, disk use, and the ACP session id of the most
-recently active thread. It lists the dev tunnels the box hosts and the processes the orchestrator last read in the box.
+recently active thread. It shows the egress profile of the box, which the user can change there, and the
+[refused hosts](egress-profiles.md#refused-hosts). It lists the dev tunnels the box hosts and the processes the
+orchestrator last read in the box.
 For a running box whose network isolation is not complete, it shows a warning.
 
 The page has three controls:

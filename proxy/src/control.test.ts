@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
+import type { EgressDenial, EgressPolicy, EgressStatus } from '../../shared/types.ts';
 import { createControlServer } from './control.ts';
 import { policyHash } from './policy.ts';
 
@@ -15,7 +15,7 @@ const CA = { key: 'KEY', cert: 'CERT' };
 const emptyStatus: EgressStatus = {
   applied: false,
   policyHash: 'hash',
-  allowedHostCount: 0,
+  boxCount: 0,
   credentialIds: [],
   denials: {},
   uptimeSeconds: 0,
@@ -29,22 +29,36 @@ afterEach(() => {
   servers = [];
 });
 
+/** The refused targets that the stand-in denials callback returns for the box box-1. */
+const refusedTargets: EgressDenial[] = [
+  { host: 'evil.com', port: 443, category: 'allowlist', count: 2, lastAt: 2000 },
+  { host: 'example.com', port: 22, category: 'port', count: 1, lastAt: 1000 },
+];
+
 /**
  * Starts a control server on loopback.
  *
  * @param reject When set, every push fails with this message.
- * @returns The port, the accepted policies and the claim state.
+ * @returns The port, the accepted policies, the claim state and the box ids that the denials callback got.
  */
-async function start(
-  reject?: string,
-): Promise<{ port: number; applied: EgressPolicy[]; claimed: () => boolean }> {
+async function start(reject?: string): Promise<{
+  port: number;
+  applied: EgressPolicy[];
+  claimed: () => boolean;
+  asked: string[];
+}> {
   const applied: EgressPolicy[] = [];
+  const asked: string[] = [];
   const control = createControlServer({
     apply: async (policy) => {
       if (reject) throw new Error(reject);
       applied.push(policy);
     },
     status: () => ({ ...emptyStatus, applied: applied.length > 0 }),
+    denials: (box) => {
+      asked.push(box);
+      return box === 'box-1' ? refusedTargets : [];
+    },
     log: () => {},
   });
   servers.push(control.server);
@@ -53,7 +67,7 @@ async function start(
       resolve((control.server.address() as AddressInfo).port),
     );
   });
-  return { port, applied, claimed: control.claimed };
+  return { port, applied, claimed: control.claimed, asked };
 }
 
 /**
@@ -98,9 +112,9 @@ function call(
   });
 }
 
-/** A valid policy with one credential. */
+/** A valid policy with one box and one credential. */
 const policy = {
-  allowedHosts: ['github.com'],
+  boxes: [{ box: 'box-1', token: 'a'.repeat(64), open: false, hosts: ['github.com'] }],
   ca: CA,
   credentials: [
     {
@@ -144,7 +158,9 @@ describe('the control channel', () => {
 
   it('refuses a malformed policy without applying anything', async () => {
     const { port, applied } = await start();
-    const res = await call(port, 'POST', '/policy', 'token', { allowedHosts: ['*'] });
+    const res = await call(port, 'POST', '/policy', 'token', {
+      boxes: [{ box: 'box-1', token: 'a'.repeat(64), open: false, hosts: ['*'] }],
+    });
     expect(res.status).toBe(400);
     expect(JSON.parse(res.body).error).toMatch(/bare \*/);
     expect(applied).toHaveLength(0);
@@ -155,6 +171,35 @@ describe('the control channel', () => {
     const res = await call(port, 'POST', '/policy', 'token', policy);
     expect(res.status).toBe(400);
     expect(JSON.parse(res.body).error).toMatch(/engine would not start/);
+  });
+
+  it('returns the refused targets of a box', async () => {
+    const { port, asked } = await start();
+    await call(port, 'POST', '/policy', 'token', policy);
+    const res = await call(port, 'GET', '/denials?box=box-1', 'token');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual(refusedTargets);
+    const other = await call(port, 'GET', '/denials?box=box-2', 'token');
+    expect(JSON.parse(other.body)).toEqual([]);
+    expect(asked).toEqual(['box-1', 'box-2']);
+  });
+
+  it('answers a denials call without a box with a 400', async () => {
+    const { port, asked } = await start();
+    await call(port, 'POST', '/policy', 'token', policy);
+    const res = await call(port, 'GET', '/denials', 'token');
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/box/);
+    expect((await call(port, 'GET', '/denials?box=', 'token')).status).toBe(400);
+    expect(asked).toEqual([]);
+  });
+
+  it('refuses a denials call without the token of the channel', async () => {
+    const { port, asked } = await start();
+    await call(port, 'POST', '/policy', 'token', policy);
+    expect((await call(port, 'GET', '/denials?box=box-1', null)).status).toBe(401);
+    expect((await call(port, 'GET', '/denials?box=box-1', 'another-token')).status).toBe(401);
+    expect(asked).toEqual([]);
   });
 
   it('answers anything else with a 404, and is claimed by none of it', async () => {
@@ -233,7 +278,10 @@ describe('overlapping policy pushes', () => {
     await import('./main.ts');
 
     const refused = policy as EgressPolicy;
-    const wanted: EgressPolicy = { ...refused, allowedHosts: ['example.com'] };
+    const wanted: EgressPolicy = {
+      ...refused,
+      boxes: [{ box: 'box-2', token: 'b'.repeat(64), open: true, hosts: [] }],
+    };
     const first = push(refused).catch(() => undefined);
     const second = push(wanted);
     await Promise.all([first, second]);

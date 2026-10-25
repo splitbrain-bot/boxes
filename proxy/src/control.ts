@@ -1,14 +1,16 @@
 /** The control channel, through which the orchestrator pushes the policy to the proxy and reads its status. */
 
-import { timingSafeEqual } from 'node:crypto';
 import dgram from 'node:dgram';
 import http from 'node:http';
 import os from 'node:os';
-import type { EgressPolicy, EgressStatus } from '../../shared/types.ts';
-import { parsePolicy } from './policy.ts';
+import type { EgressDenial, EgressPolicy, EgressStatus } from '../../shared/types.ts';
+import { parsePolicy, tokensMatch } from './policy.ts';
 
-/** Largest policy body accepted, in characters of the decoded UTF-8 text. */
-const MAX_BODY = 1 << 20;
+/**
+ * Largest policy body accepted, in characters of the decoded UTF-8 text. The
+ * policy holds the hosts of each box, so it grows with the number of boxes.
+ */
+const MAX_BODY = 1 << 24;
 
 /** Time limit for one control request to arrive, in milliseconds. */
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -19,22 +21,10 @@ export interface ControlOptions {
   apply: (policy: EgressPolicy) => Promise<void>;
   /** Returns the current status. */
   status: () => EgressStatus;
+  /** Returns the targets that the egress profile of a box refused, the most recent first. */
+  denials: (box: string) => EgressDenial[];
   /** Writes one structured log line. */
   log: (msg: string, fields?: Record<string, unknown>) => void;
-}
-
-/**
- * Compares two tokens in constant time.
- *
- * @param a The first token.
- * @param b The second token.
- * @returns True when the tokens are equal. Tokens of different lengths do not match.
- */
-function tokensMatch(a: string, b: string): boolean {
-  const left = Buffer.from(a, 'utf8');
-  const right = Buffer.from(b, 'utf8');
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(left, right);
 }
 
 /**
@@ -137,6 +127,17 @@ export function createControlServer(opts: ControlOptions): ControlServer {
 
     if (req.method === 'GET' && req.url === '/status') {
       send(res, 200, opts.status());
+      return;
+    }
+
+    const url = new URL(req.url ?? '/', 'http://control');
+    if (req.method === 'GET' && url.pathname === '/denials') {
+      const box = url.searchParams.get('box');
+      if (!box) {
+        send(res, 400, { error: 'box is missing' });
+        return;
+      }
+      send(res, 200, opts.denials(box));
       return;
     }
 

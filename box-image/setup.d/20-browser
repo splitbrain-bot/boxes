@@ -83,9 +83,19 @@ cli_config=/home/agent/.playwright/cli.config.json
 if [ -r "$cli_base" ] && mkdir -p /home/agent/.playwright; then
   proxy="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
   if [ -n "$proxy" ]; then
-    if jq --arg server "$proxy" --arg bypass "${NO_PROXY:-}" \
-         '.browser.launchOptions.proxy = (if $bypass == "" then { server: $server }
-                                          else { server: $server, bypass: $bypass } end)' \
+    # Chromium ignores a user and a password in the URL of the proxy server, so
+    # they go into their own fields.
+    server="$proxy" username="" password=""
+    if [[ "$proxy" =~ ^([a-z]+://)([^:@/]+):([^@/]*)@(.*)$ ]]; then
+      server="${BASH_REMATCH[1]}${BASH_REMATCH[4]}"
+      username="${BASH_REMATCH[2]}"
+      password="${BASH_REMATCH[3]}"
+    fi
+    if jq --arg server "$server" --arg bypass "${NO_PROXY:-}" \
+         --arg username "$username" --arg password "$password" \
+         '.browser.launchOptions.proxy = ({ server: $server }
+            + (if $bypass == "" then {} else { bypass: $bypass } end)
+            + (if $username == "" then {} else { username: $username, password: $password } end))' \
          "$cli_base" > "$cli_config.tmp" \
        && mv "$cli_config.tmp" "$cli_config"; then
       log "wrote the browser CLI config, pointed at the egress proxy"

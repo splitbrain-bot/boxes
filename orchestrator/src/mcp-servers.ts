@@ -9,7 +9,7 @@
 import net from 'node:net';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { isBlockedAddress } from '../../shared/cidr.ts';
-import { DEFAULT_PORTS, hostMatches } from '../../shared/hosts.ts';
+import { hostMatches } from '../../shared/hosts.ts';
 import type { AgentMcpServer } from '../../shared/types.ts';
 import type { ApiKeyRow } from './api-keys.ts';
 import { HttpError } from './http-error.ts';
@@ -51,12 +51,10 @@ const RESERVED_HEADERS = new Set([
   'mcp-protocol-version',
 ]);
 
-/** The API keys of an owner and the egress allowlist, which the checks of a server read. */
+/** The API keys of an owner, which the checks of a server read. */
 export interface McpContext {
   /** The API keys of the owner. */
   keys: readonly ApiKeyRow[];
-  /** The egress allowlist of the deployment, or an empty list when the allowlist is off. */
-  allowedHosts: readonly string[];
 }
 
 /** The host and the port that the agent connects to for a server. */
@@ -80,6 +78,25 @@ function targetOf(url: URL): Target {
 }
 
 /**
+ * Gives the host pattern that the egress proxy allows for a server. The
+ * pattern always names the port.
+ *
+ * @param url The URL of the server.
+ * @returns The pattern, as in mcp.example.com:443, or null when the URL is not valid.
+ */
+export function mcpHostPattern(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const { port } = targetOf(parsed);
+  // The hostname of an IPv6 literal keeps its brackets, as the pattern needs.
+  return `${parsed.hostname.toLowerCase()}:${port}`;
+}
+
+/**
  * Lists the names of the API keys that a header value refers to.
  *
  * @param value The header value.
@@ -90,24 +107,10 @@ function referencesOf(value: string): string[] {
 }
 
 /**
- * Checks if the egress proxy allows a target. The hosts of the API keys of the
- * owner count as allowed.
- *
- * @param target The host and the port.
- * @param ctx The keys of the owner and the allowlist.
- * @returns True when the proxy allows the target.
- */
-function proxyAllows(target: Target, ctx: McpContext): boolean {
-  if (ctx.allowedHosts.length === 0 && DEFAULT_PORTS.has(target.port)) return true;
-  const patterns = [...ctx.allowedHosts, ...ctx.keys.flatMap((key) => key.hosts)];
-  return patterns.some((pattern) => hostMatches(target.host, target.port, pattern));
-}
-
-/**
  * Checks a server that a user saves.
  *
  * @param body The server from the request.
- * @param ctx The keys of the owner and the allowlist.
+ * @param ctx The keys of the owner.
  * @returns The server, with a trimmed name in lower case, a trimmed URL and trimmed header names.
  * @throws {HttpError} A 400 when a field is not valid.
  */
@@ -140,12 +143,6 @@ export function validMcpServer(body: AgentMcpServer, ctx: McpContext): AgentMcpS
   const target = targetOf(url);
   if (net.isIP(target.host) !== 0 && isBlockedAddress(target.host)) {
     throw new HttpError(400, 'url must not name a private address');
-  }
-  if (!DEFAULT_PORTS.has(target.port) && !proxyAllows(target, ctx)) {
-    throw new HttpError(
-      400,
-      `port ${target.port}: neither the egress allowlist nor an API key names it for this host`,
-    );
   }
 
   if (body.headers.length > MAX_HEADERS) {
@@ -207,10 +204,10 @@ export function validMcpServer(body: AgentMcpServer, ctx: McpContext): AgentMcpS
 
 /**
  * Finds the reason the agent will probably not reach a stored server. The
- * keys and the allowlist can change after the save.
+ * keys can change after the save.
  *
  * @param server The stored server.
- * @param ctx The keys of the owner and the allowlist.
+ * @param ctx The keys of the owner.
  * @returns The reason, or null when no problem is known.
  */
 export function mcpWarning(server: AgentMcpServer, ctx: McpContext): string | null {
@@ -228,9 +225,6 @@ export function mcpWarning(server: AgentMcpServer, ctx: McpContext): string | nu
     if (!key.hosts.some((pattern) => hostMatches(target.host, target.port, pattern))) {
       return `The hosts of the API key ${ref} do not include ${url.host}`;
     }
-  }
-  if (!proxyAllows(target, ctx)) {
-    return `The egress proxy does not allow ${url.host}. Ask the admin to add it to the allowlist`;
   }
   return null;
 }

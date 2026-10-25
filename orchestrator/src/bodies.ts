@@ -49,7 +49,16 @@ export const createBoxBody = z.object({
   name: z.string(),
   profile: z.string().optional(),
   agentSet: z.string().nullable().optional(),
+  egressProfile: z.string().nullable().optional(),
   thread: threadOptions.optional(),
+});
+
+/**
+ * The body of PUT /api/boxes/:id/egress-profile, with the profile of the box
+ * or null for the default profile.
+ */
+export const boxEgressProfileBody = z.object({
+  egressProfile: z.string().nullable(),
 });
 
 /** The body of POST /api/boxes/:id/threads, with the thread to add. */
@@ -113,6 +122,23 @@ export const createAgentSetBody = z.object({
 export const updateAgentSetBody = z.object({
   name: z.string().optional(),
   agentsMd: z.string().optional(),
+});
+
+/** The body of POST /api/egress-profiles, with the profile to create. */
+export const createEgressProfileBody = z.object({
+  name: z.string(),
+  open: z.boolean().optional(),
+  hosts: z.array(z.string()).optional(),
+});
+
+/**
+ * The body of PATCH /api/egress-profiles/:id, with the fields to change. An
+ * absent field stays the same.
+ */
+export const updateEgressProfileBody = z.object({
+  name: z.string().optional(),
+  open: z.boolean().optional(),
+  hosts: z.array(z.string()).optional(),
 });
 
 /** The body of POST /api/agent-sets/:setId/repos, with the repository to take skills from. */

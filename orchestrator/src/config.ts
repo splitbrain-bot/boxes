@@ -248,14 +248,6 @@ const schema = z.object({
   EGRESS_CONTROL_URL: z.url({ protocol: /^http$/ }).default('http://boxes-egress-proxy:3129'),
 
   /**
-   * The hosts that boxes can reach, separated by commas or whitespace. Each
-   * entry is an exact name or a wildcard for the first label, for example
-   * `github.com, *.githubusercontent.com`. Empty turns the allowlist off, so
-   * every public host is reachable.
-   */
-  EGRESS_ALLOWED_HOSTS: z.string().default(''),
-
-  /**
    * The GitLab host of the token on the settings page, as a bare hostname
    * without a scheme or a path.
    *
@@ -270,8 +262,6 @@ const schema = z.object({
 
 /** The parsed settings, plus the values derived from them. */
 export type Config = Readonly<z.infer<typeof schema>> & {
-  /** The parsed allowlist. Empty means the allowlist is off. */
-  readonly egressAllowedHosts: readonly string[];
   /**
    * Every credential that this deployment can translate, with its hosts and
    * headers. A box holds a placeholder for each entry with a stored secret,
@@ -293,8 +283,8 @@ export interface CredentialSpec {
   headers: readonly string[];
   /**
    * The hosts that the tools of this credential must reach, but that never get
-   * the credential. A narrow allowlist then does not break the tools. The proxy
-   * does not intercept these hosts.
+   * the credential. A box with a closed egress profile can reach them. The
+   * proxy does not intercept these hosts.
    */
   alsoAllow: readonly string[];
   /**
@@ -330,7 +320,7 @@ const FIXED_CREDENTIALS: readonly CredentialSpec[] = [
     hosts: ['api.openai.com'],
     headers: ['authorization'],
     // The login and refresh host of Codex, and the subscription endpoint. The
-    // allowlist decides for `files.openai.com` and `ab.chatgpt.com`.
+    // egress profile decides for `files.openai.com` and `ab.chatgpt.com`.
     alsoAllow: ['auth.openai.com', 'chatgpt.com'],
     placeholderPrefix: 'sk-',
   },
@@ -390,23 +380,6 @@ function credentialSetFor(gitlabHost: string): readonly CredentialSpec[] {
   return [...FIXED_CREDENTIALS, gitlabCredential(gitlabHost), DEVTUNNELS_CREDENTIAL];
 }
 
-/**
- * Splits a comma or whitespace separated host list into patterns.
- *
- * @param value The host list.
- * @returns The patterns in lowercase, without duplicates.
- */
-function parseHostList(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(/[\s,]+/)
-        .map((h) => h.trim().toLowerCase())
-        .filter((h) => h !== ''),
-    ),
-  ];
-}
-
 /** The config parsed at first use, or null before then. */
 let cached: Config | null = null;
 
@@ -441,30 +414,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid configuration:\n${issues}`);
   }
   const base = parsed.data;
-  const allowedHosts = parseHostList(base.EGRESS_ALLOWED_HOSTS);
-  for (const pattern of allowedHosts) {
-    if (pattern === '*') {
-      throw new Error(
-        'Invalid configuration:\n  EGRESS_ALLOWED_HOSTS: a bare * would allow every host; ' +
-          'leave the setting empty to turn the allowlist off',
-      );
-    }
-    if (pattern.includes('*') && !pattern.startsWith('*.')) {
-      throw new Error(
-        `Invalid configuration:\n  EGRESS_ALLOWED_HOSTS: ${pattern} may only use a leading *. wildcard`,
-      );
-    }
-    const port = /:(\d+)$/.exec(pattern)?.[1];
-    if (port !== undefined && (Number(port) < 1 || Number(port) > 65535)) {
-      throw new Error(
-        `Invalid configuration:\n  EGRESS_ALLOWED_HOSTS: ${pattern} has no valid port`,
-      );
-    }
-  }
-
   return {
     ...base,
-    egressAllowedHosts: allowedHosts,
     credentialSet: credentialSetFor(base.GITLAB_HOST),
   };
 }

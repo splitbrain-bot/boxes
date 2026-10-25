@@ -23,6 +23,7 @@ const OWNED_TABLES = [
   'credentials',
   'api_keys',
   'agent_sets',
+  'egress_profiles',
   'settings',
   'push_subscriptions',
 ] as const;

@@ -18,8 +18,8 @@ opencode can work on the same checkout.
 
 - **Isolation.** Each box is a docker container of its own, with a private network and its own files. An agent installs
   the tools it needs with `nix`, and they stay in the box across restarts and image updates.
-- **Controlled egress.** A private network has no route to the outside. The egress proxy is the only way out, and it
-  optionally limits which hosts the processes in a box can reach.
+- **Controlled egress.** A private network has no route to the outside. The egress proxy is the only way out, and the
+  egress profile of each box limits which hosts the processes in the box can reach.
 - **Credentials that stay out of the box.** You enter a credential on the settings page. The processes in a box see a
   placeholder only, and the proxy puts the real credential on the wire.
 - **Parallel threads.** Several threads can run on one checkout, which keeps the context of each conversation small. A
@@ -56,6 +56,7 @@ opencode can work on the same checkout.
 - [Code review](doc/review.md): Inspect, comment on and edit the files of a workspace
 - [Terminal](doc/terminal.md): An interactive shell in a box
 - [Agent sets](doc/agent-sets.md): Give the agents instructions, skills, and MCP servers
+- [Egress profiles](doc/egress-profiles.md): Select the hosts that the agent in a box can reach
 - [Built-in skills](doc/skills.md): The skills the box image carries, and how to replace one
 - [Push notifications](doc/notifications.md): Let the browser tell you when a thread needs you
 - [Glossary](doc/glossary.md): The terms the documentation uses
@@ -68,5 +69,5 @@ opencode can work on the same checkout.
 - [Egress proxy](doc/egress.md): Host filtering and credential injection
 - [Storage](doc/storage.md): The contents of the data volume, and the files a box keeps
 - [File service](doc/files.md): The process in a box through which the orchestrator reads and writes its files
-- [REST API](doc/rests.md): The HTTP API under `/api` used by the dashboard
+- [REST API](doc/rest.md): The HTTP API under `/api` used by the dashboard
 - [Development](doc/development.md): Repository layout, technologies and tests

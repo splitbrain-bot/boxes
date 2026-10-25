@@ -55,6 +55,27 @@ export function hostMatches(host: string, port: number, pattern: string): boolea
 }
 
 /**
+ * Checks a host pattern against the grammar of {@link hostMatches}. The check
+ * refuses a bare star, a star outside a leading *. wildcard, and a port
+ * outside 1 to 65535.
+ *
+ * @param pattern The host pattern, in lower case and without whitespace.
+ * @returns The reason why the pattern is not valid, or null for a valid pattern.
+ */
+export function hostPatternProblem(pattern: string): string | null {
+  if (pattern === '*') return 'a bare * would allow every host';
+  const wildcard = pattern.startsWith('*.');
+  if ((wildcard ? pattern.slice(2) : pattern).includes('*')) {
+    return `${pattern} may only use a leading *. wildcard`;
+  }
+  const { port } = splitHostPattern(pattern);
+  if (port !== null && (port < 1 || port > 65535)) {
+    return `${pattern} has no valid port`;
+  }
+  return null;
+}
+
+/**
  * Checks if a host is an IP literal.
  *
  * @param host The hostname or IP literal, in lower case and without brackets.

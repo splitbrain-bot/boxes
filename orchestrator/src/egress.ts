@@ -3,13 +3,15 @@
 import { randomBytes } from 'node:crypto';
 import { generateCACertificate } from 'mockttp';
 import type {
+  EgressBoxPolicy,
   EgressCredential,
+  EgressDenial,
   EgressHealth,
   EgressPolicy,
   EgressStatus,
 } from '../../shared/types.ts';
 import type { ApiKeyRow, ApiKeyStore } from './api-keys.ts';
-import type { Config, CredentialSpec } from './config.ts';
+import type { Config } from './config.ts';
 import {
   type CredentialId,
   type CredentialMethod,
@@ -56,6 +58,22 @@ export async function resolveEgressMaterial(db: Db): Promise<EgressMaterial> {
   return material;
 }
 
+/** The facts of one box that the policy of the box needs. */
+export interface EgressBoxInput {
+  /** The id of the box. */
+  id: string;
+  /** The owner of the box. */
+  owner: string;
+  /** The token of the box at the proxy. */
+  token: string;
+  /** The mode of the egress profile of the box. */
+  open: boolean;
+  /** The host patterns of the egress profile of the box. */
+  hosts: readonly string[];
+  /** The host patterns of the MCP servers of the box. */
+  mcpHosts: readonly string[];
+}
+
 /**
  * Gives the id of a credential in the policy. The owner is the prefix, because
  * the ids must be unique and each user can store each credential. The empty
@@ -80,9 +98,7 @@ function apiKeyPolicyId(key: ApiKeyRow): string {
 }
 
 /**
- * Builds the policy the proxy runs, from the deployment's settings, the
- * stored material and the current rows of the credential store and the API
- * key store, for every user.
+ * Builds the policy that the proxy runs, for every user and every box.
  *
  * The policy always carries the CA, as boxes created before the first
  * credential already trust it. The proxy intercepts a host only while a
@@ -91,10 +107,16 @@ function apiKeyPolicyId(key: ApiKeyRow): string {
  * request. An API key names no header, so the proxy swaps it in whatever
  * header carries its placeholder.
  *
+ * A box can always reach the hosts of the credentials with a deliverable
+ * secret and of the API keys of its owner, the other hosts that the tools of
+ * these credentials need, and the hosts of its MCP servers. The egress profile
+ * of the box adds its mode and its own hosts.
+ *
  * @param cfg The configuration of the deployment.
  * @param material The CA and the control token.
  * @param stored The rows of the credential store.
  * @param apiKeys The rows of the API key store.
+ * @param boxes The boxes that are not deleted.
  * @returns The policy for the proxy.
  */
 export function composePolicy(
@@ -102,15 +124,20 @@ export function composePolicy(
   material: EgressMaterial,
   stored: readonly CredentialRow[],
   apiKeys: readonly ApiKeyRow[],
+  boxes: readonly EgressBoxInput[],
 ): EgressPolicy {
   const credentials: EgressCredential[] = [];
-  const configured = new Set<CredentialSpec>();
+  const ownerHosts = new Map<string, string[]>();
+  const addOwnerHosts = (owner: string, hosts: readonly string[]): void => {
+    ownerHosts.set(owner, [...(ownerHosts.get(owner) ?? []), ...hosts]);
+  };
   for (const spec of cfg.credentialSet) {
     for (const row of stored) {
       // A credential with no deliverable secret counts as absent.
       const secret = row.id === spec.id ? deliverableSecret(row) : null;
       if (!secret) continue;
-      configured.add(spec);
+      // The other hosts of the tools are allowed too, so an OAuth refresh works in a closed profile.
+      addOwnerHosts(row.owner, [...spec.hosts, ...spec.alsoAllow]);
       credentials.push({
         id: policyId(row.owner, spec.id),
         hosts: [...spec.hosts],
@@ -121,6 +148,7 @@ export function composePolicy(
     }
   }
   for (const key of apiKeys) {
+    addOwnerHosts(key.owner, key.hosts);
     credentials.push({
       id: apiKeyPolicyId(key),
       hosts: [...key.hosts],
@@ -130,16 +158,17 @@ export function composePolicy(
     });
   }
 
-  // The proxy allows a credential's own hosts. The other hosts its tools
-  // need are added here, so an allowlist cannot break an OAuth refresh.
-  const implied = [...configured].flatMap((spec) => [...spec.alsoAllow]);
-  const allowedHosts =
-    cfg.egressAllowedHosts.length === 0
-      ? []
-      : [...new Set([...cfg.egressAllowedHosts, ...implied])];
+  const boxPolicies = boxes.map(
+    (box): EgressBoxPolicy => ({
+      box: box.id,
+      token: box.token,
+      open: box.open,
+      hosts: [...new Set([...box.hosts, ...(ownerHosts.get(box.owner) ?? []), ...box.mcpHosts])],
+    }),
+  );
 
   return {
-    allowedHosts,
+    boxes: boxPolicies,
     ca: material.ca,
     credentials,
   };
@@ -159,7 +188,24 @@ export async function pushPolicy(
   material: EgressMaterial,
   policy: EgressPolicy,
 ): Promise<EgressStatus> {
-  return controlCall(cfg, material, 'POST', '/policy', policy);
+  return controlCall<EgressStatus>(cfg, material, 'POST', '/policy', policy);
+}
+
+/**
+ * Reads the targets that the egress profile of a box refused.
+ *
+ * @param cfg The configuration of the deployment, with the URL of the control channel.
+ * @param material The material with the control token.
+ * @param box The id of the box.
+ * @returns The refused targets, the most recent first.
+ * @throws Error When the call fails or the proxy answers with an error status.
+ */
+export async function fetchDenials(
+  cfg: Config,
+  material: EgressMaterial,
+  box: string,
+): Promise<EgressDenial[]> {
+  return controlCall(cfg, material, 'GET', `/denials?box=${encodeURIComponent(box)}`);
 }
 
 /**
@@ -170,16 +216,16 @@ export async function pushPolicy(
  * @param method The HTTP method.
  * @param path The path on the control channel.
  * @param body The JSON body, or undefined for a call without a body.
- * @returns The status that the proxy reports back.
+ * @returns The decoded JSON answer of the proxy.
  * @throws Error When the call fails, times out after CONTROL_TIMEOUT_MS, or the proxy answers with an error status.
  */
-async function controlCall(
+async function controlCall<T>(
   cfg: Config,
   material: EgressMaterial,
   method: 'GET' | 'POST',
   path: string,
   body?: unknown,
-): Promise<EgressStatus> {
+): Promise<T> {
   const url = new URL(path, cfg.EGRESS_CONTROL_URL);
   const res = await fetch(url, {
     method,
@@ -202,7 +248,7 @@ async function controlCall(
     })();
     throw new Error(`proxy answered ${res.status}: ${detail.trim()}`);
   }
-  return JSON.parse(text) as EgressStatus;
+  return JSON.parse(text) as T;
 }
 
 /**
@@ -223,6 +269,7 @@ export class EgressManager {
    * @param credentials The source of the secrets.
    * @param apiKeys The source of the API keys.
    * @param db The database that holds the CA and the control token.
+   * @param boxes The function that returns the boxes that are not deleted, with their profiles and MCP hosts.
    */
   constructor(
     /** The deployment's configuration. */
@@ -233,6 +280,8 @@ export class EgressManager {
     private readonly apiKeys: ApiKeyStore,
     /** Where the CA and the control token are kept. */
     private readonly db: Db,
+    /** Returns the boxes that are not deleted, read on every compose. */
+    private readonly boxes: () => EgressBoxInput[] = () => [],
   ) {}
 
   /** Loads the material, without talking to the proxy. */
@@ -324,6 +373,18 @@ export class EgressManager {
   }
 
   /**
+   * Reads the targets that the egress profile of a box refused.
+   *
+   * @param box The id of the box.
+   * @returns The refused targets, the most recent first.
+   * @throws Error When the call to the proxy fails.
+   */
+  async denials(box: string): Promise<EgressDenial[]> {
+    if (!this.material) await this.prepare();
+    return fetchDenials(this.cfg, this.prepared(), box);
+  }
+
+  /**
    * Recomposes the policy from the store, pushes it, and records what the
    * proxy reported. The boot, every store write and every reconciler tick call it.
    *
@@ -337,13 +398,13 @@ export class EgressManager {
       material,
       this.credentials.listAll(),
       this.apiKeys.listAll(),
+      this.boxes(),
     );
 
     try {
       const status = await pushPolicy(this.cfg, material, composed);
       this.health = {
         inSync: status.applied,
-        allowlistActive: composed.allowedHosts.length > 0,
         credentialIds: status.credentialIds,
         denials: status.denials,
         error: null,
@@ -352,7 +413,6 @@ export class EgressManager {
       const message = (err as Error).message;
       this.health = {
         inSync: false,
-        allowlistActive: composed.allowedHosts.length > 0,
         credentialIds: [],
         denials: this.health?.denials ?? {},
         error: message,
