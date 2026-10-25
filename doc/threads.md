@@ -69,7 +69,8 @@ thread, the orchestrator can send a push notification. See [notifications](notif
 
 Select the **Mark this thread done** button in the thread header to mark the thread done. The box list strikes the
 thread's name through. The mark is a note for the reader only: the thread keeps its conversation, its background work
-keeps running, and it still answers prompts. Select the button again to remove the mark.
+keeps running, and it still answers prompts. Select the button again to remove the mark. A right click on the thread in
+the box list, or a long press on a touch screen, also sets or removes the mark.
 
 ## Forking a thread
 
