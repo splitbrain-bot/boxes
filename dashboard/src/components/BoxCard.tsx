@@ -18,6 +18,9 @@ import { type BadgeKind, DOT, StatusBadge } from './StatusBadge';
 /** The time in milliseconds that a touch must stay on a thread row to toggle its done mark. */
 const LONG_PRESS_MS = 500;
 
+/** The time in milliseconds after its last activity that a thread marked done moves into the folded list. */
+const DONE_FOLD_MS = 7 * 86_400_000;
+
 /**
  * A count with the thing it counts: "1 approval", "3 approvals".
  *
@@ -221,6 +224,63 @@ export function BoxCard({ box }: { box: BoxSummary }) {
   // Read at render. The list poll re-renders the card every five seconds,
   // which is often enough for ages in whole minutes.
   const now = Date.now();
+  // Threads marked done that were not active for a while fold away below the others.
+  const old = (t: ThreadSummary) => t.done && now - t.lastActiveAt > DONE_FOLD_MS;
+  const folded = box.threads.filter(old);
+  // A single folded thread would take the same space as the summary.
+  const shown = folded.length > 1 ? box.threads.filter((t) => !old(t)) : box.threads;
+
+  /**
+   * Renders the row of one thread.
+   *
+   * @param thread The thread.
+   * @returns The row, a link that opens the thread.
+   */
+  function threadRow(thread: ThreadSummary) {
+    const dot = threadDot(thread);
+    return (
+      <Link
+        key={thread.id}
+        to={`/boxes/${box.id}/threads/${thread.id}`}
+        onPointerDown={(e) => pressStart(e, thread)}
+        onPointerUp={pressEnd}
+        onPointerCancel={pressEnd}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          pressMark(thread);
+        }}
+        onClick={(e) => {
+          // The release of a long press must not open the thread.
+          if (press.current?.fired) e.preventDefault();
+          press.current = null;
+        }}
+        className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm no-underline select-none [-webkit-touch-callout:none] hover:bg-accent"
+      >
+        <span
+          role="img"
+          aria-label={dot.label}
+          title={dot.label}
+          className={cn('size-1.5 shrink-0 rounded-full', DOT[dot.kind])}
+        />
+        {/* A thread marked done is struck through. It still opens and runs. */}
+        <span className={cn('min-w-0 flex-1 truncate', thread.done && 'line-through')}>
+          {threadName(thread)}
+        </span>
+        {harnessLabel(harnesses, thread.harness) ? (
+          <span className="shrink-0 text-xs opacity-70">
+            {harnessLabel(harnesses, thread.harness)}
+          </span>
+        ) : null}
+        <time
+          dateTime={new Date(thread.lastActiveAt).toISOString()}
+          title={`Last active ${new Date(thread.lastActiveAt).toLocaleString()}`}
+          className="shrink-0 tabular-nums opacity-70"
+        >
+          {shortAge(now - thread.lastActiveAt)}
+        </time>
+      </Link>
+    );
+  }
 
   return (
     <Card className="relative gap-0 overflow-hidden py-0">
@@ -254,51 +314,15 @@ export function BoxCard({ box }: { box: BoxSummary }) {
       </Link>
 
       <div className="flex flex-col border-t px-2 py-2">
-        {box.threads.map((thread) => {
-          const dot = threadDot(thread);
-          return (
-            <Link
-              key={thread.id}
-              to={`/boxes/${box.id}/threads/${thread.id}`}
-              onPointerDown={(e) => pressStart(e, thread)}
-              onPointerUp={pressEnd}
-              onPointerCancel={pressEnd}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                pressMark(thread);
-              }}
-              onClick={(e) => {
-                // The release of a long press must not open the thread.
-                if (press.current?.fired) e.preventDefault();
-                press.current = null;
-              }}
-              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm no-underline select-none [-webkit-touch-callout:none] hover:bg-accent"
-            >
-              <span
-                role="img"
-                aria-label={dot.label}
-                title={dot.label}
-                className={cn('size-1.5 shrink-0 rounded-full', DOT[dot.kind])}
-              />
-              {/* A thread marked done is struck through. It still opens and runs. */}
-              <span className={cn('min-w-0 flex-1 truncate', thread.done && 'line-through')}>
-                {threadName(thread)}
-              </span>
-              {harnessLabel(harnesses, thread.harness) ? (
-                <span className="shrink-0 text-xs opacity-70">
-                  {harnessLabel(harnesses, thread.harness)}
-                </span>
-              ) : null}
-              <time
-                dateTime={new Date(thread.lastActiveAt).toISOString()}
-                title={`Last active ${new Date(thread.lastActiveAt).toLocaleString()}`}
-                className="shrink-0 tabular-nums opacity-70"
-              >
-                {shortAge(now - thread.lastActiveAt)}
-              </time>
-            </Link>
-          );
-        })}
+        {shown.map(threadRow)}
+        {folded.length > 1 ? (
+          <details>
+            <summary className="cursor-pointer rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:bg-accent">
+              {counted(folded.length, 'older done thread')}
+            </summary>
+            <div className="flex flex-col">{folded.map(threadRow)}</div>
+          </details>
+        ) : null}
 
         <div className="flex gap-1 pt-1">
           <button
