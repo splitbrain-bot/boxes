@@ -319,3 +319,48 @@ test('a right click or a long press on the list toggles the done mark without op
     await close();
   }
 });
+
+test('threads marked done and idle for more than a week fold away under a summary', async () => {
+  stub.resetBoxes();
+  stub.createBox({
+    threads: [
+      { title: 'old work', done: true, lastActiveAt: Date.now() - 8 * 86_400_000 },
+      { title: 'older work', done: true, lastActiveAt: Date.now() - 9 * 86_400_000 },
+      { title: 'recent work', done: true, lastActiveAt: Date.now() - 6 * 86_400_000 },
+      { title: 'open work', lastActiveAt: Date.now() - 30 * 86_400_000 },
+    ],
+  });
+  const { page, errors, close } = await openPage(stub.url, '/');
+  try {
+    const summary = page.getByText('2 older done threads');
+    await expect.poll(() => summary.isVisible()).toBe(true);
+    expect(await page.getByText('recent work').isVisible()).toBe(true);
+    expect(await page.getByText('open work').isVisible()).toBe(true);
+    expect(await page.getByText('old work').isVisible()).toBe(false);
+
+    await summary.click();
+    await expect.poll(() => page.getByText('old work').isVisible()).toBe(true);
+    expect(await page.getByText('older work').isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a single thread marked done and idle for more than a week stays in the list', async () => {
+  stub.resetBoxes();
+  stub.createBox({
+    threads: [
+      { title: 'old work', done: true, lastActiveAt: Date.now() - 8 * 86_400_000 },
+      { title: 'open work' },
+    ],
+  });
+  const { page, errors, close } = await openPage(stub.url, '/');
+  try {
+    await expect.poll(() => page.getByText('old work').isVisible()).toBe(true);
+    expect(await page.getByText(/older done thread/).count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
