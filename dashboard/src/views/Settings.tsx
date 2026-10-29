@@ -3,6 +3,7 @@ import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { BackLink } from '@/components/BackLink';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { CredentialLogin } from '@/components/CredentialLogin';
+import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -222,7 +223,7 @@ export function Settings() {
       {error ? <Notice className="rounded-md border px-3 py-2">{error}</Notice> : null}
 
       {credentials === null ? (
-        <div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
+        <Loading className="py-8 text-center" />
       ) : (
         KINDS.map((kind) => (
           <CredentialCard

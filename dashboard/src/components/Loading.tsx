@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react';
+import { Spinner } from '@/components/Spinner';
 import { cn } from '@/lib/utils';
 
 /**
- * Status text a view shows while it waits for its first answer. The status
- * role lets a screen reader announce it. The caller sets the layout.
+ * Spinner and status text a view shows while it waits for its first answer.
+ * The status role lets a screen reader announce it. The caller sets the layout.
  *
  * @param className Layout classes from the caller.
  * @param children The text, when a view has a more exact one than the default.
@@ -19,7 +20,10 @@ export function Loading({
 }) {
   return (
     <div role="status" className={cn('text-sm text-muted-foreground', className)}>
-      {children}
+      <span className="inline-flex items-center gap-2">
+        <Spinner />
+        {children}
+      </span>
     </div>
   );
 }
