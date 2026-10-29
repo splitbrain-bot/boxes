@@ -2,6 +2,7 @@ import { ArrowLeft, ExternalLink, FilePlus2, Send } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { Loading } from '@/components/Loading';
 import { Notice } from '@/components/Notice';
 import { BasePicker } from '@/components/review/BasePicker';
 import { CodePane, type ScrollTarget } from '@/components/review/CodePane';
@@ -536,7 +537,7 @@ export function BoxReview() {
               onToggle={toggleDir}
             />
           ) : loadingTree ? (
-            <p className="px-3 py-4 text-sm text-muted-foreground">Loading…</p>
+            <Loading className="px-3 py-4" />
           ) : error ? null : (
             // A failed fetch shows the error banner instead.
             <p className="px-3 py-4 text-sm text-muted-foreground">Nothing to show.</p>
@@ -642,7 +643,7 @@ export function BoxReview() {
             // Below md the tree fills the screen, so the placeholder shows only from md up.
             <div className="hidden min-h-0 flex-1 md:flex">
               <Empty>
-                {loadingFile ? 'Loading…' : 'Pick a file from the tree to start reading.'}
+                {loadingFile ? <Loading /> : 'Pick a file from the tree to start reading.'}
               </Empty>
             </div>
           )}
