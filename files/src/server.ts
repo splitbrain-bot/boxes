@@ -13,6 +13,7 @@ import {
   FILE_ROUTES,
   FILES_PROTOCOL_VERSION,
   type FindReposRequest,
+  RAW_DIRS,
   SIZE_HEADER,
   TRUNCATED_HEADER,
   VERSION_HEADER,
@@ -36,12 +37,14 @@ import { installSetupFiles } from './setupfiles.ts';
 
 /** The directories the file service works on. */
 export interface Roots {
-  /** The workspace. Every path in a request is relative to it. */
+  /** The workspace. Every path in a request is relative to it, except the path of a raw read. */
   workspace: string;
-  /** The home of the agent. The size covers it, and the setup files and the agent set go into it. */
+  /** The home of the agent. The size and a raw read cover it, and the setup files and the agent set go into it. */
   home: string;
   /** The Nix directory. Only the size covers it. */
   nix: string;
+  /** The temporary directory of the box. Only a raw read covers it. */
+  tmp: string;
   /** The directory with the skills of the box image, or undefined for none. Each agent set install copies them. */
   imageSkills?: string;
 }
@@ -118,7 +121,7 @@ async function handle(
     }
 
     case `GET ${FILE_ROUTES.raw}`: {
-      const raw = openRaw(roots.workspace, path);
+      const raw = openRaw(rawRoots(roots), path);
       stream.respond(
         withVersion({
           ':status': 200,
@@ -258,4 +261,14 @@ function reply(
     withVersion({ ':status': status, 'content-type': 'application/json', ...headers }),
   );
   stream.end(JSON.stringify(body));
+}
+
+/**
+ * Gives the real directory of each directory that a raw read serves, by its path in the box.
+ *
+ * @param roots The directories of the file service.
+ * @returns The directories, by their path in the box.
+ */
+function rawRoots(roots: Roots): Record<string, string> {
+  return Object.fromEntries(Object.entries(RAW_DIRS).map(([dir, root]) => [dir, roots[root]]));
 }

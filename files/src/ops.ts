@@ -33,7 +33,7 @@ import {
   type StatReply,
   validRelativePath,
 } from '../../shared/files.ts';
-import { resolveInRoot } from './paths.ts';
+import { type Resolved, resolveInRoot, resolveInRoots } from './paths.ts';
 
 /** A failed operation, with the HTTP status that reports it. */
 export class FileError extends Error {
@@ -63,11 +63,23 @@ export class FileError extends Error {
  *   or ends in a link.
  */
 function resolved(root: string, relPath: string, mustExist = true): string {
-  const r = resolveInRoot(root, relPath, mustExist);
+  return pathOf(resolveInRoot(root, relPath, mustExist), relPath);
+}
+
+/**
+ * Gives the path of a resolution, or throws the refusal.
+ *
+ * @param r The resolution.
+ * @param path The path of the request, for the message.
+ * @returns The resolved path.
+ * @throws {FileError} A 400 for a malformed path, a 404 for a missing path, and a 403 for a path that leaves the
+ *   root or ends in a link.
+ */
+function pathOf(r: Resolved, path: string): string {
   if (r.ok) return r.path;
-  if (r.reason === 'invalid') throw new FileError(400, `invalid path: ${relPath}`);
-  if (r.reason === 'missing') throw new FileError(404, `not found: ${relPath}`);
-  throw new FileError(403, `refused (${r.reason}): ${relPath}`);
+  if (r.reason === 'invalid') throw new FileError(400, `invalid path: ${path}`);
+  if (r.reason === 'missing') throw new FileError(404, `not found: ${path}`);
+  throw new FileError(403, `refused (${r.reason}): ${path}`);
 }
 
 /**
@@ -297,26 +309,26 @@ export interface RawFile {
 /**
  * Opens one plain file to stream its whole content.
  *
- * @param root The root directory.
- * @param relPath The path, relative to the root.
+ * @param roots The real directory of each root, by the path of the root in the box.
+ * @param absPath The absolute path of the file, as the box sees it.
  * @returns The size and the stream.
  * @throws {FileError} A 404 when the path is not a plain file.
  */
-export function openRaw(root: string, relPath: string): RawFile {
-  const path = resolved(root, relPath);
+export function openRaw(roots: Readonly<Record<string, string>>, absPath: string): RawFile {
+  const path = pathOf(resolveInRoots(roots, absPath), absPath);
   let fd: number;
   try {
     fd = openSync(path, 'r');
   } catch (err) {
-    throw asFileError(err, relPath);
+    throw asFileError(err, absPath);
   }
   let stats: Stats;
   try {
     stats = fstatSync(fd);
-    if (!stats.isFile()) throw new FileError(404, `not a file: ${relPath}`);
+    if (!stats.isFile()) throw new FileError(404, `not a file: ${absPath}`);
   } catch (err) {
     closeSync(fd);
-    throw asFileError(err, relPath);
+    throw asFileError(err, absPath);
   }
   return { size: stats.size, stream: createReadStream('', { fd }) };
 }

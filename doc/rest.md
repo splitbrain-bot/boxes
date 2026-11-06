@@ -90,14 +90,15 @@ The POST body is the file's raw bytes with content type `application/octet-strea
 (default 25). The file lands in the box's [workspace](storage.md) under `.boxes/attachments/`, and the answer carries
 the workspace-relative path for the prompt that mentions it.
 
-## Workspace files
+## Files
 
 | Method | Path | Answer |
 | --- | --- | --- |
 | GET | `/api/boxes/:id/files/raw?path=<p>` | file bytes |
 
-`path` is workspace-relative. The thread uses the route for attachments and for the images and links in an answer, and
-the review uses it to open a file. The content type comes from the file name.
+`path` is absolute in the box, in `/workspace`, `/home/agent` or `/tmp`. The thread uses the route for attachments and
+for the images and links in an answer, and the review uses it to open a file. The content type comes from the file
+name.
 
 ## Code review
 

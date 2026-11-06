@@ -164,7 +164,7 @@ beforeEach(() => {
   setGitRunnerForTests(localGit);
   // The box id names the workspace the file service works on.
   setFileServiceSpawnerForTests(
-    inProcessFileService((id) => ({ workspace: workspace(id), home: dir, nix: dir })),
+    inProcessFileService((id) => ({ workspace: workspace(id), home: dir, nix: dir, tmp: dir })),
   );
 });
 

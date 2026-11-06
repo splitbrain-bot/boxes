@@ -650,13 +650,13 @@ test('a markdown image or link with a workspace path loads the file from the box
     const image = page.getByAltText('a chart');
     await expect.poll(() => image.isVisible(), { timeout: 10_000 }).toBe(true);
     expect(await image.getAttribute('src')).toBe(
-      `/api/boxes/${BOX.id}/files/raw?path=docs%2Fchart.svg`,
+      `/api/boxes/${BOX.id}/files/raw?path=%2Fworkspace%2Fdocs%2Fchart.svg`,
     );
     expect(await image.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBe(40);
 
     const link = page.getByRole('link', { name: 'the notes' });
     const href = await link.getAttribute('href');
-    expect(href).toBe(`/api/boxes/${BOX.id}/files/raw?path=docs%2Fnotes.txt`);
+    expect(href).toBe(`/api/boxes/${BOX.id}/files/raw?path=%2Fworkspace%2Fdocs%2Fnotes.txt`);
     const res = await page.request.get(new URL(href!, stub.url).href);
     expect(await res.text()).toBe('some notes\n');
     expect(errors).toEqual([]);

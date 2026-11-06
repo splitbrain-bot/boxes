@@ -10,7 +10,7 @@ runs as the `agent` account.
 | --- | --- |
 | [Code review](review.md) | list a directory, find the repositories, read and save a file, read and write `REVIEW.md`, delete the review |
 | Attachments of a [thread](threads.md) | create the attachment directory, store an attachment |
-| [Workspace files](rest.md#workspace-files) | download a file |
+| [Files](rest.md#files) | download a file of the workspace, the home or `/tmp` |
 | [Disk usage](storage.md#disk-usage) | measure the size of the workspace, the home and the Nix store |
 | [Box setup](boxes.md#the-setup) | write the CA and the git configuration into the home |
 | [Agent sets](agent-sets.md) | install the merged set into the home |
@@ -37,8 +37,9 @@ image installs the bundle as `/usr/local/bin/boxes-files`.
 
 The orchestrator starts the process with `docker exec`, as it starts an adapter. The two sides speak HTTP/2 over the
 standard input and output of the process. Each operation is one request. The method and the path name the operation,
-the `path` query names a file relative to `/workspace`, and the body holds the bytes. Each request is its own HTTP/2
-stream, so several requests run at the same time on one connection. A download is streamed to the browser.
+the `path` query names a file relative to `/workspace`, and the body holds the bytes. Only `GET /raw` takes an absolute
+path, in `/workspace`, `/home/agent` or `/tmp`. Each request is its own HTTP/2 stream, so several requests run at the
+same time on one connection. A download is streamed to the browser.
 
 | Request | Operation |
 | --- | --- |
@@ -59,7 +60,7 @@ Each reply has the header `boxes-files-version`.
 
 ### Paths and writes
 
-The file service refuses a path outside `/workspace` and a symlink as the last path component. `list` leaves out
+The file service refuses a path outside its directories and a symlink as the last path component. `list` leaves out
 symlinks.
 
 A `PUT /file` needs `If-Match` with the hash of the last read, or `If-None-Match: *` for a new file. When the file does

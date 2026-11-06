@@ -202,7 +202,7 @@ function documentCsp(host: string | undefined): string {
 const COMPRESS_THRESHOLD_BYTES = 1024;
 
 /**
- * Sends one file of a workspace, with a content type from its name and not
+ * Sends one file of a box, with a content type from its name and not
  * from its bytes.
  *
  * {@link servedTypeFor} gives the type and the policy. The stream comes from
@@ -214,7 +214,7 @@ const COMPRESS_THRESHOLD_BYTES = 1024;
  * @param size The size of the file in bytes.
  * @returns The stream, for the route to send.
  */
-function sendWorkspaceFile(reply: FastifyReply, stream: Readable, name: string, size: number) {
+function sendBoxFile(reply: FastifyReply, stream: Readable, name: string, size: number) {
   const served = servedTypeFor(name);
   void reply.headers({
     'Content-Type': served.contentType,
@@ -813,10 +813,11 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   );
 
   /**
-   * Sends one file of the workspace as its bytes. The thread uses it for the
-   * attachments and for the images and links in a message. The review uses it
-   * for a file that it cannot show as text. The file service in the box reads
-   * the file, so the orchestrator starts a stopped box for the request.
+   * Sends one file of the box as its bytes. The path is absolute in the box.
+   * The thread uses the route for the attachments and for the images and links
+   * in a message, and the review uses it for a file that it cannot show as
+   * text. The file service in the box reads the file, so the orchestrator
+   * starts a stopped box for the request.
    */
   app.get('/api/boxes/:id/files/raw', async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -831,7 +832,7 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
       if (isRefusedPath(err)) throw new HttpError(404, 'File not found');
       throw err;
     }
-    return sendWorkspaceFile(reply, file.stream, basename(path), file.size);
+    return sendBoxFile(reply, file.stream, basename(path), file.size);
   });
 
   // --- Code review over the workspace of a box ---------------------------

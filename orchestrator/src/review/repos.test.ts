@@ -64,7 +64,7 @@ beforeEach(() => {
   setGitRunnerForTests(localGit);
   // The box id is the path of the workspace that the file service uses.
   setFileServiceSpawnerForTests(
-    inProcessFileService((root) => ({ workspace: root, home: root, nix: root })),
+    inProcessFileService((root) => ({ workspace: root, home: root, nix: root, tmp: root })),
   );
   dir = mkdtempSync(join(tmpdir(), 'boxes-repos-'));
 });

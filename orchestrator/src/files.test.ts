@@ -29,7 +29,12 @@ let real: FileServiceSpawner;
 
 beforeEach(() => {
   workspace = mkdtempSync(join(tmpdir(), 'boxes-files-client-'));
-  real = inProcessFileService(() => ({ workspace, home: workspace, nix: workspace }));
+  real = inProcessFileService(() => ({
+    workspace,
+    home: workspace,
+    nix: workspace,
+    tmp: workspace,
+  }));
 });
 
 afterEach(() => {
@@ -151,7 +156,7 @@ test('a file service of another version is refused, naming both versions', async
   await assert.rejects(fileService('c1').list(''), (err: unknown) => {
     assert.ok(err instanceof HttpError);
     assert.equal(err.statusCode, 409);
-    assert.match(err.message, /version 0, but the orchestrator needs version 1/);
+    assert.match(err.message, /version 0, but the orchestrator needs version 2/);
     return true;
   });
 });
@@ -203,7 +208,7 @@ test('a download streams the whole file, with its size', async () => {
   const content = Buffer.alloc(1024 * 1024, 'x');
   writeFileSync(join(workspace, 'big.bin'), content);
   setFileServiceSpawnerForTests(real);
-  const file = await fileService('c1').readStream('big.bin');
+  const file = await fileService('c1').readStream('/workspace/big.bin');
   const chunks: Buffer[] = [];
   for await (const chunk of file.stream) chunks.push(chunk as Buffer);
   assert.equal(file.size, content.length);

@@ -306,7 +306,7 @@ describe('over a workspace of several repositories', () => {
   beforeEach(() => {
     setGitRunnerForTests(localGit);
     setFileServiceSpawnerForTests(
-      inProcessFileService((root) => ({ workspace: root, home: root, nix: root })),
+      inProcessFileService((root) => ({ workspace: root, home: root, nix: root, tmp: root })),
     );
     dir = mkdtempSync(join(tmpdir(), 'boxes-wsstatus-'));
   });

@@ -329,7 +329,7 @@ describe('dirEntries over real repositories', () => {
   beforeEach(() => {
     setGitRunnerForTests(localGit);
     setFileServiceSpawnerForTests(
-      inProcessFileService((root) => ({ workspace: root, home: root, nix: root })),
+      inProcessFileService((root) => ({ workspace: root, home: root, nix: root, tmp: root })),
     );
     dir = mkdtempSync(join(tmpdir(), 'boxes-rdir-'));
   });

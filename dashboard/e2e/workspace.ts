@@ -182,7 +182,7 @@ export function installLocalFiles(workspaceOf: (boxId: string) => string): void 
   setFileServiceSpawnerForTests(
     inProcessFileService((boxId) => {
       const workspace = workspaceOf(boxId);
-      return { workspace, home: workspace, nix: workspace };
+      return { workspace, home: workspace, nix: workspace, tmp: workspace };
     }),
   );
 }

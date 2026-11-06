@@ -112,9 +112,14 @@ function put(rel: string, content: string | Buffer): void {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'boxes-files-'));
   workspace = join(dir, 'workspace');
-  for (const d of ['workspace', 'home', 'nix']) mkdirSync(join(dir, d));
+  for (const d of ['workspace', 'home', 'nix', 'tmp']) mkdirSync(join(dir, d));
   const [server, client] = duplexPair();
-  serveFiles(server, { workspace, home: join(dir, 'home'), nix: join(dir, 'nix') });
+  serveFiles(server, {
+    workspace,
+    home: join(dir, 'home'),
+    nix: join(dir, 'nix'),
+    tmp: join(dir, 'tmp'),
+  });
   session = connect('http://boxes-files', { createConnection: () => client });
 });
 
@@ -152,7 +157,7 @@ describe('paths', () => {
       403,
     );
     assert.equal((await request('GET', at(FILE_ROUTES.read, 'link', { cap: '10' }))).status, 403);
-    assert.equal((await request('GET', at(FILE_ROUTES.raw, 'link'))).status, 403);
+    assert.equal((await request('GET', at(FILE_ROUTES.raw, '/workspace/link'))).status, 403);
   });
 });
 
@@ -278,7 +283,7 @@ describe('raw', () => {
   test('streams the whole file with its length', async () => {
     const content = Buffer.alloc(3 * 1024 * 1024, 'x');
     put('big.bin', content);
-    const reply = await request('GET', at(FILE_ROUTES.raw, 'big.bin'));
+    const reply = await request('GET', at(FILE_ROUTES.raw, '/workspace/big.bin'));
     assert.equal(reply.status, 200);
     assert.equal(reply.headers['content-length'], String(content.length));
     assert.ok(reply.body.equals(content));
@@ -286,7 +291,25 @@ describe('raw', () => {
 
   test('a directory is a 404', async () => {
     mkdirSync(join(workspace, 'd'));
-    assert.equal((await request('GET', at(FILE_ROUTES.raw, 'd'))).status, 404);
+    assert.equal((await request('GET', at(FILE_ROUTES.raw, '/workspace/d'))).status, 404);
+  });
+
+  test('serves the home and /tmp too, and nothing else', async () => {
+    writeFileSync(join(dir, 'home', 'shot.png'), 'home');
+    writeFileSync(join(dir, 'tmp', 'shot.png'), 'tmp');
+    writeFileSync(join(dir, 'secret'), 'nix');
+    assert.equal(
+      (await request('GET', at(FILE_ROUTES.raw, '/home/agent/shot.png'))).body.toString(),
+      'home',
+    );
+    assert.equal(
+      (await request('GET', at(FILE_ROUTES.raw, '/tmp/shot.png'))).body.toString(),
+      'tmp',
+    );
+    assert.equal((await request('GET', at(FILE_ROUTES.raw, '/secret'))).status, 403);
+    assert.equal((await request('GET', at(FILE_ROUTES.raw, '/tmp/../secret'))).status, 400);
+    // A relative path names no file for a raw read.
+    assert.equal((await request('GET', at(FILE_ROUTES.raw, 'big.bin'))).status, 400);
   });
 });
 
