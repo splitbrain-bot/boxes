@@ -9,6 +9,14 @@ and a skill of the orchestrator replaces a skill of the image.
 These skills describe features of the deployment. The orchestrator installs each one only while the deployment has the
 feature. Their source is in `orchestrator/skills`.
 
+### Environment
+
+The agent does not know that it runs in a box. The `environment` skill describes the box to the agent: the dashboard
+that shows its answers, its account, the directories and their lifetime, the egress proxy with the credential
+placeholders, and the way an image or a link in an answer shows a file. Every box gets the skill.
+
+Skill instructions: [environment](../orchestrator/skills/environment/SKILL.md)
+
 ### Share app
 
 Services started by the agent are only available inside the box's own network. When a user want to review or test a
