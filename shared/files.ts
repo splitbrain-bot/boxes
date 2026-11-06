@@ -5,20 +5,31 @@
  * The two use HTTP/2 over the standard input and output of the file
  * service. Each operation is one request. The method and the path name the
  * operation, the query names the file, and the body carries the bytes. Every
- * path is relative to the workspace, with '' for the workspace itself.
+ * path is relative to the workspace, with '' for the workspace itself. Only
+ * the path of a raw read is absolute, in one of the directories of RAW_DIRS.
  */
 
 /**
  * The version of this protocol. The file service sends it with every
  * response, and the orchestrator refuses a response with another version.
  */
-export const FILES_PROTOCOL_VERSION = 1;
+export const FILES_PROTOCOL_VERSION = 2;
 
 /** The response header that carries {@link FILES_PROTOCOL_VERSION}. */
 export const VERSION_HEADER = 'boxes-files-version';
 
 /** The command in the box image that starts the file service. */
 export const FILES_COMMAND = 'boxes-files';
+
+/**
+ * The directories whose files a raw read serves. The key is the path of the
+ * directory in the box, and the value names the root of the file service.
+ */
+export const RAW_DIRS: Readonly<Record<string, 'workspace' | 'home' | 'tmp'>> = {
+  '/workspace': 'workspace',
+  '/home/agent': 'home',
+  '/tmp': 'tmp',
+};
 
 /** The request paths of the operations. */
 export const FILE_ROUTES = {
@@ -33,7 +44,7 @@ export const FILE_ROUTES = {
    * bytes. The `etag` header carries the hash. Other headers carry the real size and the flags.
    */
   read: '/read',
-  /** GET: the whole content of one file, as a stream. */
+  /** GET: the whole content of one file, as a stream. The path is absolute, in one of {@link RAW_DIRS}. */
   raw: '/raw',
   /**
    * PUT: replaces one file atomically with the body. DELETE: removes one file.

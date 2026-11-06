@@ -5,6 +5,7 @@
 
 /// <reference types="vite/client" />
 import diagrams from '../skills/diagrams/SKILL.md?raw';
+import environment from '../skills/environment/SKILL.md?raw';
 import shareApp from '../skills/share-app/SKILL.md?raw';
 
 /** One skill of the orchestrator. */
@@ -28,6 +29,8 @@ export interface BuiltinConditions {
 
 /** Every skill of the orchestrator, with the condition under which a box gets it. */
 const SKILLS: ReadonlyArray<BuiltinSkill & { available: (c: BuiltinConditions) => boolean }> = [
+  // Every box is the environment that this skill describes.
+  { name: 'environment', content: environment, available: () => true },
   // The dashboard renders the Mermaid blocks that this skill teaches.
   { name: 'diagrams', content: diagrams, available: () => true },
   // The tunnel needs the Dev Tunnels credential.

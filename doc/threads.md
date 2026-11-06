@@ -61,10 +61,10 @@ adapter puts the thread back the way it was.
 
 ## Images and links in answers
 
-An image or a link in an answer of the agent can name a file in the workspace. The path is absolute in `/workspace` or
-relative to `/workspace`. The dashboard then shows the image from the box, and a link opens the file in a new tab. The
-dashboard loads the current version of the file, so an old answer shows a changed file in its new state. A file outside
-`/workspace` does not show. An image can also be a data URL.
+An image or a link in an answer of the agent can name a file in the box. The path is absolute in `/workspace`,
+`/home/agent` or `/tmp`, or relative to `/workspace`. The dashboard then shows the image from the box, and a link opens
+the file in a new tab. The dashboard loads the current version of the file, so an old answer shows a changed file in
+its new state, and a file in `/tmp` is gone after a stop. An image can also be a data URL.
 
 ## Permission requests
 

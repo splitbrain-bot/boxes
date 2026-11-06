@@ -2,7 +2,7 @@
 
 import type { ThreadMessageLike, ToolApprovalOption } from '@assistant-ui/react';
 import { isThumbnailable } from '../../lib/attachments.ts';
-import { fileUrl } from '../../lib/files.ts';
+import { workspaceFileUrl } from '../../lib/files.ts';
 import { TASK_NOTIFICATION_PART } from '../../lib/task-notifications.ts';
 import { imageSrc, type PermissionOption, type PermissionOptionKind } from './acp-types.ts';
 import {
@@ -147,11 +147,11 @@ function imagePart(src: string) {
  */
 function attachmentPart(part: AttachmentPart, boxId?: string) {
   if (boxId && isThumbnailable(part.mimeType)) {
-    return { type: 'image' as const, image: fileUrl(boxId, part.path) };
+    return { type: 'image' as const, image: workspaceFileUrl(boxId, part.path) };
   }
   return {
     type: 'file' as const,
-    data: boxId ? fileUrl(boxId, part.path) : part.path,
+    data: boxId ? workspaceFileUrl(boxId, part.path) : part.path,
     mimeType: part.mimeType,
     filename: part.name,
     sourceType: 'id' as const,

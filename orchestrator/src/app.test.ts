@@ -147,6 +147,7 @@ beforeEach(async () => {
       workspace: ws.workspacePath(data, 'abc123'),
       home: ws.homePath(data, 'abc123'),
       nix: ws.nixPath(data, 'abc123'),
+      tmp: ws.workspacePath(data, 'abc123'),
     })),
   );
 });
@@ -311,7 +312,7 @@ test('a stored image is served back as itself, for the thread to show', async ()
   });
 
   const res = await orchestrator.app.inject({
-    url: '/api/boxes/abc123/files/raw?path=.boxes/attachments/shot.png',
+    url: '/api/boxes/abc123/files/raw?path=/workspace/.boxes/attachments/shot.png',
   });
 
   assert.equal(res.statusCode, 200);
@@ -331,7 +332,7 @@ test('an SVG is served as one, inert, so a diagram can be looked at', async () =
   });
 
   const res = await orchestrator.app.inject({
-    url: '/api/boxes/abc123/files/raw?path=.boxes/attachments/diagram.svg',
+    url: '/api/boxes/abc123/files/raw?path=/workspace/.boxes/attachments/diagram.svg',
   });
 
   assert.equal(res.headers['content-type'], 'image/svg+xml');
@@ -351,7 +352,7 @@ test('a PDF is served as one, unsandboxed, so a tab can show it', async () => {
   });
 
   const res = await orchestrator.app.inject({
-    url: '/api/boxes/abc123/files/raw?path=.boxes/attachments/report.pdf',
+    url: '/api/boxes/abc123/files/raw?path=/workspace/.boxes/attachments/report.pdf',
   });
 
   assert.equal(res.headers['content-type'], 'application/pdf');
@@ -371,7 +372,7 @@ test('a video is served as one, unsandboxed, so the player can load it', async (
   });
 
   const res = await orchestrator.app.inject({
-    url: '/api/boxes/abc123/files/raw?path=.boxes/attachments/clip.mp4',
+    url: '/api/boxes/abc123/files/raw?path=/workspace/.boxes/attachments/clip.mp4',
   });
 
   assert.equal(res.headers['content-type'], 'video/mp4');
@@ -394,7 +395,7 @@ test('a format nothing renders is served as a download of unknown type', async (
     });
 
     const res = await orchestrator.app.inject({
-      url: `/api/boxes/abc123/files/raw?path=.boxes/attachments/${name}`,
+      url: `/api/boxes/abc123/files/raw?path=/workspace/.boxes/attachments/${name}`,
     });
     assert.equal(res.headers['content-type'], 'application/octet-stream');
     assert.match(res.headers['content-disposition'] as string, /^attachment/);
@@ -412,7 +413,7 @@ test('a format an app opens is served as a download of its own type', async () =
   });
 
   const res = await orchestrator.app.inject({
-    url: '/api/boxes/abc123/files/raw?path=.boxes/attachments/sheet.xlsx',
+    url: '/api/boxes/abc123/files/raw?path=/workspace/.boxes/attachments/sheet.xlsx',
   });
   assert.equal(
     res.headers['content-type'],
@@ -437,7 +438,7 @@ test('a link planted in the attachments directory serves nothing', async () => {
   symlinkSync(secret, join(workspace, '.boxes/attachments/escape.png'));
 
   const res = await orchestrator.app.inject({
-    url: '/api/boxes/abc123/files/raw?path=.boxes/attachments/escape.png',
+    url: '/api/boxes/abc123/files/raw?path=/workspace/.boxes/attachments/escape.png',
   });
   assert.equal(res.statusCode, 404);
 });
@@ -448,7 +449,7 @@ test('a workspace file outside the attachments is served too', async () => {
   writeFileSync(join(workspace, 'docs/chart.png'), 'PNGDATA');
 
   const res = await orchestrator.app.inject({
-    url: `/api/boxes/abc123/files/raw?path=${encodeURIComponent('docs/chart.png')}`,
+    url: `/api/boxes/abc123/files/raw?path=${encodeURIComponent('/workspace/docs/chart.png')}`,
   });
 
   assert.equal(res.statusCode, 200);
@@ -456,10 +457,16 @@ test('a workspace file outside the attachments is served too', async () => {
   assert.equal(res.body, 'PNGDATA');
 });
 
-test('a path that is not a file in the workspace is a 404, however it is spelled', async () => {
+test('a path that is not a served file is a 404, however it is spelled', async () => {
   const workspace = insertWorkspaceBox('abc123');
   mkdirSync(join(workspace, 'sub'));
-  for (const path of ['../../../etc/passwd', '/etc/passwd', 'sub', 'nope.png']) {
+  for (const path of [
+    '/workspace/../../../etc/passwd',
+    '/etc/passwd',
+    '/workspace/sub',
+    '/workspace/nope.png',
+    'docs/chart.png',
+  ]) {
     const res = await orchestrator.app.inject({
       url: `/api/boxes/abc123/files/raw?path=${encodeURIComponent(path)}`,
     });

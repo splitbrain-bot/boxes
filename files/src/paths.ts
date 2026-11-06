@@ -64,6 +64,22 @@ export function resolveInRoot(root: string, relPath: string, mustExist = true): 
 }
 
 /**
+ * Resolves an absolute path from a client under one of several roots, or gives the reason for the refusal.
+ *
+ * The root whose path in the box starts the path serves it. The rest of the path goes through {@link resolveInRoot}.
+ *
+ * @param roots The real directory of each root, by the path of the root in the box.
+ * @param path The absolute path, as the box sees it.
+ * @returns The resolved path, or the reason for the refusal.
+ */
+export function resolveInRoots(roots: Readonly<Record<string, string>>, path: string): Resolved {
+  const match = Object.entries(roots).find(([dir]) => path === dir || path.startsWith(`${dir}/`));
+  if (!match) return { ok: false, reason: path.startsWith('/') ? 'outside' : 'invalid' };
+  const [dir, root] = match;
+  return resolveInRoot(root, path.slice(dir.length + 1));
+}
+
+/**
  * Checks if a path is the root or is under the root.
  *
  * @param root The root directory.

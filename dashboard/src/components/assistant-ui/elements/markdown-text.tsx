@@ -18,7 +18,7 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 import { MermaidDiagram } from "@/components/assistant-ui/elements/mermaid-diagram";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { fileUrl, workspacePath } from "@/lib/files";
+import { filePath, fileUrl } from "@/lib/files";
 import { cn } from "@/lib/utils";
 
 /** The props of {@link MarkdownText}: the text part props and extra markdown components. */
@@ -53,7 +53,7 @@ const useShallowStable = <T extends Record<string, unknown> | undefined>(
  * Renders the text part of a message as GitHub-flavoured markdown.
  *
  * Boxes edit: in the view of a box, a link or an image with the path of a
- * workspace file loads the file from the box.
+ * file in the box loads the file from the box.
  *
  * @param components Components that replace the default components for some elements.
  */
@@ -88,8 +88,8 @@ export const MarkdownText = memo(MarkdownTextImpl);
  * Boxes edit: makes the filter for the URLs of links and images.
  *
  * The source of an image can also be a data URL of an image. With a box, the
- * path of a workspace file becomes the URL that loads the file. All other URLs
- * go through the default filter.
+ * path of a file in the box becomes the URL that loads the file. All other
+ * URLs go through the default filter.
  *
  * @param boxId The id of the box, or undefined outside the view of a box.
  * @returns The filter.
@@ -98,7 +98,7 @@ const urlTransformFor =
   (boxId: string | undefined): UrlTransform =>
   (url, key) => {
     if (key === "src" && /^data:image\//i.test(url)) return url;
-    const path = boxId && workspacePath(url);
+    const path = boxId && filePath(url);
     return path ? fileUrl(boxId, path) : defaultUrlTransform(url);
   };
 

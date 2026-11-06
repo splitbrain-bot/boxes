@@ -27,7 +27,7 @@ beforeEach(() => {
   workspace = mkdtempSync(join(tmpdir(), 'boxes-attach-'));
   outside = mkdtempSync(join(tmpdir(), 'boxes-attach-outside-'));
   setFileServiceSpawnerForTests(
-    inProcessFileService(() => ({ workspace, home: workspace, nix: workspace })),
+    inProcessFileService(() => ({ workspace, home: workspace, nix: workspace, tmp: workspace })),
   );
   files = fileService('box');
 });

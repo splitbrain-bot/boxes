@@ -296,6 +296,7 @@ beforeEach(async () => {
         workspace: ws.workspacePath(dir, row!.id),
         home: ws.homePath(dir, row!.id),
         nix: ws.nixPath(dir, row!.id),
+        tmp: ws.workspacePath(dir, row!.id),
       };
     }),
   );
@@ -780,8 +781,10 @@ describe('making a box ready', () => {
     // The diagrams skill of the orchestrator comes with every set.
     assert.deepEqual(managed('a1'), [
       '.agents/skills/diagrams',
+      '.agents/skills/environment',
       '.agents/skills/ship',
       '.claude/skills/diagrams',
+      '.claude/skills/environment',
       '.claude/skills/ship',
     ]);
     assert.equal(

@@ -113,7 +113,7 @@ export function isMissing(err: unknown): boolean {
 
 /**
  * Checks if an error is the file service refusing a path because it
- * is malformed, outside the workspace, a link, or missing.
+ * is malformed, outside the served directories, a link, or missing.
  *
  * @param err The error.
  * @returns True for a FileServiceError with status 400, 403 or 404.
@@ -391,16 +391,16 @@ export class FileService {
    * has no cap and no timeout, because the caller pipes it to a reader that
    * sets the pace.
    *
-   * @param relPath The path, relative to the workspace.
+   * @param path The absolute path in the box, in a directory that the file service serves.
    * @returns The size and the content.
    * @throws Error when the service sends no length.
    */
-  async readStream(relPath: string): Promise<FileStream> {
+  async readStream(path: string): Promise<FileStream> {
     return this.retried(async () => {
       const reply = await this.send({
         method: 'GET',
         route: FILE_ROUTES.raw,
-        query: { path: relPath },
+        query: { path },
       });
       if (reply.status !== 200) await this.fail(reply);
       const size = Number(reply.headers['content-length']);

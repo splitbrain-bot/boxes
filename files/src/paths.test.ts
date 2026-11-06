@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'vitest';
 import { validRelativePath } from '../../shared/files.ts';
-import { resolveInRoot } from './paths.ts';
+import { resolveInRoot, resolveInRoots } from './paths.ts';
 
 /** The root directory of one test, which stands for the workspace. */
 let root: string;
@@ -139,5 +139,34 @@ describe('resolveInRoot', () => {
     writeFileSync(join(root, 'a.txt'), 'x');
     const result = resolveInRoot(linked, 'a.txt');
     assert.ok(result.ok);
+  });
+});
+
+describe('resolveInRoots', () => {
+  test('serves a file under the root whose path in the box starts the path', () => {
+    writeFileSync(join(root, 'a.txt'), 'x');
+    writeFileSync(join(outside, 'b.txt'), 'y');
+    const roots = { '/workspace': root, '/tmp': outside };
+    const a = resolveInRoots(roots, '/workspace/a.txt');
+    assert.ok(a.ok);
+    assert.equal(readFileSync(a.path, 'utf8'), 'x');
+    const b = resolveInRoots(roots, '/tmp/b.txt');
+    assert.ok(b.ok);
+    assert.equal(readFileSync(b.path, 'utf8'), 'y');
+  });
+
+  test('refuses a path outside every root, a relative path and a traversal', () => {
+    const roots = { '/workspace': root };
+    for (const [path, reason] of [
+      ['/etc/passwd', 'outside'],
+      ['/workspaces/a.txt', 'outside'],
+      ['a.txt', 'invalid'],
+      ['/workspace/../secret.txt', 'invalid'],
+      ['/workspace//a.txt', 'invalid'],
+    ] as const) {
+      const result = resolveInRoots(roots, path);
+      assert.equal(result.ok, false, path);
+      assert.equal(result.ok === false && result.reason, reason, path);
+    }
   });
 });

@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { builtinSkills } from './builtin-skills.ts';
 
-test('diagrams always, share-app only with the Dev Tunnels credential', () => {
+test('environment and diagrams always, share-app only with the Dev Tunnels credential', () => {
   const names = (has: boolean) => builtinSkills({ hasCredential: () => has }).map((s) => s.name);
-  assert.deepEqual(names(false), ['diagrams']);
-  assert.deepEqual(names(true), ['diagrams', 'share-app']);
+  assert.deepEqual(names(false), ['environment', 'diagrams']);
+  assert.deepEqual(names(true), ['environment', 'diagrams', 'share-app']);
 });
 
 test('the content is the SKILL.md of the skill', () => {

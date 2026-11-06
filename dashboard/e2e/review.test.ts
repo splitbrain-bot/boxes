@@ -260,7 +260,9 @@ test('a binary is listed, and opens in a tab of its own with its own type', asyn
       .locator('..')
       .getByRole('link', { name: 'Open in a new tab' });
     const [tab] = await Promise.all([page.context().waitForEvent('page'), link.click()]);
-    await expect.poll(() => tab.url()).toContain('/files/raw?path=notes%2Fchart.png');
+    await expect
+      .poll(() => tab.url())
+      .toContain('/files/raw?path=%2Fworkspace%2Fnotes%2Fchart.png');
     const res = await page.request.get(new URL((await link.getAttribute('href'))!, stub.url).href);
     expect(res.headers()['content-type']).toBe('image/png');
     expect(await res.body()).toEqual(Buffer.from('PNG\0bytes'));
@@ -281,7 +283,9 @@ test('a text file opens in a tab of its own from the toolbar', async () => {
     await expect.poll(() => page.getByText('plain text, no grammar').isVisible()).toBe(true);
     const link = page.getByRole('link', { name: 'Open in a new tab' });
     expect(await link.getAttribute('target')).toBe('_blank');
-    expect(await link.getAttribute('href')).toContain('/files/raw?path=notes%2Ftodo.txt');
+    expect(await link.getAttribute('href')).toContain(
+      '/files/raw?path=%2Fworkspace%2Fnotes%2Ftodo.txt',
+    );
     // The server sends inline only the types that a browser shows, and .txt is not one of them.
     const res = await page.request.get(new URL((await link.getAttribute('href'))!, stub.url).href);
     expect(res.headers()['content-disposition']).toMatch(/^attachment;/);
