@@ -319,6 +319,8 @@ test('a stored image is served back as itself, for the thread to show', async ()
   assert.equal(res.headers['content-type'], 'image/png');
   assert.match(res.headers['content-disposition'] as string, /^inline/);
   assert.equal(res.headers['x-content-type-options'], 'nosniff');
+  // The agent can change the file, so a later view must load it again.
+  assert.equal(res.headers['cache-control'], 'no-store');
   assert.equal(res.body, 'PNGDATA');
 });
 

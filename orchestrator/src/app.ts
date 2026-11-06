@@ -226,8 +226,9 @@ function sendBoxFile(reply: FastifyReply, stream: Readable, name: string, size: 
     'X-Content-Type-Options': 'nosniff',
     // The policy lets the browser show an SVG, but nothing in it can run or fetch.
     'Content-Security-Policy': served.csp,
-    // Short, because the agent can rewrite the file under a stable name.
-    'Cache-Control': 'private, max-age=60',
+    // The agent can rewrite the file under the same name, and the dashboard
+    // never reloads its page, so the browser must not keep a copy.
+    'Cache-Control': 'no-store',
   });
   return stream;
 }
