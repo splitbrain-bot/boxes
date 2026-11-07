@@ -315,23 +315,27 @@ type ImageZoomProps = PropsWithChildren<{
   alt?: string;
   /** Boxes edit: classes for the image in the full screen view. */
   contentClassName?: string;
+  /** Boxes edit: true for a trigger that is an inline element, for an image in a paragraph. */
+  inline?: boolean;
 }>;
 
 /**
  * A trigger that shows an image full screen in an overlay. Escape, a click and
  * the close button close it, and the focus stays in the overlay while it is open.
  *
- * @param props The source, the alt text, the classes of the full image and the trigger content.
+ * @param props The source, the alt text, the classes of the full image, the inline flag and the trigger content.
  */
 function ImageZoom({
   src,
   alt = "Image preview",
   contentClassName,
+  inline = false,
   children,
 }: ImageZoomProps) {
   const [isMounted, setIsMounted] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const triggerRef = useRef<HTMLDivElement>(null);
+  const Trigger = inline ? "span" : "div";
   const closeRef = useRef<HTMLButtonElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
 
@@ -390,17 +394,20 @@ function ImageZoom({
 
   return (
     <>
-      <div
+      <Trigger
         ref={triggerRef}
         onClick={handleOpen}
         onKeyDown={(e) => e.key === "Enter" && handleOpen()}
         role="button"
         tabIndex={0}
-        className="aui-image-zoom-trigger cursor-zoom-in"
+        className={cn(
+          "aui-image-zoom-trigger cursor-zoom-in",
+          inline && "inline-block max-w-full",
+        )}
         aria-label="Click to zoom image"
       >
         {children}
-      </div>
+      </Trigger>
       {isMounted &&
         isOpen &&
         createPortal(

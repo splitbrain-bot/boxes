@@ -654,6 +654,13 @@ test('a markdown image or link with a workspace path loads the file from the box
     );
     expect(await image.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBe(40);
 
+    // A tap opens the image full screen, as with an image part.
+    await image.click();
+    const zoomed = page.locator('[data-slot="image-zoom-content"]');
+    await expect.poll(() => zoomed.isVisible()).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => zoomed.count()).toBe(0);
+
     const link = page.getByRole('link', { name: 'the notes' });
     const href = await link.getAttribute('href');
     expect(href).toBe(`/api/boxes/${BOX.id}/files/raw?path=%2Fworkspace%2Fdocs%2Fnotes.txt`);
