@@ -6,10 +6,13 @@ const WORKSPACE_DIR = '/workspace';
  *
  * @param boxId The id of the box.
  * @param path The absolute path of the file in the box.
+ * @param view A number that makes the URL different from the URL of an earlier view of the same file, so the
+ *   browser loads the file again. Undefined for a URL without it.
  * @returns The URL path.
  */
-export function fileUrl(boxId: string, path: string): string {
-  return `/api/boxes/${encodeURIComponent(boxId)}/files/raw?path=${encodeURIComponent(path)}`;
+export function fileUrl(boxId: string, path: string, view?: number): string {
+  const query = `path=${encodeURIComponent(path)}${view === undefined ? '' : `&view=${view}`}`;
+  return `/api/boxes/${encodeURIComponent(boxId)}/files/raw?${query}`;
 }
 
 /**

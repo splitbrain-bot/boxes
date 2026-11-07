@@ -10,7 +10,7 @@ import {
 } from "@assistant-ui/react-markdown";
 import { defaultUrlTransform, type UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { type FC, memo, useMemo, useRef } from "react";
+import { type FC, memo, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router";
 import type { TextMessagePartProps } from "@assistant-ui/react";
 import { CheckIcon, CopyIcon } from "lucide-react";
@@ -60,7 +60,14 @@ const useShallowStable = <T extends Record<string, unknown> | undefined>(
  */
 const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
   const { id: boxId } = useParams();
-  const urlTransform = useMemo(() => urlTransformFor(boxId), [boxId]);
+  // Boxes edit: the browser keeps an image of the page in memory, whatever
+  // the cache headers say. So each view of the message gets file URLs of its
+  // own, and the browser loads the files again.
+  const [view] = useState(() => ++views);
+  const urlTransform = useMemo(
+    () => urlTransformFor(boxId, view),
+    [boxId, view],
+  );
   const stableComponents = useShallowStable(components);
   const markdownComponents = useMemo(() => {
     if (!stableComponents) return defaultComponents;
@@ -85,6 +92,9 @@ const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
 /** The memoized markdown text part. */
 export const MarkdownText = memo(MarkdownTextImpl);
 
+/** Boxes edit: counts the views of messages, so each view gets file URLs of its own. */
+let views = 0;
+
 /**
  * Boxes edit: makes the filter for the URLs of links and images.
  *
@@ -93,14 +103,15 @@ export const MarkdownText = memo(MarkdownTextImpl);
  * URLs go through the default filter.
  *
  * @param boxId The id of the box, or undefined outside the view of a box.
+ * @param view The number of the view of the message, for the file URLs.
  * @returns The filter.
  */
 const urlTransformFor =
-  (boxId: string | undefined): UrlTransform =>
+  (boxId: string | undefined, view: number): UrlTransform =>
   (url, key) => {
     if (key === "src" && /^data:image\//i.test(url)) return url;
     const path = boxId && filePath(url);
-    return path ? fileUrl(boxId, path) : defaultUrlTransform(url);
+    return path ? fileUrl(boxId, path, view) : defaultUrlTransform(url);
   };
 
 /** Boxes edit: the components by code block language. A mermaid code block shows as a diagram. */
