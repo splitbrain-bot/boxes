@@ -649,8 +649,12 @@ test('a markdown image or link with a workspace path loads the file from the box
     await input.press('Control+Enter');
     const image = page.getByAltText('a chart');
     await expect.poll(() => image.isVisible(), { timeout: 10_000 }).toBe(true);
-    expect(await image.getAttribute('src')).toBe(
-      `/api/boxes/${BOX.id}/files/raw?path=%2Fworkspace%2Fdocs%2Fchart.svg`,
+    // The number at the end changes with each view of the message, so the
+    // browser does not reuse an image that it loaded before.
+    expect(await image.getAttribute('src')).toMatch(
+      new RegExp(
+        `^/api/boxes/${BOX.id}/files/raw\\?path=%2Fworkspace%2Fdocs%2Fchart\\.svg&view=\\d+$`,
+      ),
     );
     expect(await image.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBe(40);
 
@@ -663,9 +667,22 @@ test('a markdown image or link with a workspace path loads the file from the box
 
     const link = page.getByRole('link', { name: 'the notes' });
     const href = await link.getAttribute('href');
-    expect(href).toBe(`/api/boxes/${BOX.id}/files/raw?path=%2Fworkspace%2Fdocs%2Fnotes.txt`);
+    expect(href).toMatch(
+      new RegExp(
+        `^/api/boxes/${BOX.id}/files/raw\\?path=%2Fworkspace%2Fdocs%2Fnotes\\.txt&view=\\d+$`,
+      ),
+    );
     const res = await page.request.get(new URL(href!, stub.url).href);
     expect(await res.text()).toBe('some notes\n');
+
+    // A second answer with the same image gets a URL of its own.
+    await input.fill('show me the chart again');
+    await input.press('Control+Enter');
+    const images = page.getByAltText('a chart');
+    await expect.poll(() => images.count(), { timeout: 10_000 }).toBe(2);
+    expect(await images.last().getAttribute('src')).not.toBe(
+      await images.first().getAttribute('src'),
+    );
     expect(errors).toEqual([]);
   } finally {
     await close();

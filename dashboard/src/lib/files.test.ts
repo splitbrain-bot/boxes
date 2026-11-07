@@ -8,6 +8,10 @@ test('a file is fetched by its path in the box, from its box', () => {
     '/api/boxes/abc123/files/raw?path=%2Ftmp%2Fcake%2Fslice.png',
   );
   assert.equal(
+    fileUrl('abc123', '/tmp/cake/slice.png', 7),
+    '/api/boxes/abc123/files/raw?path=%2Ftmp%2Fcake%2Fslice.png&view=7',
+  );
+  assert.equal(
     workspaceFileUrl('abc123', '.boxes/attachments/shot.png'),
     '/api/boxes/abc123/files/raw?path=%2Fworkspace%2F.boxes%2Fattachments%2Fshot.png',
   );
