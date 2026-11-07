@@ -15,6 +15,7 @@ import { useParams } from "react-router";
 import type { TextMessagePartProps } from "@assistant-ui/react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
+import { ImageZoom } from "@/components/assistant-ui/elements/image";
 import { MermaidDiagram } from "@/components/assistant-ui/elements/mermaid-diagram";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
@@ -217,6 +218,25 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
+  // Boxes edit: a tap opens the image in the full screen view that an image
+  // part uses, where the pinch zoom of the browser works.
+  img: ({ className, src, alt, ...props }) => {
+    const image = (
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        className={cn("aui-md-img h-auto max-w-full", className)}
+        {...props}
+      />
+    );
+    if (typeof src !== "string" || src === "") return image;
+    return (
+      <ImageZoom src={src} alt={alt} inline>
+        {image}
+      </ImageZoom>
+    );
+  },
   blockquote: ({ className, ...props }) => (
     <blockquote
       className={cn(
