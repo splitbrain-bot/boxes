@@ -69,9 +69,14 @@ fi
 
 # --- directories an agent needs to find already there ------------------------
 # npm install -g needs its prefix to exist, and Codex fails on a missing
-# CODEX_HOME. The seed holds neither directory.
+# CODEX_HOME. .NET programs such as devtunnel put their data into the working
+# directory when ~/.local/share is missing. The seed holds none of these
+# directories.
 if ! mkdir -p /home/agent/.local/bin; then
   fail "could not create /home/agent/.local/bin; installing tools would fail"
+fi
+if ! mkdir -p /home/agent/.local/share; then
+  fail "could not create /home/agent/.local/share; devtunnel would write into the working directory"
 fi
 if ! mkdir -p "${CODEX_HOME:-/home/agent/.codex}"; then
   fail "could not create ${CODEX_HOME:-/home/agent/.codex}; Codex would not start"

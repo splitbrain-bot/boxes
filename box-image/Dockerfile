@@ -125,7 +125,9 @@ RUN arch="$(dpkg --print-architecture)" \
 # The Microsoft Dev Tunnels CLI, which the share-app skill hosts a tunnel
 # with. It is one self-contained binary with no package, so the version and
 # the checksum of each build are pinned here. The version check runs it as
-# root, and the step removes the files it unpacks into root's home.
+# root, and the step removes the files it unpacks into root's home. Root has
+# no ~/.local/share, thus the CLI puts its data folder into the working
+# directory, and the step removes it there.
 #
 # The CLI is a .NET program, and .NET aborts at start without ICU.
 ARG DEVTUNNEL_VERSION=1.0.2094+24665e6583
@@ -143,7 +145,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libicu78 \
  && echo "$sha  /usr/local/bin/devtunnel" | sha256sum -c - \
  && chmod 0755 /usr/local/bin/devtunnel \
  && devtunnel --version | grep -qF "${DEVTUNNEL_VERSION}" \
- && rm -rf /root/.net /root/.local/share/DevTunnels
+ && rm -rf /root/.net /DevTunnels
 
 # The agent and the adapter, each pinned to a major line. Below 1.0, the caret
 # pins the minor instead. Do not switch to @zed-industries/claude-code-acp,
