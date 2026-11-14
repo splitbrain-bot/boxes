@@ -9,6 +9,7 @@ import { CodePane, type ScrollTarget } from '@/components/review/CodePane';
 import { CommentCard } from '@/components/review/CommentCard';
 import { ComposerSheet, InlineComposer } from '@/components/review/CommentComposer';
 import { HunkSheet } from '@/components/review/HunkSheet';
+import { MarkdownPreview } from '@/components/review/MarkdownPreview';
 import { ReviewToolbar } from '@/components/review/ReviewToolbar';
 import { ReviewTree } from '@/components/review/ReviewTree';
 import { Shelf } from '@/components/Shelf';
@@ -21,7 +22,7 @@ import { useScrollAway } from '@/hooks/use-scroll-away';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
 import { anchorAt, rowOffsets, type ScrollAnchor, scrollForAnchor } from '@/lib/anchor';
-import { workspaceFileUrl } from '@/lib/files';
+import { fileUrl, previewKind, WORKSPACE_DIR, workspaceFileUrl } from '@/lib/files';
 import { withinLineLimit } from '@/lib/highlight';
 import { historyIndex } from '@/lib/history';
 import { stagePrompt } from '@/lib/staged-prompt';
@@ -78,6 +79,8 @@ export function BoxReview() {
   const [hunk, setHunk] = useState<ReviewDiffHunk | null>(null);
   /** The line that the previous and next buttons of the toolbar last requested, or null. */
   const [scrollTo, setScrollTo] = useState<ScrollTarget | null>(null);
+  /** True while the pane shows a markdown file rendered. */
+  const [previewing, setPreviewing] = useState(false);
   const [confirmNew, setConfirmNew] = useState(false);
   /** The line of the comment that a tap on a bin wants to remove, or null. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
@@ -130,9 +133,10 @@ export function BoxReview() {
     return refreshOnReturn();
   }, [id]);
 
-  // The URL decides which file is open. The hunk sheet closes with its file.
+  // The URL decides which file is open. The hunk sheet and the preview close with their file.
   useEffect(() => {
     setHunk(null);
+    setPreviewing(false);
     if (path) void loadFile(path);
     else closeFile();
   }, [path]);
@@ -250,6 +254,22 @@ export function BoxReview() {
    * everything past where the read stopped.
    */
   const editable = file !== null && !file.deleted && !file.binary && !file.truncated && !tooLong;
+  /** The kind of preview that the toolbar offers. Edit mode has none. */
+  const preview = file && !file.deleted && !editing ? previewKind(file.path) : null;
+  /** True while the pane shows the rendered markdown instead of the code. */
+  const rendered = previewing && preview === 'markdown';
+  /** The absolute path of the open file in the box, or null. */
+  const imagePath = file ? `${WORKSPACE_DIR}/${file.path}` : null;
+  /** The hash of the open file, which changes when the file changes. */
+  const imageHash = file?.hash;
+  /**
+   * The URL of the image for the lightbox. It changes with the hash of the file, because the browser keeps an image
+   * of the page in memory, whatever the cache headers say.
+   */
+  const imageSrc = useMemo(
+    () => (imagePath && imageHash !== undefined ? fileUrl(id, imagePath, ++imageViews) : ''),
+    [id, imagePath, imageHash],
+  );
 
   // Restores the reader's line before the new mode paints.
   useLayoutEffect(() => {
@@ -410,11 +430,13 @@ export function BoxReview() {
   useViewportLock();
 
   // Hides the header while reading down and shows it on a scroll back up.
-  const { away, container, reset } = useScrollAway('[data-slot="review-code-pane"]');
+  const { away, container, reset } = useScrollAway(
+    '[data-slot="review-code-pane"], [data-slot="review-preview"]',
+  );
 
-  // Shows the header again when the open file changes. Below md, the list's
+  // Shows the header again when the open file or the pane changes. Below md, the list's
   // only way out is the button in that header.
-  useEffect(reset, [reset, path]);
+  useEffect(reset, [reset, path, rendered]);
 
   useDocumentTitle(
     [file ? shortPath(file.path) : null, 'Review', name].filter(Boolean).join(' · '),
@@ -551,8 +573,8 @@ export function BoxReview() {
               <ReviewToolbar
                 changeCount={changedLines.length}
                 commentCount={commentedLines.length}
-                // A file shown as one block has no rows to step to.
-                steppable={!tooLong}
+                // A file shown as one block or rendered has no rows to step to.
+                steppable={!tooLong && !rendered}
                 wrap={wrap}
                 editable={editable}
                 editing={editing}
@@ -560,12 +582,26 @@ export function BoxReview() {
                 busy={saving}
                 // A deleted file has no bytes left to serve.
                 openHref={file.deleted ? null : workspaceFileUrl(id, file.path)}
+                preview={preview}
+                previewing={rendered}
+                imageSrc={imageSrc}
                 onWrap={() => setWrap((w) => !w)}
                 onStepChange={(direction) => step(changedLines, direction)}
                 onStepComment={(direction) => step(commentedLines, direction)}
-                onEdit={() => (editing ? guard(() => switchMode(false)) : switchMode(true))}
+                onEdit={() => {
+                  if (editing) guard(() => switchMode(false));
+                  else {
+                    setPreviewing(false);
+                    switchMode(true);
+                  }
+                }}
                 onSave={() => save(false)}
                 onRevert={edit.revert}
+                onPreview={() => {
+                  // An open composer belongs to the code.
+                  compose(null);
+                  setPreviewing((on) => !on);
+                }}
               />
               {file.deleted ? (
                 <Empty>This file was deleted, so there is nothing left to read.</Empty>
@@ -619,24 +655,28 @@ export function BoxReview() {
                       </span>
                     </Notice>
                   ) : null}
-                  <CodePane
-                    scrollRef={paneRef}
-                    path={file.path}
-                    content={file.content}
-                    tokens={edit.tokens}
-                    tokensFor={edit.tokensFor}
-                    diffLines={file.diff.lines}
-                    deletions={deletions}
-                    hunkByLine={hunkByLine}
-                    annotations={annotations}
-                    composing={composing}
-                    wrap={wrap}
-                    scrollTo={scrollTo}
-                    edit={edit.text === null ? null : { text: edit.text, onChange: edit.change }}
-                    onSelectLine={selectLine}
-                    onShowHunk={showHunk}
-                    renderUnderLine={underLine}
-                  />
+                  {rendered ? (
+                    <MarkdownPreview path={file.path} content={file.content} />
+                  ) : (
+                    <CodePane
+                      scrollRef={paneRef}
+                      path={file.path}
+                      content={file.content}
+                      tokens={edit.tokens}
+                      tokensFor={edit.tokensFor}
+                      diffLines={file.diff.lines}
+                      deletions={deletions}
+                      hunkByLine={hunkByLine}
+                      annotations={annotations}
+                      composing={composing}
+                      wrap={wrap}
+                      scrollTo={scrollTo}
+                      edit={edit.text === null ? null : { text: edit.text, onChange: edit.change }}
+                      onSelectLine={selectLine}
+                      onShowHunk={showHunk}
+                      renderUnderLine={underLine}
+                    />
+                  )}
                 </>
               )}
             </>
@@ -715,6 +755,9 @@ export function BoxReview() {
     </div>
   );
 }
+
+/** Counts the image URLs of the lightbox, so each new URL differs from the earlier ones. */
+let imageViews = 0;
 
 /**
  * Checks if a click is a plain left click. A modified click opens a tab or a

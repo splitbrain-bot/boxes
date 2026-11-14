@@ -2,13 +2,15 @@ import {
   ChevronDown,
   ChevronUp,
   ExternalLink,
+  Eye,
   GitCompare,
   MessageSquare,
   Pencil,
   Undo2,
   WrapText,
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { ImageZoom } from '@/components/assistant-ui/elements/image';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 /**
@@ -26,12 +28,16 @@ import { cn } from '@/lib/utils';
  * @param dirty True when there are unsaved changes.
  * @param busy True while a write is in flight.
  * @param openHref The URL that serves the bytes of the file, or null for a file with none.
+ * @param preview The kind of preview of the file, or null when the file has none or the pane is in edit mode.
+ * @param previewing True while the pane shows the rendered markdown.
+ * @param imageSrc The URL of the image for the lightbox.
  * @param onWrap Called when the user toggles wrapping.
  * @param onStepChange Called with -1 for the previous change or 1 for the next.
  * @param onStepComment Called with -1 for the previous comment or 1 for the next.
  * @param onEdit Called when the user switches edit mode on or off.
  * @param onSave Called when the user saves the file.
  * @param onRevert Called when the user discards the unsaved changes.
+ * @param onPreview Called when the user switches the markdown preview on or off.
  */
 export function ReviewToolbar({
   changeCount,
@@ -43,12 +49,16 @@ export function ReviewToolbar({
   dirty,
   busy,
   openHref,
+  preview,
+  previewing,
+  imageSrc,
   onWrap,
   onStepChange,
   onStepComment,
   onEdit,
   onSave,
   onRevert,
+  onPreview,
 }: {
   /** The number of changes in the file. */
   changeCount: number;
@@ -68,6 +78,12 @@ export function ReviewToolbar({
   busy: boolean;
   /** The URL that serves the bytes of the file, or null for a file with none. */
   openHref: string | null;
+  /** The kind of preview of the file, or null when the file has none or the pane is in edit mode. */
+  preview: 'image' | 'markdown' | null;
+  /** True while the pane shows the rendered markdown. */
+  previewing: boolean;
+  /** The URL of the image for the lightbox. */
+  imageSrc: string;
   /** Called when the user toggles wrapping. */
   onWrap: () => void;
   /** Called with -1 for the previous change or 1 for the next. */
@@ -80,6 +96,8 @@ export function ReviewToolbar({
   onSave: () => void;
   /** Called when the user discards the unsaved changes. */
   onRevert: () => void;
+  /** Called when the user switches the markdown preview on or off. */
+  onPreview: () => void;
 }) {
   return (
     <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1 text-xs">
@@ -99,6 +117,30 @@ export function ReviewToolbar({
         onStep={onStepComment}
       />
       <span className="flex-1" />
+
+      {preview === 'image' ? (
+        <ImageZoom src={imageSrc} alt="" inline>
+          <span
+            className={buttonVariants({ variant: 'ghost', size: 'icon-sm' })}
+            title="Show the image"
+          >
+            <Eye />
+          </span>
+        </ImageZoom>
+      ) : preview === 'markdown' ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-pressed={previewing}
+          onClick={onPreview}
+          title={previewing ? 'Show the source' : 'Show the rendered file'}
+          aria-label={previewing ? 'Show the source' : 'Show the rendered file'}
+          className={cn(previewing && 'bg-accent text-accent-foreground')}
+        >
+          <Eye />
+        </Button>
+      ) : null}
 
       {/* A plain link, so the browser handles the file by its type. */}
       {openHref ? (

@@ -22,10 +22,12 @@ import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { filePath, fileUrl } from "@/lib/files";
 import { cn } from "@/lib/utils";
 
-/** The props of {@link MarkdownText}: the text part props and extra markdown components. */
+/** The props of {@link MarkdownText}: the text part props, extra markdown components and the base directory. */
 type MarkdownTextProps = Partial<TextMessagePartProps> & {
   /** Components that replace the default components for some elements. */
   components?: Parameters<typeof memoizeMarkdownComponents>[0];
+  /** Boxes edit: the absolute directory in the box where a relative path starts. The default is the workspace. */
+  baseDir?: string;
 };
 
 /**
@@ -57,16 +59,17 @@ const useShallowStable = <T extends Record<string, unknown> | undefined>(
  * file in the box loads the file from the box.
  *
  * @param components Components that replace the default components for some elements.
+ * @param baseDir The absolute directory in the box where a relative path starts. The default is the workspace.
  */
-const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
+const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components, baseDir }) => {
   const { id: boxId } = useParams();
   // Boxes edit: the browser keeps an image of the page in memory, whatever
   // the cache headers say. So each view of the message gets file URLs of its
   // own, and the browser loads the files again.
   const [view] = useState(() => ++views);
   const urlTransform = useMemo(
-    () => urlTransformFor(boxId, view),
-    [boxId, view],
+    () => urlTransformFor(boxId, view, baseDir),
+    [boxId, view, baseDir],
   );
   const stableComponents = useShallowStable(components);
   const markdownComponents = useMemo(() => {
@@ -104,13 +107,14 @@ let views = 0;
  *
  * @param boxId The id of the box, or undefined outside the view of a box.
  * @param view The number of the view of the message, for the file URLs.
+ * @param baseDir The absolute directory in the box where a relative path starts, or undefined for the workspace.
  * @returns The filter.
  */
 const urlTransformFor =
-  (boxId: string | undefined, view: number): UrlTransform =>
+  (boxId: string | undefined, view: number, baseDir?: string): UrlTransform =>
   (url, key) => {
     if (key === "src" && /^data:image\//i.test(url)) return url;
-    const path = boxId && filePath(url);
+    const path = boxId && filePath(url, baseDir);
     return path ? fileUrl(boxId, path, view) : defaultUrlTransform(url);
   };
 
