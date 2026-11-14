@@ -296,6 +296,101 @@ test('a text file opens in a tab of its own from the toolbar', async () => {
   }
 });
 
+test('a markdown file shows rendered, with its images and diagrams', async () => {
+  const base = reviewWorkspace();
+  stub.review(
+    BOX,
+    reviewWorkspace({
+      files: {
+        ...base.files,
+        'app/doc/guide.md':
+          '# Guide\n\n![a chart](../img/chart.svg)\n\n```mermaid\nflowchart LR\n  A --> B\n```\n',
+        'app/img/chart.svg':
+          '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20"/></svg>',
+      },
+    }),
+  );
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/review?path=app%2Fdoc%2Fguide.md`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect.poll(() => page.getByText('# Guide').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Show the rendered file' }).click();
+    await expect.poll(() => page.getByRole('heading', { name: 'Guide' }).isVisible()).toBe(true);
+
+    // A relative path starts from the directory of the file.
+    const image = page.getByAltText('a chart');
+    await expect.poll(() => image.isVisible()).toBe(true);
+    expect(await image.getAttribute('src')).toContain('path=%2Fworkspace%2Fapp%2Fimg%2Fchart.svg');
+    expect(await image.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBe(40);
+    await image.click();
+    const zoomed = page.locator('[data-slot="image-zoom-content"]');
+    await expect.poll(() => zoomed.isVisible()).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => zoomed.count()).toBe(0);
+
+    await expect.poll(() => page.locator('.aui-md-mermaid img').isVisible()).toBe(true);
+    await shoot(page, 'review-markdown-desktop');
+
+    await page.getByRole('button', { name: 'Show the source' }).click();
+    await expect.poll(() => page.getByText('# Guide').isVisible()).toBe(true);
+
+    // Edit mode leaves the preview and hides its button.
+    await page.getByRole('button', { name: 'Show the rendered file' }).click();
+    await page.getByRole('button', { name: 'Edit this file' }).click();
+    await expect.poll(() => page.getByRole('textbox').isVisible()).toBe(true);
+    expect(await page.getByRole('button', { name: 'Show the rendered file' }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('an image opens in the lightbox from the toolbar', async () => {
+  const base = reviewWorkspace();
+  stub.review(
+    BOX,
+    reviewWorkspace({
+      files: {
+        ...base.files,
+        'notes/chart.svg':
+          '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20"/></svg>',
+      },
+    }),
+  );
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/review?path=notes%2Fchart.svg`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect.poll(() => page.getByText('<svg').isVisible()).toBe(true);
+    await page.getByTitle('Show the image').click();
+    const zoomed = page.locator('[data-slot="image-zoom-content"]');
+    await expect.poll(() => zoomed.isVisible()).toBe(true);
+    expect(await zoomed.getAttribute('src')).toMatch(
+      /\/files\/raw\?path=%2Fworkspace%2Fnotes%2Fchart\.svg&view=\d+$/,
+    );
+    expect(await zoomed.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBe(40);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => zoomed.count()).toBe(0);
+
+    // A file of another type has no preview.
+    await page.getByRole('button', { name: /^notes/ }).click();
+    await page.getByRole('button', { name: /todo\.txt/ }).click();
+    await expect.poll(() => page.getByText('plain text, no grammar').isVisible()).toBe(true);
+    expect(await page.getByTitle('Show the image').count()).toBe(0);
+    expect(await page.getByRole('button', { name: 'Show the rendered file' }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a file past the line limit is one plain block with nothing to tap', async () => {
   // Long enough that a row per line gives tens of thousands of elements, which
   // freezes a phone. One line changed, so the toolbar has something to count.

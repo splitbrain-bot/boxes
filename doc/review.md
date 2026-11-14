@@ -18,11 +18,12 @@ them. Select a changed line number to view its complete diff hunk.
 By default, each repository is compared with its own `HEAD`: the view highlights the changes made in the workspace since
 the last commit. To compare with a different base, select the comparison control and enter a branch, tag, or commit.
 
-## Opening or downloading files
+## Opening, previewing or downloading files
 
 Select **Open in a new tab** in the file header to open the original workspace file outside the review tool. The browser
-displays the file when it supports that type, or downloads it when it does not. This is useful for binary files, which
-the review tool cannot display.
+displays the file when it supports that type, or downloads it when it does not.
+
+Select the eye button to show an image (PNG, JPEG, GIF, WebP or SVG) full screen, or to render a markdown file.
 
 ## Modes
 
