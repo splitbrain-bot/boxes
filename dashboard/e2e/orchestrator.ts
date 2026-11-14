@@ -452,10 +452,11 @@ export interface TestOrchestrator {
    *
    * @param boxId The box id.
    * @param path The path of the file, relative to the workspace.
-   * @param line The line number of the comment.
+   * @param line The line number of the comment, or the first line of its block.
    * @param text The text of the comment.
+   * @param endLine The last line of the block, or 0 for a comment on one line.
    */
-  comment(boxId: string, path: string, line: number, text: string): Promise<void>;
+  comment(boxId: string, path: string, line: number, text: string, endLine?: number): Promise<void>;
   /**
    * Reads the comments on one file through the real API.
    *
@@ -1298,11 +1299,12 @@ export async function startOrchestrator(
     write: (boxId, path, content) => writeFile(workspaceOf(boxId), path, content),
     read: (boxId, path) => readFileSync(join(workspaceOf(boxId), path), 'utf8'),
     hasReview: (boxId) => existsSync(join(workspaceOf(boxId), 'REVIEW.md')),
-    comment: async (boxId, path, line, text) => {
+    comment: async (boxId, path, line, text, endLine = 0) => {
       await setup('PUT', `/api/boxes/${boxId}/review/annotations`, {
         path,
         line,
         comment: text,
+        ...(endLine > 0 ? { endLine } : {}),
       });
     },
     comments: async (boxId, path) => {

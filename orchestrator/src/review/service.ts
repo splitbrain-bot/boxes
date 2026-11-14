@@ -418,25 +418,31 @@ export class ReviewService {
   }
 
   /**
-   * Adds or replaces the comment on one line.
+   * Adds or replaces the comment on one line or one block of lines.
    *
    * @param id The box id.
    * @param relPath The workspace-relative path of the file.
-   * @param line The line number, starting at 1.
+   * @param line The line number, starting at 1. For a block, its first line.
    * @param comment The comment. The method trims it.
+   * @param endLine The last line of a block, or 0 for a comment on one line.
    * @returns The comments of the file after the drift check.
-   * @throws {HttpError} 400 for a line that is not a positive integer or a comment that is empty or longer
-   *   than 20000 characters, 404 for a path that the review does not offer, 409 for a deleted file or when
-   *   REVIEW.md changes during both write attempts.
+   * @throws {HttpError} 400 for a line that is not a positive integer, an end line that is not an integer at or
+   *   past the line and inside the file, or a comment that is empty or longer than 20000 characters, 404 for a
+   *   path that the review does not offer, 409 for a deleted file or when REVIEW.md changes during both write
+   *   attempts.
    */
   async setAnnotation(
     id: string,
     relPath: string,
     line: number,
     comment: string,
+    endLine = 0,
   ): Promise<ReviewAnnotation[]> {
     if (!Number.isInteger(line) || line < 1) {
       throw new HttpError(400, 'line must be a positive integer');
+    }
+    if (!Number.isInteger(endLine) || (endLine !== 0 && endLine < line)) {
+      throw new HttpError(400, 'endLine must be 0 or a line at or past line');
     }
     const text = comment.trim();
     if (text === '') throw new HttpError(400, 'comment is required');
@@ -449,9 +455,10 @@ export class ReviewService {
       throw new HttpError(409, 'This file was deleted, so there is no line to comment on.');
     }
     const source = fileLines((await box.files.read(relPath, MAX_FILE_BYTES)).content);
+    if (endLine > source.length) throw new HttpError(400, 'endLine is past the end of the file');
 
     await this.mutate(id, box.files, relPath, (review) => {
-      setAnnotation(review, relPath, line, text, source);
+      setAnnotation(review, relPath, line, text, source, endLine);
     });
     return this.drifted(id, box.files, relPath);
   }
@@ -920,9 +927,14 @@ function failedCondition(err: unknown): boolean {
  * @returns The annotations in line order.
  */
 function toAnnotations(
-  annotations: Map<number, { comment: string; outdated: boolean }>,
+  annotations: Map<number, { comment: string; endLine: number; outdated: boolean }>,
 ): ReviewAnnotation[] {
   return [...annotations.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([line, ann]) => ({ line, comment: ann.comment, outdated: ann.outdated }));
+    .map(([line, ann]) => ({
+      line,
+      endLine: ann.endLine,
+      comment: ann.comment,
+      outdated: ann.outdated,
+    }));
 }

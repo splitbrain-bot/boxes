@@ -1,12 +1,13 @@
-import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo } from 'react';
 import { Notice } from '@/components/Notice';
+import { anchorAt, rowOffsets, scrollForAnchor } from '@/lib/anchor';
 import { type Token, withinLineLimit } from '@/lib/highlight';
 import { cn } from '@/lib/utils';
 import type { ReviewAnnotation, ReviewLineChange } from '../../../../shared/types.ts';
 import { recallScroll, rememberScroll } from '../../stores/review.ts';
 
 /** The gutter bar class and row background class for each kind of changed line. */
-const CHANGE: Record<ReviewLineChange, { bar: string; row: string }> = {
+export const CHANGE: Record<ReviewLineChange, { bar: string; row: string }> = {
   added: { bar: 'bg-ok', row: 'bg-ok/8' },
   modified: { bar: 'bg-warn', row: 'bg-warn/8' },
 };
@@ -67,9 +68,9 @@ export interface CodePaneProps {
   deletions: Map<number, number>;
   /** The hunk index of each line, by line number, for the gutter to open. */
   hunkByLine: Map<number, number>;
-  /** The comments, by line number. */
+  /** The comments, by line number. A comment on a block is on its first line. */
   annotations: Map<number, ReviewAnnotation>;
-  /** The line whose composer is open, or null. */
+  /** The line whose composer is open, or the first line of the block, or null. */
   composing: number | null;
   /** True to wrap long lines, false to scroll them sideways. */
   wrap: boolean;
@@ -120,8 +121,6 @@ export function CodePane({
   onShowHunk,
   renderUnderLine,
 }: CodePaneProps) {
-  /** The path this pane has already positioned, so a poll does not re-do it. */
-  const positioned = useRef<string | null>(null);
   const editing = edit !== null;
   /** The shown text, which is the buffer while editing and the file otherwise. */
   const source = edit ? edit.text : content;
@@ -130,18 +129,19 @@ export function CodePane({
 
   /**
    * Puts each file back where it was left, and every file this review has not
-   * opened at the top.
+   * opened at the top. When the pane leaves the file, it records the place.
    *
    * It runs before paint, so the reader never sees the offset of the previous file.
-   * It positions each path once, so a poll that refetches the open file keeps
-   * the place of the reader.
+   * The view mounts the pane once per file, and the effect positions the file once,
+   * so a poll that refetches the open file keeps the place of the reader.
    */
   useLayoutEffect(() => {
     const element = scrollRef.current;
-    if (!element || positioned.current === path) return;
-    positioned.current = path;
-    element.scrollTop = recallScroll(path);
-  }, [scrollRef, path, content]);
+    if (!element) return;
+    const anchor = recallScroll(path);
+    element.scrollTop = anchor ? (scrollForAnchor(rowOffsets(element), anchor) ?? 0) : 0;
+    return () => rememberScroll(path, anchorAt(rowOffsets(element), element.scrollTop));
+  }, [scrollRef, path]);
 
   /** Brings the line that prev/next asked for into the middle of the pane. */
   useEffect(() => {
@@ -151,14 +151,16 @@ export function CodePane({
       ?.scrollIntoView({ block: 'center' });
   }, [scrollRef, scrollTo]);
 
-  /** Records where the reader is, for the next time they open this file. */
-  useEffect(() => {
-    const element = scrollRef.current;
-    if (!element) return;
-    const onScroll = (): void => rememberScroll(path, element.scrollTop);
-    element.addEventListener('scroll', onScroll, { passive: true });
-    return () => element.removeEventListener('scroll', onScroll);
-  }, [scrollRef, path]);
+  /** The comment on a block, by each line of the block after its first. These rows get its marker. */
+  const inBlock = useMemo(() => {
+    const map = new Map<number, ReviewAnnotation>();
+    for (const annotation of annotations.values()) {
+      for (let line = annotation.line + 1; line <= annotation.endLine; line++) {
+        map.set(line, annotation);
+      }
+    }
+    return map;
+  }, [annotations]);
 
   const lines = useMemo(() => (tooLong ? [] : splitLines(source)), [source, tooLong]);
   /** The lines that the tokens describe. They are the lines of the file until the user types. */
@@ -210,7 +212,7 @@ export function CodePane({
               text={text}
               tokens={tokenLines[index] === text ? (tokens?.[index] ?? null) : null}
               change={diffLines[String(index + 1)]}
-              annotation={annotations.get(index + 1)}
+              annotation={annotations.get(index + 1) ?? inBlock.get(index + 1)}
               composing={composing === index + 1}
               hunkIndex={hunkByLine.get(index + 1)}
               deletionHunk={deletions.get(index + 1)}
@@ -239,7 +241,7 @@ export function CodePane({
  * @param text The text of the line.
  * @param tokens The colours of the line, or null while it renders plain.
  * @param change The kind of change on the line, or undefined when the line did not change.
- * @param annotation The comment on the line, if any.
+ * @param annotation The comment on the line, or the comment on the block that holds the line, if any.
  * @param composing True while the composer is open on the line.
  * @param hunkIndex The hunk of the line, or undefined when the line is in no hunk.
  * @param deletionHunk The hunk of the lines deleted after this line, or undefined for none.
@@ -272,7 +274,7 @@ const Row = memo(function Row({
   tokens: Token[] | null;
   /** The kind of change on the line, or undefined when the line did not change. */
   change: ReviewLineChange | undefined;
-  /** The comment on the line, if any. */
+  /** The comment on the line, or the comment on the block that holds the line, if any. */
   annotation: ReviewAnnotation | undefined;
   /** True while the composer is open on the line. */
   composing: boolean;
@@ -486,7 +488,7 @@ function Gutter({
  * @param event The click on the code of the line.
  * @returns True when the click selected text.
  */
-function selecting(event: React.MouseEvent): boolean {
+export function selecting(event: React.MouseEvent): boolean {
   if (event.detail > 1) return true;
   const selection = window.getSelection();
   return selection !== null && !selection.isCollapsed;

@@ -31,9 +31,10 @@ The review has commenting and editing modes. It opens in commenting mode.
 
 ### Commenting
 
-Select a source line to open the comment form. Write the comment, then select **Comment** or press `Ctrl`/`Cmd`+`Enter`
-to save it. Use the buttons on an existing comment card to edit or delete it. Comments are saved in the `REVIEW.md` file
-at the workspace root.
+Select a source line to open the comment form. In a rendered markdown file, select a block, such as a paragraph or a
+list item, to comment on all lines of the block. Write the comment, then select **Comment** or press
+`Ctrl`/`Cmd`+`Enter` to save it. Use the buttons on an existing comment card to edit or delete it. Comments are saved in
+the `REVIEW.md` file at the workspace root.
 
 When the review was opened from a thread and has comments, select **Hand to agent** to switch back to the thread with a
 prepared prompt that asks the agent to read your review.
@@ -57,8 +58,9 @@ The review code lives in `orchestrator/src/review/`.
 There is no annotation table. Every mutation reads, parses, applies, serializes and writes the whole `REVIEW.md` under a
 per-box lock. The write sends the hash that was read. When the agent changed the file in between, the
 [file service](files.md) refuses the write, and the mutation is read and applied once more. Writes are atomic and keep
-the file's permissions. The format matches the desktop [`review`](https://github.com/splitbrain/review) tool byte for
-byte — the test fixtures are files that tool wrote.
+the file's permissions. The format is the format of the desktop [`review`](https://github.com/splitbrain/review) tool,
+and the test fixtures are files that tool wrote. A comment on a block of lines has the heading `#### Line 10 to 14`. The
+desktop tool reads it as a comment on line 10 and drops the range when it writes the file.
 
 ### One workspace, many repositories
 
@@ -92,9 +94,9 @@ offers. The orchestrator caps file reads at 2 MiB; a NUL byte marks a file as bi
 
 ### Drift
 
-Each comment stores three lines of context above and below its line. The drift check compares the stored context with
-the current source: an exact match elsewhere relocates the comment, no match marks it `(outdated)`. Drift runs when a
-reader arrives, on every file view, and after every comment write.
+Each comment stores three lines of context above and below its line, or above and below its block. The drift check
+compares the stored context with the current source: an exact match elsewhere relocates the comment, no match marks it
+`(outdated)`. Drift runs when a reader arrives, on every file view, and after every comment write.
 
 ### Editing
 

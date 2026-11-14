@@ -118,8 +118,9 @@ name.
 `PUT …/review/file` accepts a `ReviewFileBody` with `path`, `content`, and the `hash` the file was read at. A save over
 an edit the agent made in the meantime is refused with a 412; the reviewer can then save anyway or drop the changes.
 
-`PUT …/review/annotations` accepts a `ReviewAnnotationBody` with `path`, `line`, and `comment`, and creates or replaces
-the comment on that line. `REVIEW.md` holds at most one comment per line. DELETE removes it.
+`PUT …/review/annotations` accepts a `ReviewAnnotationBody` with `path`, `line`, `comment` and an optional `endLine`
+for a comment on a block of lines, and creates or replaces the comment on that line. `REVIEW.md` holds at most one
+comment per line, and a comment on a block counts on its first line. DELETE removes it.
 
 `PUT …/review/base` accepts `{ "rev": "…" }` and compares the whole review against that revision. `null` or absent
 clears the base back to each repository's own HEAD. The answer says where the expression resolved in each repository.

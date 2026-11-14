@@ -296,6 +296,199 @@ test('a text file opens in a tab of its own from the toolbar', async () => {
   }
 });
 
+/** A markdown file for the rendered view, with a changed paragraph and a list. */
+const GUIDE = [
+  '# Guide',
+  '',
+  'First paragraph line one',
+  'line two of first paragraph',
+  '',
+  'Second paragraph changed',
+  '',
+  '- item one',
+  '- item two',
+  '',
+  'Last paragraph',
+  '',
+].join('\n');
+
+/**
+ * Makes a workspace with the guide, where the second paragraph changed since the commit.
+ *
+ * @returns The workspace.
+ */
+function guideWorkspace(): ReturnType<typeof reviewWorkspace> {
+  const base = reviewWorkspace();
+  return reviewWorkspace({
+    files: { ...base.files, 'app/doc/guide.md': GUIDE },
+    committed: {
+      ...base.committed,
+      'app/doc/guide.md': GUIDE.replace('Second paragraph changed', 'Second paragraph original'),
+    },
+  });
+}
+
+test('a block of the rendered file is commented on, marked and stepped to', async () => {
+  stub.review(BOX, guideWorkspace());
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/review?path=app%2Fdoc%2Fguide.md`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect.poll(() => page.getByText('# Guide').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Show the rendered file' }).click();
+    await expect.poll(() => page.getByRole('heading', { name: 'Guide' }).isVisible()).toBe(true);
+
+    // The changed paragraph is one changed block, with a marker that opens its hunk.
+    await expect.poll(() => page.getByLabel('1 change').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Show the change at line 6' }).click();
+    await expect.poll(() => page.getByText('Second paragraph original').isVisible()).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => page.getByText('Second paragraph original').count()).toBe(0);
+
+    // A tap on a paragraph comments the whole paragraph.
+    await page.getByText('First paragraph line one').click();
+    await expect
+      .poll(() => page.getByRole('textbox', { name: 'Comment on lines 3 to 4' }).isVisible())
+      .toBe(true);
+    await page
+      .getByRole('textbox', { name: 'Comment on lines 3 to 4' })
+      .fill('about the first paragraph');
+    await page.getByRole('button', { name: 'Comment', exact: true }).click();
+    await expect.poll(() => stub.reviewCalls.length).toBe(1);
+    expect(stub.reviewCalls[0]).toMatchObject({
+      method: 'PUT',
+      body: { path: 'app/doc/guide.md', line: 3, endLine: 4, comment: 'about the first paragraph' },
+    });
+    // The card names the lines, under the paragraph, and REVIEW.md holds the range.
+    await expect.poll(() => page.getByText('about the first paragraph').isVisible()).toBe(true);
+    expect(await page.getByText('Lines 3 to 4').count()).toBe(1);
+    expect(stub.read(BOX, 'REVIEW.md')).toContain('#### Line 3 to 4\n');
+    await expect.poll(() => page.getByLabel('1 comment').isVisible()).toBe(true);
+    expect(await page.getByRole('button', { name: 'Next comment' }).isDisabled()).toBe(false);
+    await shoot(page, 'review-rendered-comment-desktop');
+
+    // A heading is one line, so its comment is a line comment. A tap on a list
+    // item comments the item, and not the whole list.
+    await page.getByRole('heading', { name: 'Guide' }).click();
+    await expect
+      .poll(() => page.getByRole('textbox', { name: 'Comment on line 1' }).isVisible())
+      .toBe(true);
+    await page.getByText('item two').click();
+    await expect
+      .poll(() => page.getByRole('textbox', { name: 'Comment on line 9' }).isVisible())
+      .toBe(true);
+    await page.keyboard.press('Escape');
+
+    // The source view shows the card under the first line of the block and marks
+    // every row of the block.
+    await page.getByRole('button', { name: 'Show the source' }).click();
+    await expect.poll(() => page.getByText('# Guide').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Lines 3 to 4').isVisible()).toBe(true);
+    for (const line of [3, 4]) {
+      expect(await page.locator(`[data-line="${line}"]`).getAttribute('class')).toContain(
+        'bg-primary/8',
+      );
+    }
+    expect(await page.locator('[data-line="5"]').getAttribute('class')).not.toContain(
+      'bg-primary/8',
+    );
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('a block comment on a phone goes through the sheet', async () => {
+  stub.review(BOX, guideWorkspace());
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/review?path=app%2Fdoc%2Fguide.md`,
+  );
+  try {
+    await expect.poll(() => page.getByText('# Guide').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Show the rendered file' }).click();
+    await page.getByText('Last paragraph').click();
+    await expect.poll(() => page.getByText('Comment on line 11').isVisible()).toBe(true);
+    await page.getByRole('textbox', { name: 'Comment on line 11' }).fill('the end');
+    await page.getByRole('button', { name: 'Comment', exact: true }).click();
+    await expect.poll(() => page.getByText('the end').isVisible()).toBe(true);
+    expect((await stub.comments(BOX, 'app/doc/guide.md'))[0]).toMatchObject({
+      line: 11,
+      endLine: 0,
+      comment: 'the end',
+    });
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('the place of the reader survives the switch of the view, and a reopen', async () => {
+  // Paragraphs on the odd lines, long enough to scroll.
+  const paragraphs = Array.from({ length: 300 }, (_, i) => `Paragraph ${i + 1}`).join('\n\n');
+  stub.review(BOX, {
+    files: { 'long.md': `${paragraphs}\n`, 'short.ts': 'const one = 1;\n' },
+    repos: [''],
+  });
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX}/review?path=long.md`,
+    'dark',
+    'desktop',
+  );
+  try {
+    const pane = page.locator('[data-slot="review-code-pane"]');
+    const preview = page.locator('[data-slot="review-preview"]');
+    await expect.poll(() => pane.isVisible()).toBe(true);
+    await pane.evaluate((el) => {
+      el.scrollTop = 2000;
+    });
+    /**
+     * Reads the line at the top of a scroller. The rows of the rendered view are
+     * nested, so the test measures them against the scroller.
+     *
+     * @param scroller The scroller.
+     * @returns The line of the topmost row, or null when no row is in view.
+     */
+    const topLine = (scroller: typeof pane): Promise<number | null> =>
+      scroller.evaluate((el) => {
+        const top = Math.round(el.getBoundingClientRect().top);
+        for (const row of el.querySelectorAll<HTMLElement>('[data-line]')) {
+          if (Math.round(row.getBoundingClientRect().bottom) > top) return Number(row.dataset.line);
+        }
+        return null;
+      });
+    const before = (await topLine(pane))!;
+    expect(before).toBeGreaterThan(1);
+    // A blank line between two paragraphs lands on the paragraph after it.
+    const block = before % 2 === 1 ? before : before + 1;
+
+    await page.getByRole('button', { name: 'Show the rendered file' }).click();
+    await expect.poll(() => preview.isVisible()).toBe(true);
+    await expect.poll(() => topLine(preview)).toBe(block);
+
+    await page.getByRole('button', { name: 'Show the source' }).click();
+    await expect.poll(() => pane.isVisible()).toBe(true);
+    expect(await topLine(pane)).toBe(block);
+
+    // The file reopens in the view it was left in, at the same place.
+    await page.getByRole('button', { name: 'Show the rendered file' }).click();
+    await expect.poll(() => preview.isVisible()).toBe(true);
+    await page.getByRole('button', { name: /short\.ts/ }).click();
+    await expect.poll(() => page.getByText('const one = 1;').isVisible()).toBe(true);
+    await page.getByRole('button', { name: /long\.md/ }).click();
+    await expect.poll(() => preview.isVisible()).toBe(true);
+    await expect.poll(() => topLine(preview)).toBe(block);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('a markdown file shows rendered, with its images and diagrams', async () => {
   const base = reviewWorkspace();
   stub.review(

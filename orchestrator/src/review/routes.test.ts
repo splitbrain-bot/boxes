@@ -813,7 +813,9 @@ describe('saving a file', () => {
       hash,
     });
     // The drift check moves the comment with its line.
-    assert.deepEqual(body.annotations, [{ line: 4, comment: 'this one', outdated: false }]);
+    assert.deepEqual(body.annotations, [
+      { line: 4, endLine: 0, comment: 'this one', outdated: false },
+    ]);
   });
 
   test('a file the review cannot show cannot be saved either', async () => {
@@ -905,7 +907,7 @@ describe('annotations', () => {
     });
     assert.equal(status, 200);
     assert.deepEqual(body.annotations, [
-      { line: 3, comment: 'this needs a name', outdated: false },
+      { line: 3, endLine: 0, comment: 'this needs a name', outdated: false },
     ]);
 
     const written = readFileSync(join(ws, 'REVIEW.md'), 'utf8');
@@ -924,8 +926,8 @@ describe('annotations', () => {
 
     const { body } = await get<ReviewFileResponse>('/api/boxes/bbb/review/file?path=code.ts');
     assert.deepEqual(body.annotations, [
-      { line: 2, comment: 'second', outdated: false },
-      { line: 5, comment: 'fifth', outdated: false },
+      { line: 2, endLine: 0, comment: 'second', outdated: false },
+      { line: 5, endLine: 0, comment: 'fifth', outdated: false },
     ]);
 
     const listing = await openDir('bbb');
@@ -939,7 +941,9 @@ describe('annotations', () => {
     commentable('ccc');
     await put('ccc', { path: 'code.ts', line: 3, comment: 'first' });
     const { body } = await put('ccc', { path: 'code.ts', line: 3, comment: 'second' });
-    assert.deepEqual(body.annotations, [{ line: 3, comment: 'second', outdated: false }]);
+    assert.deepEqual(body.annotations, [
+      { line: 3, endLine: 0, comment: 'second', outdated: false },
+    ]);
   });
 
   test('a comment is deleted, and the last one takes the file with it', async () => {
@@ -953,7 +957,7 @@ describe('annotations', () => {
     });
     assert.equal(first.statusCode, 200);
     assert.deepEqual((first.json() as ReviewAnnotationsResponse).annotations, [
-      { line: 4, comment: 'y', outdated: false },
+      { line: 4, endLine: 0, comment: 'y', outdated: false },
     ]);
 
     await orchestrator.app.inject({
@@ -992,11 +996,34 @@ describe('annotations', () => {
     );
     const { body } = await put('eee', { path: 'code.ts', line: 6, comment: 'written by the API' });
     assert.deepEqual(body.annotations, [
-      { line: 1, comment: 'written by the agent', outdated: false },
-      { line: 6, comment: 'written by the API', outdated: false },
+      { line: 1, endLine: 0, comment: 'written by the agent', outdated: false },
+      { line: 6, endLine: 0, comment: 'written by the API', outdated: false },
     ]);
     // The start date of the review stays, and does not change to today.
     assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /_Started: 2020-01-01_/);
+  });
+
+  test('a comment on a block is written with its range, and refused past the file', async () => {
+    const ws = commentable('ggg');
+    const { status, body } = await put('ggg', {
+      path: 'code.ts',
+      line: 2,
+      endLine: 4,
+      comment: 'about the block',
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(body.annotations, [
+      { line: 2, endLine: 4, comment: 'about the block', outdated: false },
+    ]);
+    const written = readFileSync(join(ws, 'REVIEW.md'), 'utf8');
+    assert.match(written, /#### Line 2 to 4\n/);
+    // The context holds the block and three lines around it, clamped to the file.
+    assert.match(written, /1: one\n2: two\n3: three\n4: four\n5: five\n6: six\n/);
+
+    const past = await put('ggg', { path: 'code.ts', line: 2, endLine: 9, comment: 'x' });
+    assert.equal(past.status, 400);
+    const before = await put('ggg', { path: 'code.ts', line: 4, endLine: 2, comment: 'x' });
+    assert.equal(before.status, 400);
   });
 
   test('a comment survives its code moving', async () => {
@@ -1006,7 +1033,9 @@ describe('annotations', () => {
     write(ws, 'code.ts', 'new\nnew\none\ntwo\nthree\nfour\nfive\nsix\n');
 
     const { body } = await get<ReviewFileResponse>('/api/boxes/fff/review/file?path=code.ts');
-    assert.deepEqual(body.annotations, [{ line: 5, comment: 'about three', outdated: false }]);
+    assert.deepEqual(body.annotations, [
+      { line: 5, endLine: 0, comment: 'about three', outdated: false },
+    ]);
     // Relocation is persisted, so the agent reads the right line too.
     assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /#### Line 5/);
   });
@@ -1017,7 +1046,9 @@ describe('annotations', () => {
     write(ws, 'code.ts', 'completely\ndifferent\ncontent\n');
 
     const { body } = await get<ReviewFileResponse>('/api/boxes/ggg/review/file?path=code.ts');
-    assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: true }]);
+    assert.deepEqual(body.annotations, [
+      { line: 3, endLine: 0, comment: 'about three', outdated: true },
+    ]);
     assert.match(readFileSync(join(ws, 'REVIEW.md'), 'utf8'), /#### Line 3 \(outdated\)/);
   });
 
@@ -1065,7 +1096,9 @@ describe('annotations', () => {
     assert.equal(body.binary, true);
     // The listing counts the comment, so the file view shows it too. The
     // reviewer reads and deletes it there.
-    assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: false }]);
+    assert.deepEqual(body.annotations, [
+      { line: 3, endLine: 0, comment: 'about three', outdated: false },
+    ]);
   });
 
   test('a comment on a file the change deleted comes back with it', async () => {
@@ -1078,7 +1111,9 @@ describe('annotations', () => {
 
     const { body } = await get<ReviewFileResponse>('/api/boxes/nnn/review/file?path=code.ts');
     assert.equal(body.deleted, true);
-    assert.deepEqual(body.annotations, [{ line: 3, comment: 'about three', outdated: true }]);
+    assert.deepEqual(body.annotations, [
+      { line: 3, endLine: 0, comment: 'about three', outdated: true },
+    ]);
   });
 
   test('bad input is refused before REVIEW.md is touched', async () => {
@@ -1089,7 +1124,7 @@ describe('annotations', () => {
       { path: 'code.ts', line: 1.5, comment: 'x' },
       { path: 'code.ts', line: 1, comment: '   ' },
       { path: 'code.ts', line: 1, comment: 'x'.repeat(20_001) },
-      { line: 1, comment: 'x' },
+      { line: 1, endLine: 0, comment: 'x' },
     ]) {
       const res = await orchestrator.app.inject({
         method: 'PUT',

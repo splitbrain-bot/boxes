@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { anchorAt, type RowOffset, scrollForAnchor } from './anchor.ts';
+import { anchorAt, type RowOffset, scrollForAnchor, scrollNearAnchor } from './anchor.ts';
 
 /**
  * Builds rows of equal height, with extra height after the given lines.
@@ -57,8 +57,25 @@ test('a line that is gone moves nobody anywhere', () => {
   assert.equal(scrollForAnchor(rows(10, 20), { line: 40, offset: 0 }), null);
 });
 
-test('an empty pane has no anchor to take', () => {
-  assert.equal(anchorAt([], 0), null);
+test('a line between or inside blocks lands on the block that holds it or follows it', () => {
+  // Paragraphs on lines 1 to 2, 4 to 6 and 9, with blank lines between them.
+  const blocks: RowOffset[] = [
+    { line: 1, top: 0, end: 2 },
+    { line: 4, top: 50, end: 6 },
+    { line: 9, top: 120 },
+  ];
+  assert.equal(scrollNearAnchor(blocks, { line: 4, offset: 7 }), 57);
+  assert.equal(scrollNearAnchor(blocks, { line: 5, offset: 7 }), 50);
+  assert.equal(scrollNearAnchor(blocks, { line: 3, offset: 7 }), 50);
+  assert.equal(scrollNearAnchor(blocks, { line: 8, offset: 0 }), 120);
+  assert.equal(scrollNearAnchor(blocks, { line: 10, offset: 0 }), null);
+  assert.equal(scrollNearAnchor(blocks, { line: 0, offset: 30 }), 30);
+});
+
+test('a pane without rows keeps its scroll position as the anchor', () => {
+  const anchor = anchorAt([], 300);
+  assert.deepEqual(anchor, { line: 0, offset: 300 });
+  assert.equal(scrollForAnchor([], anchor), 300);
 });
 
 test('a scroller above its first row does not scroll past the top coming back', () => {

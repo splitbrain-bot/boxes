@@ -9,7 +9,7 @@ import { CodePane, type ScrollTarget } from '@/components/review/CodePane';
 import { CommentCard } from '@/components/review/CommentCard';
 import { ComposerSheet, InlineComposer } from '@/components/review/CommentComposer';
 import { HunkSheet } from '@/components/review/HunkSheet';
-import { MarkdownPreview } from '@/components/review/MarkdownPreview';
+import { type Block, MarkdownPreview } from '@/components/review/MarkdownPreview';
 import { ReviewToolbar } from '@/components/review/ReviewToolbar';
 import { ReviewTree } from '@/components/review/ReviewTree';
 import { Shelf } from '@/components/Shelf';
@@ -36,7 +36,9 @@ import {
   loadTree,
   newReview,
   open as openReview,
+  recallView,
   refreshOnReturn,
+  rememberView,
   saveComment,
   saveFile,
   setBase,
@@ -81,6 +83,8 @@ export function BoxReview() {
   const [scrollTo, setScrollTo] = useState<ScrollTarget | null>(null);
   /** True while the pane shows a markdown file rendered. */
   const [previewing, setPreviewing] = useState(false);
+  /** The blocks of the rendered file, in order, once the pane has rendered them. */
+  const [blocks, setBlocks] = useState<Block[]>([]);
   const [confirmNew, setConfirmNew] = useState(false);
   /** The line of the comment that a tap on a bin wants to remove, or null. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
@@ -133,10 +137,12 @@ export function BoxReview() {
     return refreshOnReturn();
   }, [id]);
 
-  // The URL decides which file is open. The hunk sheet and the preview close with their file.
+  // The URL decides which file is open. The hunk sheet closes with its file, and
+  // a file opens in the view it was last shown in.
   useEffect(() => {
     setHunk(null);
-    setPreviewing(false);
+    setBlocks([]);
+    setPreviewing(path ? recallView(path) : false);
     if (path) void loadFile(path);
     else closeFile();
   }, [path]);
@@ -238,9 +244,11 @@ export function BoxReview() {
       } else {
         setConflict(false);
         edit.stop();
+        // The file goes back to the view it was shown in before the edit.
+        if (path) setPreviewing(recallView(path));
       }
     },
-    [edit],
+    [edit, path],
   );
 
   const editing = edit.text !== null;
@@ -254,8 +262,15 @@ export function BoxReview() {
    * everything past where the read stopped.
    */
   const editable = file !== null && !file.deleted && !file.binary && !file.truncated && !tooLong;
-  /** The kind of preview that the toolbar offers. Edit mode has none. */
-  const preview = file && !file.deleted && !editing ? previewKind(file.path) : null;
+  /**
+   * The kind of preview that the toolbar offers. Edit mode has none, and a markdown file past
+   * the line limit has none, because its comments need the rows of the code pane.
+   */
+  const preview = useMemo(() => {
+    if (!file || file.deleted || editing) return null;
+    const kind = previewKind(file.path);
+    return kind === 'markdown' && tooLong ? null : kind;
+  }, [file, editing, tooLong]);
   /** True while the pane shows the rendered markdown instead of the code. */
   const rendered = previewing && preview === 'markdown';
   /** The absolute path of the open file in the box, or null. */
@@ -309,7 +324,25 @@ export function BoxReview() {
    * pane's rows are memoized against typing.
    */
   const selectLine = useCallback((line: number) => {
-    compose(useReview.getState().composing === line ? null : line);
+    const current = useReview.getState().composing;
+    compose(current?.line === line && current.endLine === 0 ? null : { line, endLine: 0 });
+  }, []);
+
+  /**
+   * Opens or closes the composer on a block of the rendered file.
+   *
+   * A block whose first line already has a comment opens that comment, because
+   * REVIEW.md holds one comment per line.
+   */
+  const selectBlock = useCallback((line: number, endLine: number) => {
+    const { composing: current, file: open } = useReview.getState();
+    if (current?.line === line) {
+      compose(null);
+      return;
+    }
+    const existing = open?.annotations.find((a) => a.line === line);
+    // A block of one line is a line comment.
+    compose({ line, endLine: existing ? existing.endLine : endLine > line ? endLine : 0 });
   }, []);
 
   /** Opens the hunk sheet for a hunk index of the open file. */
@@ -360,6 +393,13 @@ export function BoxReview() {
     () => (file?.annotations ?? []).map((a) => a.line).sort((a, b) => a - b),
     [file?.annotations],
   );
+  /** The first lines of the blocks of the rendered file that hold a change, in order. */
+  const changedBlocks = useMemo(() => blocksWith(blocks, changedLines), [blocks, changedLines]);
+  /** The first lines of the blocks of the rendered file that hold a comment, in order. */
+  const commentedBlocks = useMemo(
+    () => blocksWith(blocks, commentedLines),
+    [blocks, commentedLines],
+  );
 
   /**
    * Renders the comment card and the inline composer under a line.
@@ -371,7 +411,7 @@ export function BoxReview() {
     (line: number) => {
       if (!file) return null;
       const annotation = annotations.get(line);
-      const open = composing === line;
+      const open = composing?.line === line ? composing : null;
       if (!annotation && !open) return null;
       return (
         <div className="flex flex-col gap-1.5">
@@ -379,7 +419,7 @@ export function BoxReview() {
             <CommentCard
               annotation={annotation}
               busy={saving}
-              onEdit={() => compose(line)}
+              onEdit={() => compose({ line, endLine: annotation.endLine })}
               // Asks first, because a deleted comment has no undo and the bin
               // sits close to the pencil.
               onDelete={() => setConfirmDelete(line)}
@@ -390,9 +430,53 @@ export function BoxReview() {
           {open && wide ? (
             <InlineComposer
               line={line}
+              endLine={open.endLine}
               initial={annotation?.comment ?? ''}
               busy={saving}
-              onSave={(comment) => void saveComment(file.path, line, comment)}
+              onSave={(comment) => void saveComment(file.path, line, comment, open.endLine)}
+              onCancel={() => compose(null)}
+            />
+          ) : null}
+        </div>
+      );
+    },
+    [file, annotations, composing, saving, wide],
+  );
+
+  /**
+   * Renders the comment cards and the inline composer under a block of the
+   * rendered file, for the comments on its lines.
+   *
+   * The pane calls it for every block. It returns null for a block without either.
+   */
+  const underBlock = useCallback(
+    (line: number, endLine: number) => {
+      if (!file) return null;
+      const open =
+        composing && composing.line >= line && composing.line <= endLine ? composing : null;
+      const cards = file.annotations.filter(
+        (a) => a.line >= line && a.line <= endLine && a.line !== open?.line,
+      );
+      if (cards.length === 0 && !open) return null;
+      return (
+        <div className="flex flex-col gap-1.5">
+          {cards.map((annotation) => (
+            <CommentCard
+              key={annotation.line}
+              annotation={annotation}
+              busy={saving}
+              showLine
+              onEdit={() => compose({ line: annotation.line, endLine: annotation.endLine })}
+              onDelete={() => setConfirmDelete(annotation.line)}
+            />
+          ))}
+          {open && wide ? (
+            <InlineComposer
+              line={open.line}
+              endLine={open.endLine}
+              initial={annotations.get(open.line)?.comment ?? ''}
+              busy={saving}
+              onSave={(comment) => void saveComment(file.path, open.line, comment, open.endLine)}
               onCancel={() => compose(null)}
             />
           ) : null}
@@ -571,10 +655,11 @@ export function BoxReview() {
           {file ? (
             <>
               <ReviewToolbar
-                changeCount={changedLines.length}
-                commentCount={commentedLines.length}
-                // A file shown as one block or rendered has no rows to step to.
-                steppable={!tooLong && !rendered}
+                // The rendered view counts and steps through blocks, the code pane through lines.
+                changeCount={rendered ? changedBlocks.length : changedLines.length}
+                commentCount={rendered ? commentedBlocks.length : commentedLines.length}
+                // A file shown as one block has no rows to step to.
+                steppable={!tooLong}
                 wrap={wrap}
                 editable={editable}
                 editing={editing}
@@ -586,8 +671,12 @@ export function BoxReview() {
                 previewing={rendered}
                 imageSrc={imageSrc}
                 onWrap={() => setWrap((w) => !w)}
-                onStepChange={(direction) => step(changedLines, direction)}
-                onStepComment={(direction) => step(commentedLines, direction)}
+                onStepChange={(direction) =>
+                  step(rendered ? changedBlocks : changedLines, direction)
+                }
+                onStepComment={(direction) =>
+                  step(rendered ? commentedBlocks : commentedLines, direction)
+                }
                 onEdit={() => {
                   if (editing) guard(() => switchMode(false));
                   else {
@@ -598,9 +687,8 @@ export function BoxReview() {
                 onSave={() => save(false)}
                 onRevert={edit.revert}
                 onPreview={() => {
-                  // An open composer belongs to the code.
-                  compose(null);
-                  setPreviewing((on) => !on);
+                  rememberView(file.path, !previewing);
+                  setPreviewing(!previewing);
                 }}
               />
               {file.deleted ? (
@@ -655,10 +743,28 @@ export function BoxReview() {
                       </span>
                     </Notice>
                   ) : null}
+                  {/* Each pane is mounted once per file, so it records the place of
+                      the reader while the rows of the file are still there. */}
                   {rendered ? (
-                    <MarkdownPreview path={file.path} content={file.content} />
+                    <MarkdownPreview
+                      key={file.path}
+                      scrollRef={paneRef}
+                      path={file.path}
+                      content={file.content}
+                      diffLines={file.diff.lines}
+                      deletions={deletions}
+                      hunkByLine={hunkByLine}
+                      commentedLines={commentedLines}
+                      composing={composing}
+                      scrollTo={scrollTo}
+                      onSelectBlock={selectBlock}
+                      onShowHunk={showHunk}
+                      renderUnderBlock={underBlock}
+                      onBlocks={setBlocks}
+                    />
                   ) : (
                     <CodePane
+                      key={file.path}
                       scrollRef={paneRef}
                       path={file.path}
                       content={file.content}
@@ -668,7 +774,7 @@ export function BoxReview() {
                       deletions={deletions}
                       hunkByLine={hunkByLine}
                       annotations={annotations}
-                      composing={composing}
+                      composing={composing?.line ?? null}
                       wrap={wrap}
                       scrollTo={scrollTo}
                       edit={edit.text === null ? null : { text: edit.text, onChange: edit.change }}
@@ -695,11 +801,13 @@ export function BoxReview() {
 
       {/* Below md, the reviewer writes a comment in the sheet and not inline. */}
       <ComposerSheet
-        line={!wide && file && !tooLong ? composing : null}
-        initial={composing === null ? '' : (annotations.get(composing)?.comment ?? '')}
+        composing={!wide && file && !tooLong ? composing : null}
+        initial={composing === null ? '' : (annotations.get(composing.line)?.comment ?? '')}
         busy={saving}
         onSave={(comment) => {
-          if (file && composing !== null) void saveComment(file.path, composing, comment);
+          if (file && composing !== null) {
+            void saveComment(file.path, composing.line, comment, composing.endLine);
+          }
         }}
         onCancel={() => compose(null)}
       />
@@ -758,6 +866,19 @@ export function BoxReview() {
 
 /** Counts the image URLs of the lightbox, so each new URL differs from the earlier ones. */
 let imageViews = 0;
+
+/**
+ * Picks the blocks that hold one of the given lines.
+ *
+ * @param blocks The blocks of the rendered file, in order.
+ * @param lines The lines, in order.
+ * @returns The first line of each block that holds one of the lines, in order.
+ */
+function blocksWith(blocks: Block[], lines: number[]): number[] {
+  return blocks
+    .filter((block) => lines.some((line) => line >= block.line && line <= block.endLine))
+    .map((block) => block.line);
+}
 
 /**
  * Checks if a click is a plain left click. A modified click opens a tab or a

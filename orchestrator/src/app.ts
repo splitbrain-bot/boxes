@@ -887,13 +887,19 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
   );
 
   /**
-   * Creates or replaces the comment on one line. REVIEW.md holds at most one
+   * Creates or replaces the comment on one line or one block of lines. REVIEW.md holds at most one
    * comment per line.
    */
   app.put('/api/boxes/:id/review/annotations', async (req) => {
     const { id } = req.params as { id: string };
     const body = parseBody(reviewAnnotationBody, req.body);
-    const annotations = await review.setAnnotation(id, body.path, body.line, body.comment);
+    const annotations = await review.setAnnotation(
+      id,
+      body.path,
+      body.line,
+      body.comment,
+      body.endLine ?? 0,
+    );
     return { path: body.path, annotations } satisfies ReviewAnnotationsResponse;
   });
 

@@ -14,8 +14,10 @@ import {
   newReview,
   open,
   recallScroll,
+  recallView,
   refresh,
   rememberScroll,
+  rememberView,
   saveComment,
   saveFile,
   setBase,
@@ -267,17 +269,24 @@ test('opening a different box discards the previous one', async () => {
   assert.equal(useReview.getState().boxId, 'other');
 });
 
-test('how far a file was read is remembered per file', () => {
-  rememberScroll('a.ts', 420);
-  assert.equal(recallScroll('a.ts'), 420);
-  // A file this review has not opened starts at the top.
-  assert.equal(recallScroll('b.ts'), 0);
+test('where a file was left, and how it was shown, is remembered per file', () => {
+  rememberScroll('a.ts', { line: 12, offset: 4 });
+  assert.deepEqual(recallScroll('a.ts'), { line: 12, offset: 4 });
+  assert.equal(recallView('a.ts'), false);
+  rememberView('a.ts', true);
+  assert.equal(recallView('a.ts'), true);
+  assert.deepEqual(recallScroll('a.ts'), { line: 12, offset: 4 });
+  // A file this review has not opened starts at the top, as source.
+  assert.equal(recallScroll('b.ts'), null);
+  assert.equal(recallView('b.ts'), false);
 });
 
 test('a new box starts every file at the top again', () => {
-  rememberScroll('a.ts', 420);
+  rememberScroll('a.ts', { line: 12, offset: 4 });
+  rememberView('a.ts', true);
   open('another-box');
-  assert.equal(recallScroll('a.ts'), 0);
+  assert.equal(recallScroll('a.ts'), null);
+  assert.equal(recallView('a.ts'), false);
 });
 
 test('a refresh refetches the tree and the open file', async () => {
@@ -327,7 +336,7 @@ test('a refresh while a write is in flight is skipped', async () => {
 
 test('a refresh while a composer is open is skipped', async () => {
   await loadTree();
-  useReview.setState({ composing: 4 });
+  useReview.setState({ composing: { line: 4, endLine: 0 } });
   const before = requested.length;
   await refresh();
   // A refetch would drop the text that the reader types.
@@ -359,15 +368,15 @@ test('a comment shows before the server confirms it', async () => {
 
   answers['/review/annotations'] = {
     path: 'a.ts',
-    annotations: [{ line: 2, comment: 'saved', outdated: false }],
+    annotations: [{ line: 2, endLine: 0, comment: 'saved', outdated: false }],
   };
   const pending = saveComment('a.ts', 2, 'saved');
   assert.deepEqual(useReview.getState().file?.annotations, [
-    { line: 2, comment: 'saved', outdated: false },
+    { line: 2, endLine: 0, comment: 'saved', outdated: false },
   ]);
   await pending;
   assert.deepEqual(useReview.getState().file?.annotations, [
-    { line: 2, comment: 'saved', outdated: false },
+    { line: 2, endLine: 0, comment: 'saved', outdated: false },
   ]);
   assert.equal(useReview.getState().saving, false);
   assert.equal(useReview.getState().composing, null);
@@ -391,7 +400,7 @@ test('the tree badge follows a comment without refetching the tree', async () =>
 
   answers['/review/annotations'] = {
     path: 'a.ts',
-    annotations: [{ line: 2, comment: 'x', outdated: false }],
+    annotations: [{ line: 2, endLine: 0, comment: 'x', outdated: false }],
   };
   await saveComment('a.ts', 2, 'x');
   assert.equal(hits('/review/dir'), before);
@@ -404,7 +413,7 @@ test('deleting the last comment clears the badge', async () => {
   await loadFile('a.ts');
   answers['/review/annotations'] = {
     path: 'a.ts',
-    annotations: [{ line: 2, comment: 'x', outdated: false }],
+    annotations: [{ line: 2, endLine: 0, comment: 'x', outdated: false }],
   };
   await saveComment('a.ts', 2, 'x');
 
@@ -420,7 +429,7 @@ test('a comment deeper in the tree lights the folders above it', async () => {
   await loadDir('src');
   answers['/review/annotations'] = {
     path: 'src/deep.ts',
-    annotations: [{ line: 1, comment: 'x', outdated: false }],
+    annotations: [{ line: 1, endLine: 0, comment: 'x', outdated: false }],
   };
   await saveComment('src/deep.ts', 1, 'x');
 
@@ -435,13 +444,13 @@ test('editing an existing comment replaces it rather than adding one', async () 
   await loadFile('a.ts');
   answers['/review/annotations'] = {
     path: 'a.ts',
-    annotations: [{ line: 2, comment: 'first', outdated: false }],
+    annotations: [{ line: 2, endLine: 0, comment: 'first', outdated: false }],
   };
   await saveComment('a.ts', 2, 'first');
 
   answers['/review/annotations'] = {
     path: 'a.ts',
-    annotations: [{ line: 2, comment: 'second', outdated: false }],
+    annotations: [{ line: 2, endLine: 0, comment: 'second', outdated: false }],
   };
   await saveComment('a.ts', 2, 'second');
   assert.equal(useReview.getState().file?.annotations.length, 1);
@@ -453,7 +462,7 @@ test('a new review clears the comments and reloads the tree', async () => {
   await loadFile('a.ts');
   answers['/review/annotations'] = {
     path: 'a.ts',
-    annotations: [{ line: 2, comment: 'x', outdated: false }],
+    annotations: [{ line: 2, endLine: 0, comment: 'x', outdated: false }],
   };
   await saveComment('a.ts', 2, 'x');
   const before = hits('/review/dir');
@@ -571,7 +580,7 @@ test('saving anyway reads what is on disk first, then writes over it', async () 
 test('an outdated comment is carried through as such', async () => {
   await loadTree();
   answers['/review/file'] = file({
-    annotations: [{ line: 2, comment: 'about the old code', outdated: true }],
+    annotations: [{ line: 2, endLine: 0, comment: 'about the old code', outdated: true }],
   });
   await loadFile('a.ts');
   // The server runs the drift check, and the store carries the flag through.
