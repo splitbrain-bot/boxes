@@ -84,6 +84,8 @@ export interface CodePaneProps {
   onShowHunk: (hunkIndex: number) => void;
   /** Renders the card and the composer below a line. */
   renderUnderLine?: (line: number) => React.ReactNode;
+  /** The height in pixels at the bottom of the pane that a sheet covers, so the last line can scroll above it. */
+  bottomInset?: number;
 }
 
 /**
@@ -120,6 +122,7 @@ export function CodePane({
   onSelectLine,
   onShowHunk,
   renderUnderLine,
+  bottomInset = 0,
 }: CodePaneProps) {
   const editing = edit !== null;
   /** The shown text, which is the buffer while editing and the file otherwise. */
@@ -180,6 +183,7 @@ export function CodePane({
     <div
       ref={scrollRef}
       data-slot="review-code-pane"
+      style={bottomInset > 0 ? { paddingBottom: bottomInset } : undefined}
       className={cn(
         // 16px on a phone, because Safari zooms the page when a smaller control
         // takes focus. Both modes use the same size, so a switch moves nothing.

@@ -29,6 +29,7 @@ import { stagePrompt } from '@/lib/staged-prompt';
 import { cn } from '@/lib/utils';
 import type { ReviewDiffHunk, ReviewRepo } from '../../../shared/types.ts';
 import {
+  type Composing,
   closeFile,
   compose,
   deleteComment,
@@ -85,6 +86,13 @@ export function BoxReview() {
   const [previewing, setPreviewing] = useState(false);
   /** The blocks of the rendered file, in order, once the pane has rendered them. */
   const [blocks, setBlocks] = useState<Block[]>([]);
+  /** The top edge of the area that the comment sheet and the keyboard cover, or null while the sheet is closed. */
+  const [cover, setCover] = useState<number | null>(null);
+  /**
+   * The composer that the view scrolled above the sheet, and the scroll position it set, to tell a scroll of the
+   * reader from its own.
+   */
+  const sheetScroll = useRef<{ composing: Composing; top: number } | null>(null);
   const [confirmNew, setConfirmNew] = useState(false);
   /** The line of the comment that a tap on a bin wants to remove, or null. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
@@ -345,6 +353,31 @@ export function BoxReview() {
     compose({ line, endLine: existing ? existing.endLine : endLine > line ? endLine : 0 });
   }, []);
 
+  /** The height at the bottom of the pane that the sheet covers. The pane fills the screen down to its bottom. */
+  const bottomInset = cover === null ? 0 : Math.max(0, window.innerHeight - cover);
+
+  /**
+   * Scrolls the commented line or block above the sheet, with its end just above
+   * the top of the sheet. It runs again when the covered area changes and when
+   * the pane resizes as the header hides, until the reader scrolls the pane.
+   */
+  useLayoutEffect(() => {
+    const pane = paneRef.current;
+    if (cover === null || !composing || wide || !pane) return;
+    const place = (): void => {
+      const last = sheetScroll.current;
+      if (last?.composing === composing && Math.abs(pane.scrollTop - last.top) > 1) return;
+      const target = commentedElement(pane, composing.line, composing.endLine);
+      if (!target) return;
+      pane.scrollTop += target.getBoundingClientRect().bottom - (cover - SHEET_GAP);
+      sheetScroll.current = { composing, top: pane.scrollTop };
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(pane);
+    return () => observer.disconnect();
+  }, [cover, composing, wide]);
+
   /** Opens the hunk sheet for a hunk index of the open file. */
   const showHunk = useCallback(
     (index: number) => setHunk(file?.diff.hunks[index] ?? null),
@@ -518,6 +551,9 @@ export function BoxReview() {
     '[data-slot="review-code-pane"], [data-slot="review-preview"]',
   );
 
+  /** True while the header is out of the way. It hides while the comment sheet is open, to give the text room. */
+  const shelfAway = cover !== null || (away && !editing);
+
   // Shows the header again when the open file or the pane changes. Below md, the list's
   // only way out is the button in that header.
   useEffect(reset, [reset, path, rendered]);
@@ -529,7 +565,7 @@ export function BoxReview() {
   return (
     <div ref={container} className="flex h-dvh flex-col">
       {/* The header stays while editing, because the toolbar under it holds Save. */}
-      <Shelf away={away && !editing}>
+      <Shelf away={shelfAway}>
         <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
           {/* Below md with a file open, back returns to the file list.
               Otherwise it leaves the review. */}
@@ -761,6 +797,7 @@ export function BoxReview() {
                       onShowHunk={showHunk}
                       renderUnderBlock={underBlock}
                       onBlocks={setBlocks}
+                      bottomInset={bottomInset}
                     />
                   ) : (
                     <CodePane
@@ -781,6 +818,7 @@ export function BoxReview() {
                       onSelectLine={selectLine}
                       onShowHunk={showHunk}
                       renderUnderLine={underLine}
+                      bottomInset={bottomInset}
                     />
                   )}
                 </>
@@ -810,6 +848,7 @@ export function BoxReview() {
           }
         }}
         onCancel={() => compose(null)}
+        onCover={setCover}
       />
 
       {confirmDelete !== null && file ? (
@@ -866,6 +905,26 @@ export function BoxReview() {
 
 /** Counts the image URLs of the lightbox, so each new URL differs from the earlier ones. */
 let imageViews = 0;
+
+/** The space in pixels between the commented text and the top of the comment sheet. */
+const SHEET_GAP = 8;
+
+/**
+ * Finds the element of a commented line or block in a pane.
+ *
+ * Nested blocks of the rendered view share a first line. The outermost element with the same range wins, which is
+ * the frame of a top level block, and else the innermost element on the line.
+ *
+ * @param pane The scroller of the pane.
+ * @param line The line, or the first line of the block.
+ * @param endLine The last line of the block, or 0 for one line.
+ * @returns The element, or null when the pane does not show the line.
+ */
+function commentedElement(pane: HTMLElement, line: number, endLine: number): HTMLElement | null {
+  const candidates = [...pane.querySelectorAll<HTMLElement>(`[data-line="${line}"]`)];
+  const end = String(endLine > 0 ? endLine : line);
+  return candidates.find((el) => el.dataset.lineEnd === end) ?? candidates.at(-1) ?? null;
+}
 
 /**
  * Picks the blocks that hold one of the given lines.
