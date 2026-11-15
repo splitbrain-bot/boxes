@@ -92,13 +92,14 @@ export const reviewFileBody = z.object({
 });
 
 /**
- * The body of PUT /api/boxes/:id/review/annotations, with the comment on one line.
+ * The body of PUT /api/boxes/:id/review/annotations, with the comment on one line or one block of lines.
  *
- * `line` is coerced, so a line number in a string also works.
+ * `line` and `endLine` are coerced, so a line number in a string also works.
  */
 export const reviewAnnotationBody = z.object({
   path: filled,
   line: z.coerce.number(),
+  endLine: z.coerce.number().optional(),
   comment: z.string(),
 });
 

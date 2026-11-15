@@ -191,6 +191,21 @@ describe('parseReview', () => {
     assert.equal(normal.data.get('test.go')?.get(5)?.outdated, false);
   });
 
+  test('reads the range of a block comment, with and without the outdated marker', () => {
+    const head = '# Code Review\n\n_Started: 2026-03-22_\n\n---\n\n## `doc.md`\n\n';
+    const block = parseReview(`${head}#### Line 5 to 9\n\nAbout this paragraph\n`);
+    assert.equal(block.data.get('doc.md')?.get(5)?.endLine, 9);
+    assert.equal(block.data.get('doc.md')?.get(5)?.outdated, false);
+    const outdated = parseReview(`${head}#### Line 5 to 9 (outdated)\n\nAbout this paragraph\n`);
+    assert.equal(outdated.data.get('doc.md')?.get(5)?.endLine, 9);
+    assert.equal(outdated.data.get('doc.md')?.get(5)?.outdated, true);
+    // A range that ends on its first line is a line comment.
+    const one = parseReview(`${head}#### Line 5 to 5\n\nAbout this heading\n`);
+    assert.equal(one.data.get('doc.md')?.get(5)?.endLine, 0);
+    const line = parseReview(`${head}#### Line 5\n\nAbout this line\n`);
+    assert.equal(line.data.get('doc.md')?.get(5)?.endLine, 0);
+  });
+
   test('an empty document is an empty review', () => {
     const review = parseReview('');
     assert.equal(review.data.size, 0);
@@ -272,6 +287,30 @@ describe('a comment survives a write and a read', () => {
       assert.equal(back.data.get('a.go')?.get(3)?.comment, comment);
     });
   }
+
+  test('a block comment keeps its range and holds the block in its context', () => {
+    const source = lines('l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\n');
+    const review = emptyReview('2026-08-31');
+    setAnnotation(review, 'doc.md', 5, 'about the block', source, 8);
+    const text = serializeReview(review);
+    assert.ok(text.includes('\n#### Line 5 to 8\n\nabout the block\n'));
+    assert.ok(
+      text.includes('2: l2\n3: l3\n4: l4\n5: l5\n6: l6\n7: l7\n8: l8\n9: l9\n10: l10\n11: l11\n'),
+    );
+    assert.ok(!text.includes('\n1: l1\n'));
+    assert.ok(!text.includes('\n12: l12\n'));
+    const back = parseReview(text).data.get('doc.md')?.get(5);
+    assert.equal(back?.endLine, 8);
+    assert.deepEqual(back?.context, source.slice(1, 11));
+    assert.equal(back?.contextFrom, 2);
+  });
+
+  test('a block that ends on its first line is written as a line comment', () => {
+    const review = emptyReview('2026-08-31');
+    setAnnotation(review, 'doc.md', 2, 'about the heading', lines('l1\nl2\nl3\n'), 2);
+    assert.ok(serializeReview(review).includes('\n#### Line 2\n\n'));
+    assert.equal(review.data.get('doc.md')?.get(2)?.endLine, 0);
+  });
 
   test('neighbouring annotations stay separated', () => {
     const review = emptyReview('2026-08-31');
@@ -429,7 +468,7 @@ function annotated(
   contextFrom: number,
   outdated = false,
 ): Map<number, Annotation> {
-  return new Map([[line, { comment: 'test comment', context, contextFrom, outdated }]]);
+  return new Map([[line, { comment: 'test comment', endLine: 0, context, contextFrom, outdated }]]);
 }
 
 describe('checkDrift', () => {
@@ -470,7 +509,7 @@ describe('checkDrift', () => {
 
   test('an annotation with no context adopts the current source', () => {
     const anns = new Map<number, Annotation>([
-      [1, { comment: 'no context', context: [], contextFrom: 0, outdated: false }],
+      [1, { comment: 'no context', endLine: 0, context: [], contextFrom: 0, outdated: false }],
     ]);
     assert.equal(checkDrift(anns, ['line1', 'line2']), true);
     const ann = anns.get(1)!;
@@ -546,6 +585,23 @@ describe('checkDrift', () => {
     assert.equal(reloaded.data.get('test.go')?.get(4)?.outdated, true);
   });
 
+  test('a block comment moves with its block, and an edit inside the block outdates it', () => {
+    const review = emptyReview('2026-08-31');
+    const before = ['l1', 'A', 'B', 'C', 'l5', 'l6', 'l7'];
+    setAnnotation(review, 'doc.md', 2, 'about A to C', before, 4);
+    const anns = review.data.get('doc.md')!;
+
+    // Two lines inserted at the top move the block down.
+    assert.equal(checkDrift(anns, ['n1', 'n2', ...before]), true);
+    assert.equal(anns.get(4)?.endLine, 6);
+    assert.equal(anns.get(4)?.outdated, false);
+
+    const edited = ['n1', 'n2', 'l1', 'A', 'CHANGED', 'C', 'l5', 'l6', 'l7'];
+    assert.equal(checkDrift(anns, edited), true);
+    assert.equal(anns.get(4)?.outdated, true);
+    assert.equal(anns.get(4)?.endLine, 6);
+  });
+
   test('a context longer than the file matches nothing', () => {
     const anns = annotated(1, ['a', 'b'], 1);
     assert.equal(checkDrift(anns, ['a']), true);
@@ -569,8 +625,8 @@ describe('checkDrift', () => {
     // Both comments are about the same code, so both find line 8. The one
     // that has to move must not overwrite the one already there.
     const anns = new Map<number, Annotation>([
-      [5, { comment: 'moves', context: ['dup'], contextFrom: 5, outdated: false }],
-      [8, { comment: 'stays', context: ['dup'], contextFrom: 8, outdated: false }],
+      [5, { comment: 'moves', endLine: 0, context: ['dup'], contextFrom: 5, outdated: false }],
+      [8, { comment: 'stays', endLine: 0, context: ['dup'], contextFrom: 8, outdated: false }],
     ]);
     const source = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'dup', 'h'];
     assert.equal(checkDrift(anns, source), true);
@@ -579,6 +635,7 @@ describe('checkDrift', () => {
     // keeps the context position that it was written with.
     assert.deepEqual(anns.get(5), {
       comment: 'moves',
+      endLine: 0,
       context: ['dup'],
       contextFrom: 5,
       outdated: true,
@@ -591,8 +648,8 @@ describe('checkDrift', () => {
 
   test('a refused annotation moves when its target line is free again', () => {
     const anns = new Map<number, Annotation>([
-      [5, { comment: 'moves', context: ['dup'], contextFrom: 5, outdated: false }],
-      [8, { comment: 'stays', context: ['dup'], contextFrom: 8, outdated: false }],
+      [5, { comment: 'moves', endLine: 0, context: ['dup'], contextFrom: 5, outdated: false }],
+      [8, { comment: 'stays', endLine: 0, context: ['dup'], contextFrom: 8, outdated: false }],
     ]);
     const source = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'dup', 'h'];
     checkDrift(anns, source);
@@ -600,6 +657,7 @@ describe('checkDrift', () => {
     assert.equal(checkDrift(anns, source), true);
     assert.deepEqual(anns.get(8), {
       comment: 'moves',
+      endLine: 0,
       context: ['dup'],
       contextFrom: 8,
       outdated: false,
@@ -610,8 +668,8 @@ describe('checkDrift', () => {
     // One line inserted at the top moves both comments down by one, so each
     // lands on the line the other is leaving.
     const anns = new Map<number, Annotation>([
-      [1, { comment: 'first', context: ['one'], contextFrom: 1, outdated: false }],
-      [2, { comment: 'second', context: ['two'], contextFrom: 2, outdated: false }],
+      [1, { comment: 'first', endLine: 0, context: ['one'], contextFrom: 1, outdated: false }],
+      [2, { comment: 'second', endLine: 0, context: ['two'], contextFrom: 2, outdated: false }],
     ]);
     assert.equal(checkDrift(anns, ['inserted', 'one', 'two']), true);
     assert.equal(anns.size, 2);
@@ -624,9 +682,9 @@ describe('checkDrift', () => {
     // the target of 'second', so 'second' stays on line 2, which is the target
     // of 'first'. No annotation moves, and all three stay.
     const anns = new Map<number, Annotation>([
-      [1, { comment: 'first', context: ['aa'], contextFrom: 1, outdated: false }],
-      [2, { comment: 'second', context: ['bb'], contextFrom: 2, outdated: false }],
-      [3, { comment: 'third', context: ['bb'], contextFrom: 3, outdated: false }],
+      [1, { comment: 'first', endLine: 0, context: ['aa'], contextFrom: 1, outdated: false }],
+      [2, { comment: 'second', endLine: 0, context: ['bb'], contextFrom: 2, outdated: false }],
+      [3, { comment: 'third', endLine: 0, context: ['bb'], contextFrom: 3, outdated: false }],
     ]);
     checkDrift(anns, ['w', 'aa', 'bb', 'cc']);
     assert.deepEqual(

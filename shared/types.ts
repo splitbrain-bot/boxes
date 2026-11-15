@@ -973,10 +973,12 @@ export interface ReviewDirResponse extends ReviewFacts {
   truncated: boolean;
 }
 
-/** One comment on one line, as the API reports it. */
+/** One comment on one line or one block of lines, as the API reports it. */
 export interface ReviewAnnotation {
-  /** The line the comment is on, counted from 1. */
+  /** The line the comment is on, counted from 1. For a block, its first line. */
   line: number;
+  /** The last line of a block, or 0 for a comment on one line. */
+  endLine: number;
   /** The text of the comment. */
   comment: string;
   /** True when the code that the comment was written for is gone. */
@@ -1066,8 +1068,10 @@ export interface ReviewAnnotationsResponse {
 export interface ReviewAnnotationBody {
   /** The path of the file, relative to the workspace. */
   path: string;
-  /** The line to comment on. */
+  /** The line to comment on. For a block, its first line. */
   line: number;
+  /** The last line of a block, or 0 or absent for a comment on one line. */
+  endLine?: number;
   /** The text of the comment. */
   comment: string;
 }

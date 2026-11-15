@@ -21,6 +21,8 @@ const CONTEXT_MARKER = 'context';
 export interface Annotation {
   /** The comment of the reviewer, trimmed. */
   comment: string;
+  /** The last line of a comment on a block of lines, or 0 for a comment on one line. */
+  endLine: number;
   /** The stored context lines, without their line-number prefix. */
   context: string[];
   /** The first line number of the context block, or 0 when none is stored. */
@@ -42,8 +44,8 @@ export interface Review {
 
 /** Matches a file section heading, which holds the path in backticks. */
 const FILE_HEADER = /^## `(.+)`$/;
-/** Matches an annotation heading with its line number and an optional marker. */
-const LINE_HEADER = /^#### Line (\d+)(.*)$/;
+/** Matches an annotation heading with its line number, an optional last line of a block and an optional marker. */
+const LINE_HEADER = /^#### Line (\d+)(?: to (\d+))?(.*)$/;
 /** Matches one numbered source line of a context block. */
 const CONTEXT_LINE = /^(\d+):(?: (.*))?$/;
 /** Matches the line that records the date the review was started. */
@@ -93,6 +95,7 @@ export function parseReview(text: string): Review {
   let started = '';
   let currentFile = '';
   let currentLine = 0;
+  let currentEnd = 0;
   let outdated = false;
   let body: string[] = [];
   let collecting = false;
@@ -104,7 +107,9 @@ export function parseReview(text: string): Review {
     const { comment, context, contextFrom } = splitBody(body, marked);
     if (comment !== '' && currentFile !== '') {
       const forFile = data.get(currentFile);
-      if (forFile) forFile.set(currentLine, { comment, context, contextFrom, outdated });
+      if (forFile) {
+        forFile.set(currentLine, { comment, endLine: currentEnd, context, contextFrom, outdated });
+      }
     }
     body = [];
     collecting = false;
@@ -128,7 +133,8 @@ export function parseReview(text: string): Review {
     if (lineHeader && currentFile !== '') {
       save();
       currentLine = Number(lineHeader[1]);
-      outdated = (lineHeader[2] ?? '').includes('outdated');
+      currentEnd = blockEnd(currentLine, Number(lineHeader[2] ?? 0));
+      outdated = (lineHeader[3] ?? '').includes('outdated');
       collecting = true;
       continue;
     }
@@ -360,9 +366,8 @@ export function serializeReview(review: Review): string {
     out.push('\n---\n\n', `## \`${path}\`\n`);
 
     for (const [lineNum, ann] of [...lines].sort((a, b) => a[0] - b[0])) {
-      out.push(
-        ann.outdated ? `\n#### Line ${lineNum} (outdated)\n\n` : `\n#### Line ${lineNum}\n\n`,
-      );
+      const range = ann.endLine > 0 ? ` to ${ann.endLine}` : '';
+      out.push(`\n#### Line ${lineNum}${range}${ann.outdated ? ' (outdated)' : ''}\n\n`);
       const { text, openFence } = escapeComment(ann.comment);
       out.push(text);
       if (ann.context.length > 0) {
@@ -534,27 +539,40 @@ export function todayStamp(now: Date = new Date()): string {
 }
 
 /**
- * Gives the lines around a line.
+ * Gives the last line of a block for an annotation. A block that ends on its first line is one line.
+ *
+ * @param line The first line of the block.
+ * @param endLine The last line of the block, or 0 for one line.
+ * @returns The last line, or 0 for a block of one line.
+ */
+export function blockEnd(line: number, endLine: number): number {
+  return endLine > line ? endLine : 0;
+}
+
+/**
+ * Gives the lines around a line or a block of lines.
  *
  * @param lines The lines of the file.
  * @param lineNum The line number, starting at 1.
  * @param radius The number of lines above and below.
+ * @param endLine The last line of a block, or 0 for one line. The lines of the block are part of the context.
  * @returns The lines and the line number of the first line. A line out of range gives no lines and 0.
  */
 export function contextAround(
   lines: string[],
   lineNum: number,
   radius: number = CONTEXT_RADIUS,
+  endLine = 0,
 ): { context: string[]; from: number } {
   if (lineNum < 1 || lineNum > lines.length) return { context: [], from: 0 };
   const start = Math.max(lineNum - radius, 1);
-  const end = Math.min(lineNum + radius, lines.length);
+  const end = Math.min(Math.max(lineNum, endLine) + radius, lines.length);
   return { context: lines.slice(start - 1, end), from: start };
 }
 
 /**
- * Adds or replaces the comment on one line of one file. The annotation stores
- * the source lines around the line, so the drift check can follow the code
+ * Adds or replaces the comment on one line or one block of lines of one file. The annotation stores
+ * the source lines around the line or the block, so the drift check can follow the code
  * when it moves.
  *
  * @param review The review to change.
@@ -562,6 +580,7 @@ export function contextAround(
  * @param line The line number, starting at 1.
  * @param comment The comment.
  * @param sourceLines The current lines of the file, or null for an annotation without context.
+ * @param endLine The last line of a block, or 0 for a comment on one line.
  */
 export function setAnnotation(
   review: Review,
@@ -569,6 +588,7 @@ export function setAnnotation(
   line: number,
   comment: string,
   sourceLines: string[] | null,
+  endLine = 0,
 ): void {
   let lines = review.data.get(file);
   if (!lines) {
@@ -577,12 +597,13 @@ export function setAnnotation(
   }
   const ann: Annotation = {
     comment: comment.trim(),
+    endLine: blockEnd(line, endLine),
     context: [],
     contextFrom: 0,
     outdated: false,
   };
   if (sourceLines) {
-    const { context, from } = contextAround(sourceLines, line, CONTEXT_RADIUS);
+    const { context, from } = contextAround(sourceLines, line, CONTEXT_RADIUS, ann.endLine);
     ann.context = context;
     ann.contextFrom = from;
   }
@@ -663,7 +684,7 @@ export function checkDrift(
   for (const [lineNum, ann] of annotations) {
     if (ann.context.length === 0) {
       // Without stored context, the annotation takes the context of the current source.
-      const { context, from } = contextAround(sourceLines, lineNum, CONTEXT_RADIUS);
+      const { context, from } = contextAround(sourceLines, lineNum, CONTEXT_RADIUS, ann.endLine);
       if (context.length > 0) {
         ann.context = context;
         ann.contextFrom = from;
@@ -739,6 +760,7 @@ function relocate(annotations: Map<number, Annotation>, relocations: Relocation[
   let changed = moves.size > 0;
   for (const r of relocations) {
     if (moves.has(r.oldLine)) {
+      if (r.ann.endLine > 0) r.ann.endLine += r.newLine - r.oldLine;
       r.ann.contextFrom = r.newFrom;
       r.ann.outdated = false;
     } else if (!r.ann.outdated) {

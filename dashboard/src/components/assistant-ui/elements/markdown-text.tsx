@@ -20,6 +20,7 @@ import { MermaidDiagram } from "@/components/assistant-ui/elements/mermaid-diagr
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { filePath, fileUrl } from "@/lib/files";
+import { rehypeBlocks } from "@/lib/markdown-blocks";
 import { cn } from "@/lib/utils";
 
 /** The props of {@link MarkdownText}: the text part props, extra markdown components and the base directory. */
@@ -28,6 +29,8 @@ type MarkdownTextProps = Partial<TextMessagePartProps> & {
   components?: Parameters<typeof memoizeMarkdownComponents>[0];
   /** Boxes edit: the absolute directory in the box where a relative path starts. The default is the workspace. */
   baseDir?: string;
+  /** Boxes edit: true to give each block its source lines and to wrap each top level block in a div. */
+  blocks?: boolean;
 };
 
 /**
@@ -60,8 +63,13 @@ const useShallowStable = <T extends Record<string, unknown> | undefined>(
  *
  * @param components Components that replace the default components for some elements.
  * @param baseDir The absolute directory in the box where a relative path starts. The default is the workspace.
+ * @param blocks True to give each block its source lines and to wrap each top level block in a div.
  */
-const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components, baseDir }) => {
+const MarkdownTextImpl: FC<MarkdownTextProps> = ({
+  components,
+  baseDir,
+  blocks = false,
+}) => {
   const { id: boxId } = useParams();
   // Boxes edit: the browser keeps an image of the page in memory, whatever
   // the cache headers say. So each view of the message gets file URLs of its
@@ -83,6 +91,7 @@ const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components, baseDir }) => {
   return (
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm]}
+      rehypePlugins={blocks ? blockPlugins : undefined}
       urlTransform={urlTransform}
       className="aui-md"
       components={markdownComponents}
@@ -97,6 +106,9 @@ export const MarkdownText = memo(MarkdownTextImpl);
 
 /** Boxes edit: counts the views of messages, so each view gets file URLs of its own. */
 let views = 0;
+
+/** Boxes edit: the plugins of a text whose blocks get their source lines. One array, so the renderer keeps its memo. */
+const blockPlugins = [rehypeBlocks];
 
 /**
  * Boxes edit: makes the filter for the URLs of links and images.

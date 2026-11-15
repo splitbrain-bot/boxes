@@ -9,6 +9,7 @@ import type {
   ReviewFileResponse,
 } from '../../../shared/types.ts';
 import { ApiError, api } from '../api.ts';
+import type { ScrollAnchor } from '../lib/anchor.ts';
 import { type Token, tokenizeLines } from '../lib/highlight.ts';
 import { refetchOnVisible } from '../lib/poll.ts';
 
@@ -20,6 +21,22 @@ export interface OpenFile extends ReviewFileResponse {
    * language, or when the file or a line is too long to tokenize.
    */
   tokens: Token[][] | null;
+}
+
+/** The line or the block of lines that the composer is open on. */
+export interface Composing {
+  /** The line, or the first line of the block. */
+  line: number;
+  /** The last line of the block, or 0 for one line. */
+  endLine: number;
+}
+
+/** The place where the reader left a file. */
+interface ReadingPlace {
+  /** The scroll anchor of the pane, or null when the pane was never left. */
+  anchor: ScrollAnchor | null;
+  /** True when the file was shown rendered. */
+  rendered: boolean;
 }
 
 /** The state that the review view renders. */
@@ -43,8 +60,8 @@ export interface ReviewState {
   loadingFile: boolean;
   /** The last error message, or null. The view shows it in place of the pane. */
   error: string | null;
-  /** The line whose composer is open, or null. */
-  composing: number | null;
+  /** The line or the block that the composer is open on, or null. */
+  composing: Composing | null;
   /** True while an annotation write is in flight. */
   saving: boolean;
   /**
@@ -75,31 +92,51 @@ const EMPTY: ReviewState = {
 export const useReview = create<ReviewState>(() => EMPTY);
 
 /**
- * The scroll offset of each file, by path.
+ * The place where the reader left each file, by path.
  *
  * The map is outside the state, so a scroll does not render the view again.
  * {@link open} clears it when the store changes to another box.
  */
-const scrollOffsets = new Map<string, number>();
+const places = new Map<string, ReadingPlace>();
 
 /**
- * Records the scroll offset of a file.
+ * Records the scroll anchor of a file, when the pane leaves it.
  *
  * @param path The path of the file.
- * @param offset The scroll offset in pixels.
+ * @param anchor The scroll anchor of the pane.
  */
-export function rememberScroll(path: string, offset: number): void {
-  scrollOffsets.set(path, offset);
+export function rememberScroll(path: string, anchor: ScrollAnchor): void {
+  places.set(path, { rendered: false, ...places.get(path), anchor });
 }
 
 /**
- * Reads the last scroll offset of a file.
+ * Reads the scroll anchor where the reader left a file.
  *
  * @param path The path of the file.
- * @returns The offset in pixels, or 0 for a file that this review has not opened.
+ * @returns The anchor, or null for a file that this review has not left.
  */
-export function recallScroll(path: string): number {
-  return scrollOffsets.get(path) ?? 0;
+export function recallScroll(path: string): ScrollAnchor | null {
+  return places.get(path)?.anchor ?? null;
+}
+
+/**
+ * Records whether a file is shown rendered.
+ *
+ * @param path The path of the file.
+ * @param rendered True when the file is shown rendered.
+ */
+export function rememberView(path: string, rendered: boolean): void {
+  places.set(path, { anchor: null, ...places.get(path), rendered });
+}
+
+/**
+ * Reads whether a file was last shown rendered.
+ *
+ * @param path The path of the file.
+ * @returns True when the file was shown rendered. A file that this review has not opened shows as source.
+ */
+export function recallView(path: string): boolean {
+  return places.get(path)?.rendered ?? false;
 }
 
 /**
@@ -130,7 +167,7 @@ function get(): ReviewState {
  */
 export function open(boxId: string): void {
   if (get().boxId === boxId) return;
-  scrollOffsets.clear();
+  places.clear();
   set({ ...EMPTY, boxId });
 }
 
@@ -299,12 +336,12 @@ export function setDirty(dirty: boolean): void {
 }
 
 /**
- * Opens or closes the composer on one line.
+ * Opens or closes the composer on one line or one block of lines.
  *
- * @param line The line of the composer, or null to close it.
+ * @param composing The line or the block of the composer, or null to close it.
  */
-export function compose(line: number | null): void {
-  set({ composing: line });
+export function compose(composing: Composing | null): void {
+  set({ composing });
 }
 
 /** The result of a save. A conflict is the only failure that the reviewer can resolve. */
@@ -354,10 +391,16 @@ export async function saveFile(
  * the previous list.
  *
  * @param path The path of the file.
- * @param line The line of the comment.
+ * @param line The line of the comment, or the first line of its block.
  * @param comment The text of the comment.
+ * @param endLine The last line of the block, or 0 for a comment on one line.
  */
-export async function saveComment(path: string, line: number, comment: string): Promise<void> {
+export async function saveComment(
+  path: string,
+  line: number,
+  comment: string,
+  endLine = 0,
+): Promise<void> {
   const { boxId, file } = get();
   if (!boxId) return;
   const previous = file?.annotations ?? [];
@@ -366,13 +409,14 @@ export async function saveComment(path: string, line: number, comment: string): 
   if (file && file.path === path) {
     const optimistic = [
       ...previous.filter((a) => a.line !== line),
-      { line, comment: comment.trim(), outdated: false },
+      { line, endLine, comment: comment.trim(), outdated: false },
     ].sort((a, b) => a.line - b.line);
     set({ file: { ...file, annotations: optimistic }, composing: null });
   }
 
   try {
-    const answer = await api.setAnnotation(boxId, { path, line, comment });
+    const body = endLine > 0 ? { path, line, endLine, comment } : { path, line, comment };
+    const answer = await api.setAnnotation(boxId, body);
     applyAnnotations(path, answer.annotations, countDelta(previous, answer.annotations));
     set({ saving: false, error: null });
   } catch (err) {

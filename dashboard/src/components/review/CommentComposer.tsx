@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { lineRange } from '@/lib/lines';
+import type { Composing } from '../../stores/review.ts';
 
 /**
  * The save shortcut as the hint shows it: ⌘↵ on Apple platforms, Ctrl+↵
@@ -15,7 +17,8 @@ const SAVE_KEY = /mac|iphone|ipad|ipod/i.test(
 /**
  * The form that both composer layouts render.
  *
- * @param line The line being commented on.
+ * @param line The line being commented on, or the first line of the block.
+ * @param endLine The last line of the block, or 0 for one line.
  * @param initial The existing comment when editing, or '' when writing a new one.
  * @param busy Disables the buttons while a write is in flight.
  * @param autoFocus Focuses the textarea on mount and whenever the line changes.
@@ -24,14 +27,17 @@ const SAVE_KEY = /mac|iphone|ipad|ipod/i.test(
  */
 function Form({
   line,
+  endLine,
   initial,
   busy,
   autoFocus,
   onSave,
   onCancel,
 }: {
-  /** The line being commented on. */
+  /** The line being commented on, or the first line of the block. */
   line: number;
+  /** The last line of the block, or 0 for one line. */
+  endLine: number;
   /** The existing comment when editing, or '' when writing a new one. */
   initial: string;
   /** Disables the buttons while a write is in flight. */
@@ -45,6 +51,7 @@ function Form({
 }) {
   const [text, setText] = useState(initial);
   const field = useRef<HTMLTextAreaElement>(null);
+  const range = lineRange(line, endLine);
 
   // The composer stays mounted when it moves to another line, so it resets the text.
   useEffect(() => {
@@ -75,8 +82,8 @@ function Form({
           if (event.key === 'Escape') onCancel();
         }}
         rows={3}
-        placeholder={`Comment on line ${line}…`}
-        aria-label={`Comment on line ${line}`}
+        placeholder={`Comment on ${range}…`}
+        aria-label={`Comment on ${range}`}
         className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
       <div className="flex items-center gap-2">
@@ -97,11 +104,13 @@ function Form({
 /**
  * The composer inline below the line, for wide screens.
  *
- * @param props The line, the existing comment, the busy flag and the callbacks.
+ * @param props The line or the block, the existing comment, the busy flag and the callbacks.
  */
 export function InlineComposer(props: {
-  /** The line being commented on. */
+  /** The line being commented on, or the first line of the block. */
   line: number;
+  /** The last line of the block, or 0 for one line. */
+  endLine: number;
   /** The existing comment when editing, or '' when writing a new one. */
   initial: string;
   /** Disables the buttons while a write is in flight. */
@@ -125,21 +134,21 @@ export function InlineComposer(props: {
  * The view picks this or {@link InlineComposer} with a media query, because the
  * sheet renders into a portal that a CSS breakpoint on a wrapper cannot hide.
  *
- * @param line The line being commented on, or null when the sheet is closed.
+ * @param composing The line or the block being commented on, or null when the sheet is closed.
  * @param initial The existing comment when editing, or '' when writing a new one.
  * @param busy Disables the buttons while a write is in flight.
  * @param onSave Called with the trimmed comment when the user saves.
  * @param onCancel Called when the user cancels or dismisses the sheet.
  */
 export function ComposerSheet({
-  line,
+  composing,
   initial,
   busy,
   onSave,
   onCancel,
 }: {
-  /** The line being commented on, or null when the sheet is closed. */
-  line: number | null;
+  /** The line or the block being commented on, or null when the sheet is closed. */
+  composing: Composing | null;
   /** The existing comment when editing, or '' when writing a new one. */
   initial: string;
   /** Disables the buttons while a write is in flight. */
@@ -149,20 +158,22 @@ export function ComposerSheet({
   /** Called when the user cancels or dismisses the sheet. */
   onCancel: () => void;
 }) {
+  const range = composing ? lineRange(composing.line, composing.endLine) : '';
   return (
-    <Sheet open={line !== null} onOpenChange={(open) => (open ? undefined : onCancel())}>
+    <Sheet open={composing !== null} onOpenChange={(open) => (open ? undefined : onCancel())}>
       {/* The sheet has no description. An explicit undefined tells Radix the
           omission is deliberate. */}
       <SheetContent side="bottom" className="gap-0" aria-describedby={undefined}>
         <SheetHeader className="pb-2">
           <SheetTitle className="text-sm">
-            {initial === '' ? `Comment on line ${line}` : `Edit the comment on line ${line}`}
+            {initial === '' ? `Comment on ${range}` : `Edit the comment on ${range}`}
           </SheetTitle>
         </SheetHeader>
         <div className="px-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">
-          {line === null ? null : (
+          {composing === null ? null : (
             <Form
-              line={line}
+              line={composing.line}
+              endLine={composing.endLine}
               initial={initial}
               busy={busy}
               autoFocus
