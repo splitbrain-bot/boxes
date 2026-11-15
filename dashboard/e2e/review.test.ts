@@ -6,6 +6,7 @@
  * much that a test on one does not cover the other.
  */
 
+import type { Page } from 'playwright';
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
 import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
@@ -483,6 +484,76 @@ test('the place of the reader survives the switch of the view, and a reopen', as
     await page.getByRole('button', { name: /long\.md/ }).click();
     await expect.poll(() => preview.isVisible()).toBe(true);
     await expect.poll(() => topLine(preview)).toBe(block);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+/**
+ * Measures how far the bottom of an element sits above the top of the comment sheet.
+ *
+ * @param page The page.
+ * @param selector The selector of the element.
+ * @returns The distance in pixels. A negative distance means the sheet covers the element.
+ */
+async function gapAboveSheet(page: Page, selector: string): Promise<number> {
+  return page.evaluate((sel) => {
+    const element = [...document.querySelectorAll(sel)].at(-1);
+    const sheet = document.querySelector('[data-slot="sheet-content"]');
+    if (!element || !sheet) return Number.NaN;
+    return sheet.getBoundingClientRect().top - element.getBoundingClientRect().bottom;
+  }, selector);
+}
+
+test('on a phone, a line near the end scrolls above the comment sheet', async () => {
+  stub.review(BOX, {
+    files: {
+      'long.ts': Array.from({ length: 80 }, (_, i) => `const line${i + 1} = ${i};`).join('\n'),
+    },
+    repos: [''],
+  });
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review?path=long.ts`);
+  try {
+    const pane = page.locator('[data-slot="review-code-pane"]');
+    await expect.poll(() => pane.isVisible()).toBe(true);
+    await pane.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    await page.locator('[data-line="79"] code').click();
+    await expect.poll(() => page.getByText('Comment on line 79').isVisible()).toBe(true);
+    // The line sits just above the sheet, even though no line follows to scroll into.
+    await expect.poll(() => gapAboveSheet(page, '[data-line="79"]')).toBeGreaterThanOrEqual(0);
+    // The header hides while the sheet is open, and the line stays above the sheet as the pane grows.
+    await expect.poll(() => page.locator('[data-slot="shelf"]').getAttribute('data-away')).toBe('');
+    await page.waitForTimeout(500);
+    expect(await gapAboveSheet(page, '[data-line="79"]')).toBeLessThan(20);
+    await shoot(page, 'review-sheet-line-phone', 'viewport');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('on a phone, the end of a block scrolls above the comment sheet', async () => {
+  const paragraphs = Array.from({ length: 40 }, (_, i) => `Paragraph ${i + 1}`).join('\n\n');
+  stub.review(BOX, { files: { 'long.md': `${paragraphs}\n` }, repos: [''] });
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${BOX}/review?path=long.md`);
+  try {
+    await expect.poll(() => page.locator('[data-slot="review-code-pane"]').isVisible()).toBe(true);
+    await page.getByRole('button', { name: 'Show the rendered file' }).click();
+    const preview = page.locator('[data-slot="review-preview"]');
+    await expect.poll(() => page.getByText('Paragraph 1', { exact: true }).isVisible()).toBe(true);
+    await preview.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    await page.getByText('Paragraph 39', { exact: true }).click();
+    await expect.poll(() => page.getByText('Comment on line 77').isVisible()).toBe(true);
+    // The frame of the block, with its tinted background, ends just above the sheet.
+    const frame = '[data-block][data-line="77"]';
+    await expect.poll(() => gapAboveSheet(page, frame)).toBeGreaterThanOrEqual(0);
+    await page.waitForTimeout(500);
+    expect(await gapAboveSheet(page, frame)).toBeLessThan(20);
     expect(errors).toEqual([]);
   } finally {
     await close();

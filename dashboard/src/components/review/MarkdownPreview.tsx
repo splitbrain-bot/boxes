@@ -53,6 +53,8 @@ export interface MarkdownPreviewProps {
   renderUnderBlock: (line: number, endLine: number) => React.ReactNode;
   /** Called with the blocks of the file, in order, when they are rendered. */
   onBlocks: (blocks: Block[]) => void;
+  /** The height in pixels at the bottom of the pane that a sheet covers, so the last block can scroll above it. */
+  bottomInset?: number;
 }
 
 /** What the frame of a block needs from the pane. */
@@ -114,6 +116,7 @@ export function MarkdownPreview({
   onShowHunk,
   renderUnderBlock,
   onBlocks,
+  bottomInset = 0,
 }: MarkdownPreviewProps) {
   // A relative path in the file starts from the directory of the file.
   const baseDir = `${WORKSPACE_DIR}/${path}`.replace(/\/[^/]*$/, '');
@@ -253,6 +256,7 @@ export function MarkdownPreview({
     <div
       ref={scrollRef}
       data-slot="review-preview"
+      style={bottomInset > 0 ? { paddingBottom: bottomInset } : undefined}
       className="@container min-h-0 flex-1 overflow-auto"
     >
       <BlockContext.Provider value={context}>

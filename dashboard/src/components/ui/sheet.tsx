@@ -86,6 +86,7 @@ function SheetOverlay({
  * @param children The content of the panel.
  * @param side The edge of the screen that the panel slides in from.
  * @param showCloseButton True to show the close button at the top right corner.
+ * @param overlayClassName Extra classes for the backdrop.
  * @param props The other props of the Radix dialog content.
  */
 function SheetContent({
@@ -93,16 +94,19 @@ function SheetContent({
   children,
   side = 'right',
   showCloseButton = true,
+  overlayClassName,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
   /** The edge of the screen that the panel slides in from. */
   side?: 'top' | 'right' | 'bottom' | 'left';
   /** True to show the close button at the top right corner. */
   showCloseButton?: boolean;
+  /** Extra classes for the backdrop. */
+  overlayClassName?: string;
 }) {
   return (
     <SheetPortal>
-      <SheetOverlay />
+      <SheetOverlay className={overlayClassName} />
       <SheetPrimitive.Content
         data-slot="sheet-content"
         className={cn(

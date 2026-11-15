@@ -139,6 +139,8 @@ export function InlineComposer(props: {
  * @param busy Disables the buttons while a write is in flight.
  * @param onSave Called with the trimmed comment when the user saves.
  * @param onCancel Called when the user cancels or dismisses the sheet.
+ * @param onCover Called with the top edge of the area that the sheet and the keyboard cover, or with null when the
+ *   sheet closes.
  */
 export function ComposerSheet({
   composing,
@@ -146,6 +148,7 @@ export function ComposerSheet({
   busy,
   onSave,
   onCancel,
+  onCover,
 }: {
   /** The line or the block being commented on, or null when the sheet is closed. */
   composing: Composing | null;
@@ -157,13 +160,63 @@ export function ComposerSheet({
   onSave: (comment: string) => void;
   /** Called when the user cancels or dismisses the sheet. */
   onCancel: () => void;
+  /**
+   * Called with the top edge of the area that the sheet and the keyboard cover, in pixels from the top of the
+   * layout viewport, or with null when the sheet closes.
+   */
+  onCover: (top: number | null) => void;
 }) {
   const range = composing ? lineRange(composing.line, composing.endLine) : '';
+  const open = composing !== null;
+  /** The panel of the open sheet. Radix mounts it in a portal after the sheet opens, and unmounts it after it closes. */
+  const [panel, setPanel] = useState<HTMLDivElement | null>(null);
+
+  /**
+   * Reports the covered area while the panel is on screen. The panel slides in, and the keyboard opens after it
+   * and shrinks the visible area, so the sheet measures again after each of them.
+   */
+  useEffect(() => {
+    const element = panel;
+    if (!element) {
+      onCover(null);
+      return;
+    }
+    let frame = 0;
+    const measure = (): void => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const viewport = window.visualViewport;
+        const visibleBottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+        onCover(Math.min(element.getBoundingClientRect().top, visibleBottom));
+      });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    element.addEventListener('animationend', measure);
+    window.visualViewport?.addEventListener('resize', measure);
+    window.visualViewport?.addEventListener('scroll', measure);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      element.removeEventListener('animationend', measure);
+      window.visualViewport?.removeEventListener('resize', measure);
+      window.visualViewport?.removeEventListener('scroll', measure);
+    };
+  }, [panel, onCover]);
+
   return (
-    <Sheet open={composing !== null} onOpenChange={(open) => (open ? undefined : onCancel())}>
+    <Sheet open={open} onOpenChange={(next) => (next ? undefined : onCancel())}>
       {/* The sheet has no description. An explicit undefined tells Radix the
-          omission is deliberate. */}
-      <SheetContent side="bottom" className="gap-0" aria-describedby={undefined}>
+          omission is deliberate. The backdrop is light, so the commented text
+          above the sheet stays readable. */}
+      <SheetContent
+        ref={setPanel}
+        side="bottom"
+        className="gap-0"
+        overlayClassName="bg-black/25"
+        aria-describedby={undefined}
+      >
         <SheetHeader className="pb-2">
           <SheetTitle className="text-sm">
             {initial === '' ? `Comment on ${range}` : `Edit the comment on ${range}`}
