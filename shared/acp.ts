@@ -80,6 +80,13 @@ export const UPDATE_KIND = {
    * the conversation so far.
    */
   usage: 'usage_update',
+  /**
+   * A sub agent that the agent started, sent on the session of its parent. The updates of the sub agent then
+   * arrive on the session that `subagentSessionId` names.
+   */
+  subagentSpawned: 'subagent_spawned',
+  /** The end of a sub agent, sent on the session of its parent. */
+  subagentState: 'subagent_state_update',
 } as const;
 
 /** One of the values of {@link UPDATE_KIND}. */

@@ -202,13 +202,12 @@ export const HARNESSES: Readonly<Record<HarnessId, Harness>> = {
      */
     credentialId: null,
     /**
-     * Turns off the self-update and the download of language servers. opencode
-     * also stops reading the Claude Code instructions and skills, because the
-     * agent set has its own copy for opencode.
+     * Turns off the self-update. opencode also stops reading the Claude Code
+     * instructions and skills, because the agent set has its own copy for
+     * opencode.
      */
     env: () => ({
       OPENCODE_DISABLE_AUTOUPDATE: '1',
-      OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
       OPENCODE_DISABLE_CLAUDE_CODE: '1',
     }),
     /** Skills go in the harness-neutral `~/.agents/skills`, the same folder as for Codex. */

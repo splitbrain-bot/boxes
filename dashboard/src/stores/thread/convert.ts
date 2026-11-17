@@ -1,6 +1,11 @@
 /** Converts the thread's message model into the shape the assistant-ui runtime reads. */
 
-import type { ThreadMessageLike, ToolApprovalOption } from '@assistant-ui/react';
+import {
+  fromThreadMessageLike,
+  type ThreadMessage,
+  type ThreadMessageLike,
+  type ToolApprovalOption,
+} from '@assistant-ui/react';
 import { isThumbnailable } from '../../lib/attachments.ts';
 import { workspaceFileUrl } from '../../lib/files.ts';
 import { TASK_NOTIFICATION_PART } from '../../lib/task-notifications.ts';
@@ -102,7 +107,7 @@ function awaitingApproval(part: ToolPart): boolean {
  * @param part The tool part.
  * @returns The tool-call part.
  */
-function toolPart(part: ToolPart) {
+function toolPart(part: ToolPart, boxId?: string) {
   const output = toolOutputText(part);
   // A call that awaits permission gets no result, even with content, because
   // the runtime treats any result as a finished call and then hides the
@@ -119,7 +124,30 @@ function toolPart(part: ToolPart) {
     ...(finished ? { result: output } : {}),
     ...(part.status === 'failed' ? { isError: true } : {}),
     ...(part.approval ? { approval: approval(part.approval) } : {}),
+    ...(part.messages ? { messages: subagentMessages(part, boxId) } : {}),
   };
+}
+
+/**
+ * Converts the run of a sub agent into the messages of the nested thread that its card shows.
+ *
+ * The runtime derives the status of a message of the thread itself, but a nested message needs it set. The last
+ * message of a running sub agent is running.
+ *
+ * @param part The card of the sub agent.
+ * @param boxId The box that attachments load from.
+ * @returns The messages, in the shape the runtime reads.
+ */
+function subagentMessages(part: ToolPart, boxId?: string): ThreadMessage[] {
+  const run = part.messages ?? [];
+  return run.map((message, i) => {
+    const last = i === run.length - 1 && part.status === 'in_progress';
+    return fromThreadMessageLike(
+      convertMessage(message, boxId),
+      message.id,
+      last ? { type: 'running' } : { type: 'complete', reason: 'unknown' },
+    );
+  });
 }
 
 /**
@@ -216,7 +244,7 @@ export function convertMessage(message: Message, boxId?: string): ThreadMessageL
       if (part.type === 'image') return [imagePart(part.src)];
       if (part.type === 'attachment') return [attachmentPart(part, boxId)];
       if (part.type === 'task') return [taskPart(part)];
-      return [toolPart(part), ...toolImages(part)];
+      return [toolPart(part, boxId), ...toolImages(part)];
     }),
   };
 }

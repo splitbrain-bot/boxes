@@ -7,9 +7,6 @@
 # in every thread.
 model_provider = "openai-https"
 
-# No attribution trailer naming Codex in the commits an agent makes.
-commit_attribution = ""
-
 # Codex recognises its own provider by this name. No base URL is set, so the
 # login decides the endpoint. The endpoint is api.openai.com for an API key and
 # chatgpt.com for a subscription.

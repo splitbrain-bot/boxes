@@ -11,8 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@assistant-ui/react": "0.15.21",
-    "@assistant-ui/react-markdown": "0.14.16",
+    "@assistant-ui/react": "0.15.36",
+    "@assistant-ui/react-markdown": "0.14.26",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",

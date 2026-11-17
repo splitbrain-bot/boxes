@@ -26,6 +26,7 @@ import { Notifier, type NotifyEvent } from '../notify.ts';
 import { DockerRuntime } from '../runtime/docker.ts';
 import { setRuntime } from '../runtime/runtime.ts';
 import * as ws from '../workspaces.ts';
+import { threadOf } from './broadcast.ts';
 import { type DownstreamHandle, HISTORY_LOADING, THREAD_WORKING } from './upstream.ts';
 
 // A turn is announced once its thread has gone quiet, so these tests wait for the quiet. Set to the shortest the
@@ -3428,4 +3429,152 @@ test('an MCP server without a stored secret is left out', async () => {
     [{ type: 'http', name: 'open', url: 'https://open.example.com/mcp', headers: [] }],
   ]);
   assert.ok(written.some((line) => line.includes('left out an MCP server')));
+});
+
+/**
+ * A `subagent_spawned`, as either adapter sends one for a client with native sub agent sessions.
+ *
+ * @param acpSessionId The session that started the sub agent.
+ * @param child The session of the sub agent.
+ * @returns The params of the `session/update` notification.
+ */
+function subagentSpawned(acpSessionId: string, child: string): unknown {
+  return {
+    sessionId: acpSessionId,
+    update: {
+      sessionUpdate: 'subagent_spawned',
+      subagentSessionId: child,
+      name: 'Find the words',
+      task: 'Read words.txt',
+      capabilities: {},
+    },
+  };
+}
+
+/**
+ * A text chunk of one session.
+ *
+ * @param acpSessionId The session.
+ * @param text The text.
+ * @returns The params of the `session/update` notification.
+ */
+function chunk(acpSessionId: string, text: string): unknown {
+  return {
+    sessionId: acpSessionId,
+    update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
+  };
+}
+
+test('the updates of a sub agent reach the browsers of its thread, as sent', async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const watcher = fakeHandle(1, 'acp-gone');
+  const elsewhere = fakeHandle(2, 'acp-kept');
+  up.attach(watcher);
+  up.attach(elsewhere);
+
+  adapter.notify('session/update', subagentSpawned('acp-gone', 'child-1'));
+  // A sub agent of the sub agent belongs to the same thread.
+  adapter.notify('session/update', subagentSpawned('child-1', 'child-2'));
+  adapter.notify('session/update', chunk('child-1', 'from the sub agent'));
+  adapter.notify('session/update', chunk('child-2', 'from the nested sub agent'));
+
+  await expect
+    .poll(() => watcher.told.filter((p) => (p as { update?: unknown }).update).length)
+    .toBe(4);
+  // The session ids stay the sub agents' own, which is how the dashboard tells them apart.
+  assert.deepEqual(
+    watcher.told.flatMap((p) => ((p as { update?: unknown }).update ? [threadOf(p)] : [])),
+    ['acp-gone', 'child-1', 'child-1', 'child-2'],
+  );
+  assert.equal(elsewhere.told.filter((p) => (p as { update?: unknown }).update).length, 0);
+});
+
+test('a permission request of a sub agent goes to the browser of its thread', async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const watcher = fakeHandle(1, 'acp-gone');
+  up.attach(watcher);
+
+  adapter.notify('session/update', subagentSpawned('acp-gone', 'child-1'));
+  adapter.push(permissionFrame('child-1'));
+
+  await expect.poll(() => watcher.asked.length).toBe(1);
+  assert.equal(threadOf(watcher.asked[0]), 'child-1');
+  assert.equal(manager.pending.countForBox('s1'), 0);
+});
+
+test('a child session of opencode arrives as a sub agent session', async () => {
+  const adapter = new FakeAdapter((msg) => {
+    if (msg.method === 'initialize') return { protocolVersion: 1, agentCapabilities: {} };
+    return {};
+  });
+  fakeDocker(adapter);
+
+  const up = manager.upstream('s1');
+  await up.ensureStarted();
+  const watcher = fakeHandle(1, 'acp-gone');
+  up.attach(watcher);
+
+  const child = {
+    rootSessionId: 'acp-gone',
+    childSessionId: 'ses-child',
+    parentSessionId: 'acp-gone',
+    depth: 1,
+    title: 'Read the word list',
+  };
+  adapter.notify('opencode/session/child_update', { ...child, type: 'status', status: 'created' });
+  adapter.notify('opencode/session/child_update', { ...child, type: 'status', status: 'running' });
+  adapter.notify('opencode/session/child_update', {
+    ...child,
+    type: 'update',
+    update: { sessionUpdate: 'tool_call', toolCallId: 'ses-child:call-1', title: 'read' },
+  });
+  adapter.notify('opencode/session/child_update', {
+    ...child,
+    type: 'status',
+    status: 'interrupted',
+  });
+
+  await expect
+    .poll(() => watcher.told.filter((p) => (p as { update?: unknown }).update).length)
+    .toBe(3);
+  assert.deepEqual(
+    watcher.told.filter((p) => (p as { update?: unknown }).update),
+    [
+      {
+        sessionId: 'acp-gone',
+        update: {
+          sessionUpdate: 'subagent_spawned',
+          subagentSessionId: 'ses-child',
+          name: 'Read the word list',
+          capabilities: {},
+        },
+      },
+      {
+        sessionId: 'ses-child',
+        update: { sessionUpdate: 'tool_call', toolCallId: 'ses-child:call-1', title: 'read' },
+      },
+      {
+        sessionId: 'acp-gone',
+        update: {
+          sessionUpdate: 'subagent_state_update',
+          subagentSessionId: 'ses-child',
+          state: 'cancelled',
+        },
+      },
+    ],
+  );
 });

@@ -63,10 +63,30 @@ interface ToolCall {
   rawInput?: unknown;
   /** The tool's raw result. */
   rawOutput?: unknown;
+  /** Extension fields, such as the output chunk of a command. */
+  _meta?: Record<string, unknown> | null;
 }
 
 /** A change to a tool call. Every field but the id is optional. */
 export type ToolCallUpdate = Partial<ToolCall> & { toolCallId: string };
+
+/** A sub agent that the agent started. Its updates arrive on the session that `subagentSessionId` names. */
+export interface SubagentSpawned {
+  /** The adapter's id for the session of the sub agent. */
+  subagentSessionId: string;
+  /** The name the agent gave the sub agent. */
+  name?: string | null;
+  /** The task the agent gave the sub agent. */
+  task?: string | null;
+}
+
+/** The end of a sub agent. */
+export interface SubagentState {
+  /** The adapter's id for the session of the sub agent. */
+  subagentSessionId: string;
+  /** `completed`, `failed`, `cancelled` or `disconnected`. */
+  state?: string;
+}
 
 /** One mode the adapter can operate in. */
 interface ThreadMode {
@@ -160,6 +180,8 @@ export type ThreadUpdate =
   | { sessionUpdate: typeof UPDATE_KIND.currentMode; currentModeId: string }
   | { sessionUpdate: typeof UPDATE_KIND.availableCommands; availableCommands?: AvailableCommand[] }
   | { sessionUpdate: typeof UPDATE_KIND.configOption; configOptions?: ThreadConfigOption[] }
+  | (SubagentSpawned & { sessionUpdate: typeof UPDATE_KIND.subagentSpawned })
+  | (SubagentState & { sessionUpdate: typeof UPDATE_KIND.subagentState })
   // Forward compatibility, because an adapter can send a kind that is newer than this build.
   | { sessionUpdate: string; [key: string]: unknown };
 

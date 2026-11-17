@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useRef, useState } from "react";
+import { memo, useCallback, useContext, useRef, useState } from "react";
 import {
   AlertCircleIcon,
   CheckIcon,
@@ -21,6 +21,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { useDisclosureLock } from "@/hooks/use-disclosure-lock";
+import { ApprovalResponderContext } from "@/lib/approvals";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/Spinner";
@@ -157,6 +158,7 @@ function ToolFallbackDuration({
  * @param toolName The name of the tool.
  * @param status The status of the call. Absent counts as complete.
  * @param asking True when this call puts a question to the user.
+ * @param label Boxes edit: the text before the name, in place of the one the status gives.
  * @param className Extra classes.
  * @param props The other collapsible trigger props.
  */
@@ -164,6 +166,7 @@ function ToolFallbackTrigger({
   toolName,
   status,
   asking,
+  label: givenLabel,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
@@ -173,6 +176,8 @@ function ToolFallbackTrigger({
   status?: ToolCallMessagePartStatus;
   /** True when this call puts a question to the user. */
   asking?: boolean;
+  /** The text before the name, in place of the one the status gives. */
+  label?: string;
 }) {
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
@@ -183,15 +188,17 @@ function ToolFallbackTrigger({
   // Boxes edit: a call with no result inherits the status of its message, so
   // requires-action alone does not mean the call wants to run. `asking` tells
   // the two apart.
-  const label = isCancelled
-    ? "Cancelled tool"
-    : statusType === "requires-action"
-      ? asking
-        ? "Wants to run"
-        : "Unfinished tool"
-      : isRunning
-        ? "Running tool"
-        : "Used tool";
+  const label =
+    givenLabel ??
+    (isCancelled
+      ? "Cancelled tool"
+      : statusType === "requires-action"
+        ? asking
+          ? "Wants to run"
+          : "Unfinished tool"
+        : isRunning
+          ? "Running tool"
+          : "Used tool");
 
   return (
     <CollapsibleTrigger
@@ -507,6 +514,15 @@ function ToolFallbackApproval({
   }) {
   const [submitted, setSubmitted] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  // Boxes edit: the thread view answers in place of the runtime when it
+  // provides a responder. The runtime of a readonly thread, in which the
+  // calls of a sub agent render, drops an answer.
+  const respondOutside = useContext(ApprovalResponderContext);
+  const answer =
+    respondOutside && approval
+      ? (response: { approved?: boolean; optionId?: string }) =>
+          respondOutside({ approvalId: approval.id, ...response })
+      : respondToApproval;
 
   if (
     approval != null &&
@@ -518,16 +534,12 @@ function ToolFallbackApproval({
 
   // A declared option list limits the choices. The component adds no way to
   // approve beyond the list, and it always keeps a way to refuse.
-  const declaredOptions = respondToApproval ? approval?.options : undefined;
+  const declaredOptions = answer ? approval?.options : undefined;
 
   const respond = (approved: boolean) => {
     if (submitted) return;
-    if (
-      approval != null &&
-      approval.approved === undefined &&
-      respondToApproval
-    ) {
-      respondToApproval({ approved });
+    if (approval != null && approval.approved === undefined && answer) {
+      answer({ approved });
     } else if (interrupt) {
       resume?.({ approved });
     } else if (
@@ -545,7 +557,7 @@ function ToolFallbackApproval({
     if (submitted) return;
     // The runtime cannot derive a decision from a custom kind, and it throws
     // when the answer has none. A picked option is an answer, so it counts as approved.
-    respondToApproval?.(
+    answer?.(
       isKnownKind(option.kind)
         ? { optionId: option.id }
         : { optionId: option.id, approved: true },

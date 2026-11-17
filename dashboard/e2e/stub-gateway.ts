@@ -11,6 +11,7 @@ import {
 import type {
   ThreadConfigOption,
   ThreadModeState,
+  ThreadNotification,
   ThreadUpdate,
 } from '../src/stores/thread/acp-types.ts';
 
@@ -166,8 +167,9 @@ export interface StubGateway {
    *
    * @param update The update.
    * @param threadId The ACP id of the thread. Defaults to the default thread.
+   * @param sessionId The session the update names, which is the thread or a sub agent of it.
    */
-  emit: (update: ThreadUpdate, threadId?: string) => void;
+  emit: (update: ThreadUpdate, threadId?: string, sessionId?: string) => void;
   /** Closes every socket and the server. */
   close: () => void;
 }
@@ -234,7 +236,7 @@ export function attachStubGateway(
   /** Every attached socket, each recording the thread it is pinned to. */
   const sockets = new Map<WebSocket, string>();
   /** One transcript per thread, which is what session/load replays. */
-  const threads = new Map<string, ThreadUpdate[]>([[THREAD_ID, []]]);
+  const threads = new Map<string, ThreadNotification[]>([[THREAD_ID, []]]);
   /** The thread a socket naming none is pinned to. */
   let current = THREAD_ID;
   let nextThread = 2;
@@ -259,7 +261,7 @@ export function attachStubGateway(
    * @param threadId The ACP id of the thread.
    * @returns The transcript.
    */
-  const historyOf = (threadId: string): ThreadUpdate[] => {
+  const historyOf = (threadId: string): ThreadNotification[] => {
     let found = threads.get(threadId);
     if (!found) {
       found = [];
@@ -304,15 +306,17 @@ export function attachStubGateway(
    *
    * @param update The update.
    * @param threadId The ACP id of the thread. Defaults to the default thread.
+   * @param sessionId The session the update names, which is the thread or a sub agent of it.
    */
-  const emit = (update: ThreadUpdate, threadId: string = current): void => {
-    historyOf(threadId).push(update);
+  const emit = (
+    update: ThreadUpdate,
+    threadId: string = current,
+    sessionId: string = threadId,
+  ): void => {
+    const params = { sessionId, update };
+    historyOf(threadId).push(params);
     for (const ws of watchers(threadId)) {
-      send(ws, {
-        jsonrpc: '2.0',
-        method: 'session/update',
-        params: { sessionId: threadId, update },
-      });
+      send(ws, { jsonrpc: '2.0', method: 'session/update', params });
     }
   };
 
@@ -324,7 +328,13 @@ export function attachStubGateway(
    */
   const mint = (from: string | null): string => {
     const id = `acp-thread-${nextThread++}`;
-    threads.set(id, from ? [...historyOf(from)] : []);
+    // The fork's own updates name the fork, as the gateway replays them.
+    threads.set(
+      id,
+      from
+        ? historyOf(from).map((p) => ({ ...p, sessionId: p.sessionId === from ? id : p.sessionId }))
+        : [],
+    );
     // The new thread becomes the default. Sockets stay pinned to their threads.
     current = id;
     return id;
@@ -425,12 +435,8 @@ export function attachStubGateway(
           send(ws, { jsonrpc: '2.0', method: REPLAY_METHOD, params: notice });
         }
         // The replay goes to this socket only.
-        for (const update of historyOf(threadId).slice(dropped)) {
-          send(ws, {
-            jsonrpc: '2.0',
-            method: 'session/update',
-            params: { sessionId: threadId, update },
-          });
+        for (const params of historyOf(threadId).slice(dropped)) {
+          send(ws, { jsonrpc: '2.0', method: 'session/update', params });
         }
         // The real gateway sends the turn state after the replay.
         turnState(threadId, ws);

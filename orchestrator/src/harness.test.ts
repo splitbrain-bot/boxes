@@ -158,7 +158,6 @@ test('the opencode entry runs on the API keys of the user', () => {
   assert.equal(h.credentialId, null);
   assert.deepEqual(h.env('', null), {
     OPENCODE_DISABLE_AUTOUPDATE: '1',
-    OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
     OPENCODE_DISABLE_CLAUDE_CODE: '1',
   });
   assert.deepEqual(h.layout, { agentsMd: '.config/opencode/AGENTS.md', skills: '.agents/skills' });

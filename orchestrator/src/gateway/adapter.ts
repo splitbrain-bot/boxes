@@ -1,7 +1,7 @@
 import { PassThrough, Readable } from 'node:stream';
 import type { McpServer, Stream } from '@agentclientprotocol/sdk';
 import { client as acpClient, type ClientConnection, ndJsonStream } from '@agentclientprotocol/sdk';
-import { ACP_METHOD } from '../../../shared/acp.ts';
+import { ACP_METHOD, UPDATE_KIND } from '../../../shared/acp.ts';
 import type {
   BackgroundProcess,
   ThreadConfigOption,
@@ -38,7 +38,71 @@ const raw = <T = unknown>(params: unknown): T => params as T;
  * Update kinds the SDK's schema does not know, which
  * {@link AdapterConnection.siftExtensions} takes off the stream.
  */
-const EXTENSION_UPDATE = /^async_task_/;
+const EXTENSION_UPDATE = /^(async_task_|subagent_)/;
+
+/** The notification opencode sends for a child session. */
+const CHILD_UPDATE_METHOD = 'opencode/session/child_update';
+
+/** The text that marks a line of the adapter's output as a possible extension notification. */
+const EXTENSION_MARK = /async_task_|subagent_|opencode\/session\/child_update/;
+
+/** The end states of an opencode child session, as the `state` of a `subagent_state_update`. */
+const CHILD_END_STATES: Record<string, string> = {
+  completed: 'completed',
+  failed: 'failed',
+  interrupted: 'cancelled',
+};
+
+/** One `opencode/session/child_update` notification. */
+interface ChildUpdate {
+  /** The child session. */
+  childSessionId?: unknown;
+  /** The session that started the child. */
+  parentSessionId?: unknown;
+  /** The title opencode gave the child. */
+  title?: unknown;
+  /** `status` for a change of the child's state, `update` for one of its updates. */
+  type?: unknown;
+  /** The new state, with `type: 'status'`. */
+  status?: unknown;
+  /** The `update` of a `session/update` of the child, with `type: 'update'`. */
+  update?: unknown;
+}
+
+/**
+ * Turns one opencode child notification into the `session/update` params of the AIR form, which the Claude and
+ * Codex adapters send for a sub agent. A running state has no counterpart and gives nothing.
+ *
+ * @param notification The params of the notification.
+ * @returns The params of the `session/update`, or null when the notification has no counterpart.
+ */
+export function translateChildUpdate(notification: ChildUpdate): unknown {
+  const { childSessionId: child, parentSessionId: parent } = notification;
+  if (typeof child !== 'string' || typeof parent !== 'string') return null;
+  if (notification.type === 'update') {
+    return notification.update ? { sessionId: child, update: notification.update } : null;
+  }
+  if (notification.type !== 'status') return null;
+  if (notification.status === 'created') {
+    const name = typeof notification.title === 'string' ? notification.title : 'subagent';
+    return {
+      sessionId: parent,
+      update: {
+        sessionUpdate: UPDATE_KIND.subagentSpawned,
+        subagentSessionId: child,
+        name,
+        capabilities: {},
+      },
+    };
+  }
+  const state =
+    typeof notification.status === 'string' ? CHILD_END_STATES[notification.status] : undefined;
+  if (!state) return null;
+  return {
+    sessionId: parent,
+    update: { sessionUpdate: UPDATE_KIND.subagentState, subagentSessionId: child, state },
+  };
+}
 
 /** Wait before each retry, in milliseconds, by retry number. */
 const SPAWN_BACKOFF_MS = [1000, 3000];
@@ -61,12 +125,17 @@ const MAX_INHERIT_HOPS = 32;
 /**
  * The client capabilities Boxes sends at `initialize`.
  *
- * The capabilities hold only the async-task extension, which both adapters need before they send async-task
- * updates. With no filesystem or terminal capability, the adapter sends the client only `session/update` and
- * `session/request_permission`.
+ * The AIR capabilities select the async-task updates and the sub agent sessions of the Claude and Codex adapters.
+ * `terminal_output_delta` selects the output chunks of a Codex command. The opencode key selects the child session
+ * updates of opencode. With no filesystem or terminal capability, the adapter sends the client only
+ * `session/update`, `session/request_permission` and the notifications of these extensions.
  */
 const CLIENT_CAPABILITIES = {
-  _meta: { jetbrains: { air: { version: 1, capabilities: ['asyncTasks'] } } },
+  _meta: {
+    jetbrains: { air: { version: 1, capabilities: ['asyncTasks', 'nativeSubagentSessions'] } },
+    terminal_output_delta: true,
+    'opencode/child-session-updates': true,
+  },
 } as const;
 
 /** The error for a thread id that names none of the box's threads. The API turns it into a 404. */
@@ -225,16 +294,24 @@ export interface AdapterHost {
    *
    * @param harness The harness whose adapter sent the update.
    * @param params The params of the `session/update` notification.
+   * @param thread The adapter's id for the thread of the update, or undefined when the update names no session.
+   *   The update of a sub agent names the session of the sub agent and belongs to the thread of its root.
    * @param replaying True when the update is part of a replay.
    */
-  onUpdate(harness: HarnessId, params: unknown, replaying: boolean): void;
+  onUpdate(
+    harness: HarnessId,
+    params: unknown,
+    thread: string | undefined,
+    replaying: boolean,
+  ): void;
   /**
    * Answers a permission request. The adapter blocks until it resolves.
    *
    * @param params The params of the `session/request_permission` request.
+   * @param thread The adapter's id for the thread that asks, or undefined when the request names no session.
    * @returns The answer for the adapter.
    */
-  onPermission(params: unknown): Promise<unknown>;
+  onPermission(params: unknown, thread: string | undefined): Promise<unknown>;
   /**
    * Reports the conversations lost when the adapter process exited.
    *
@@ -328,6 +405,12 @@ export class AdapterConnection {
    * load in flight is part of a replay.
    */
   private readonly replaying = new Map<string, number>();
+  /**
+   * The thread of each sub agent session, by the session id of the sub agent. A `subagent_spawned` adds the
+   * session under the thread of its parent, which can itself be a sub agent. The teardown empties the map, because
+   * the next adapter process announces its sub agents again.
+   */
+  private readonly roots = new Map<string, string>();
   /**
    * The conversations this adapter process holds, which are the ones it has minted or loaded.
    *
@@ -578,11 +661,11 @@ export class AdapterConnection {
 
     const stream = this.makeStream(exec);
     const app = acpClient({ name: `boxes-${this.host.boxId}` })
-      .onNotification(ACP_METHOD.sessionUpdate as string, raw, ({ params }) => {
-        this.host.onUpdate(this.harness.id, params, this.isReplaying(params));
-      })
+      .onNotification(ACP_METHOD.sessionUpdate as string, raw, ({ params }) =>
+        this.deliverUpdate(params),
+      )
       .onRequest(ACP_METHOD.sessionRequestPermission as string, raw, ({ params }) =>
-        this.host.onPermission(params),
+        this.host.onPermission(params, this.threadOf(params)),
       );
 
     const conn = app.connect(stream);
@@ -1090,14 +1173,52 @@ export class AdapterConnection {
   }
 
   /**
-   * Checks if an update is part of a thread's transcript replay.
+   * Passes one update to the host, under the thread it belongs to.
+   *
+   * A `subagent_spawned` first records the sub agent under the thread of its parent, so the updates of the sub
+   * agent find their thread.
    *
    * @param params The params of the `session/update` notification.
-   * @returns True while a load of the update's thread is in flight.
    */
-  private isReplaying(params: unknown): boolean {
-    const thread = threadOf(params);
-    return thread !== undefined && this.replaying.has(thread);
+  private deliverUpdate(params: unknown): void {
+    const update = (params as { update?: { sessionUpdate?: unknown; subagentSessionId?: unknown } })
+      ?.update;
+    const parent = threadOf(params);
+    if (
+      update?.sessionUpdate === UPDATE_KIND.subagentSpawned &&
+      typeof update.subagentSessionId === 'string' &&
+      parent !== undefined
+    ) {
+      this.roots.set(update.subagentSessionId, this.rootOf(parent));
+    }
+    const thread = parent === undefined ? undefined : this.rootOf(parent);
+    this.host.onUpdate(
+      this.harness.id,
+      params,
+      thread,
+      thread !== undefined && this.replaying.has(thread),
+    );
+  }
+
+  /**
+   * The thread of a session, which is the session itself unless the session is a sub agent.
+   *
+   * @param acpSessionId The adapter's id for the session.
+   * @returns The adapter's id for the thread.
+   */
+  private rootOf(acpSessionId: string): string {
+    return this.roots.get(acpSessionId) ?? acpSessionId;
+  }
+
+  /**
+   * The thread an adapter message belongs to.
+   *
+   * @param params The params of the message.
+   * @returns The adapter's id for the thread, or undefined when the message names no session.
+   */
+  private threadOf(params: unknown): string | undefined {
+    const session = threadOf(params);
+    return session === undefined ? undefined : this.rootOf(session);
   }
 
   /**
@@ -1166,8 +1287,9 @@ export class AdapterConnection {
   }
 
   /**
-   * Takes the async-task extension's notifications off the stream before the
-   * SDK parses it, and passes them to {@link AdapterHost.onUpdate} directly.
+   * Takes the notifications of the extensions off the stream before the SDK parses it, and passes them to
+   * {@link AdapterHost.onUpdate} directly. These are the async-task and sub agent updates, and the child session
+   * notifications of opencode, which become sub agent updates.
    *
    * The SDK's session-update router checks each `session/update` against its
    * schema, and drops an update kind it does not know before any handler
@@ -1213,7 +1335,7 @@ export class AdapterConnection {
    * @returns True when the line was an extension notification. Any other line stays on the stream.
    */
   private consumeExtension(line: string): boolean {
-    if (!line.includes('async_task_')) return false;
+    if (!EXTENSION_MARK.test(line)) return false;
     let message: {
       id?: unknown;
       method?: unknown;
@@ -1224,10 +1346,16 @@ export class AdapterConnection {
     } catch {
       return false;
     }
-    if (message.id !== undefined || message.method !== ACP_METHOD.sessionUpdate) return false;
+    if (message.id !== undefined) return false;
+    if (message.method === CHILD_UPDATE_METHOD) {
+      const params = translateChildUpdate((message.params ?? {}) as ChildUpdate);
+      if (params) this.deliverUpdate(params);
+      return true;
+    }
+    if (message.method !== ACP_METHOD.sessionUpdate) return false;
     const kind = message.params?.update?.sessionUpdate;
     if (typeof kind !== 'string' || !EXTENSION_UPDATE.test(kind)) return false;
-    this.host.onUpdate(this.harness.id, message.params, this.isReplaying(message.params));
+    this.deliverUpdate(message.params);
     return true;
   }
 
@@ -1280,6 +1408,8 @@ export class AdapterConnection {
     this.live.clear();
     // A leftover count would mark every later update of its thread as replay.
     this.replaying.clear();
+    // A fresh adapter announces its sub agents again.
+    this.roots.clear();
     // Nothing announces the old process's tasks again.
     this.tasks.clear();
     try {

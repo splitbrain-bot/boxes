@@ -903,17 +903,23 @@ export class UpstreamBox implements AdapterHost {
    *
    * @param harnessId The harness whose adapter sent the update.
    * @param params The params of the `session/update` notification.
+   * @param thread The adapter's id for the thread of the update, which differs from the session of the update for
+   *   a sub agent.
    * @param replaying True when the update is part of a replay on that adapter.
    */
-  onUpdate(harnessId: HarnessId, params: unknown, replaying: boolean): void {
+  onUpdate(
+    harnessId: HarnessId,
+    params: unknown,
+    thread: string | undefined,
+    replaying: boolean,
+  ): void {
     this.touch();
-    const thread = threadOf(params);
     const update = (params as { update?: unknown })?.update;
     // A replay is not the agent talking.
     if (!replaying && thread) this.activity.observe(thread, update, harnessId);
-    this.recordThreadInfo(harnessId, params, replaying);
+    this.recordThreadInfo(harnessId, params, thread, replaying);
     this.tap('up', ACP_METHOD.sessionUpdate, params);
-    this.downstreams.update(params);
+    this.downstreams.update(params, thread);
     // After the update, so the transcript and the task bar agree. Task
     // updates are forwarded to browsers as well.
     if (thread !== undefined && this.connection(harnessId).noteTask(thread, update)) {
@@ -929,16 +935,25 @@ export class UpstreamBox implements AdapterHost {
    * when a plan is accepted. A replayed update does not count as the thread
    * being heard from, so opening a thread does not move it up the list.
    *
+   * An update of a sub agent counts as the thread being heard from, but the title, the mode and the settings of
+   * a sub agent are not the thread's.
+   *
    * @param harnessId The harness whose adapter sent the update.
    * @param params The params of the `session/update` notification.
+   * @param thread The adapter's id for the thread of the update.
    * @param replaying True when the update is part of a replay.
    */
-  private recordThreadInfo(harnessId: HarnessId, params: unknown, replaying: boolean): void {
-    const acpSessionId = (params as { sessionId?: string })?.sessionId;
-    if (!acpSessionId) return;
-    const row = threadByAcpId(this.db, this.boxId, harnessId, acpSessionId);
+  private recordThreadInfo(
+    harnessId: HarnessId,
+    params: unknown,
+    thread: string | undefined,
+    replaying: boolean,
+  ): void {
+    if (!thread) return;
+    const row = threadByAcpId(this.db, this.boxId, harnessId, thread);
     if (!row) return;
     if (!replaying) touchThread(this.db, row.id);
+    if (threadOf(params) !== thread) return;
 
     const update = (
       params as {
@@ -966,7 +981,7 @@ export class UpstreamBox implements AdapterHost {
         return;
       case UPDATE_KIND.configOption:
         if (Array.isArray(update.configOptions)) {
-          this.connection(harnessId).recordConfigOptions(acpSessionId, update.configOptions);
+          this.connection(harnessId).recordConfigOptions(thread, update.configOptions);
         }
         return;
       default:
@@ -980,13 +995,14 @@ export class UpstreamBox implements AdapterHost {
    * until the answer arrives.
    *
    * @param params The params of the `session/request_permission` request.
+   * @param thread The adapter's id for the thread that asks, which differs from the session of the request for a
+   *   sub agent.
    * @returns The answer for the adapter.
    */
-  onPermission(params: unknown): Promise<unknown> {
+  onPermission(params: unknown, thread: string | undefined): Promise<unknown> {
     this.touch();
     this.tap('up', ACP_METHOD.sessionRequestPermission, params);
 
-    const thread = threadOf(params);
     const target = thread ? this.downstreams.byRecency(thread)[0] : undefined;
     if (target) {
       return target.request(ACP_METHOD.sessionRequestPermission, params).catch((err) => {
@@ -994,23 +1010,24 @@ export class UpstreamBox implements AdapterHost {
         this.slog.warn('permission forward failed; queueing', {
           error: (err as Error).message,
         });
-        return this.queuePermission(params);
+        return this.queuePermission(params, thread);
       });
     }
-    return this.queuePermission(params);
+    return this.queuePermission(params, thread);
   }
 
   /**
    * Holds a permission request for a browser to answer, and sends a notification.
    *
    * @param params The params of the `session/request_permission` request.
+   * @param thread The adapter's id for the thread that asks.
    * @returns The answer for the adapter, from a browser or from the fallback.
    */
-  private queuePermission(params: unknown): Promise<unknown> {
+  private queuePermission(params: unknown, thread: string | undefined): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const entry = this.pending.add(
         this.boxId,
-        threadOf(params) ?? null,
+        thread ?? null,
         ACP_METHOD.sessionRequestPermission,
         params,
         { resolve, reject },
@@ -1018,8 +1035,7 @@ export class UpstreamBox implements AdapterHost {
         (timedOut) => this.applyPermissionFallback(timedOut.row.id, params, resolve),
       );
       this.slog.info('permission request queued', { pendingId: entry.row.id });
-      const thread = threadOf(params) ?? null;
-      if (this.mayAnnounceApproval(thread)) this.announce('approval', thread);
+      if (this.mayAnnounceApproval(thread ?? null)) this.announce('approval', thread ?? null);
     });
   }
 

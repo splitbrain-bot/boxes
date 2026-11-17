@@ -12,6 +12,7 @@ import { FullHistoryButton } from '@/components/FullHistoryButton';
 import { Notice } from '@/components/Notice';
 import { Shelf } from '@/components/Shelf';
 import { SlashCommandsProvider } from '@/components/SlashCommands';
+import { SubagentToolUI } from '@/components/SubagentCard';
 import { ThreadHeader } from '@/components/ThreadHeader';
 import { ThreadLoading } from '@/components/ThreadLoading';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -20,6 +21,7 @@ import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useScrollAway } from '@/hooks/use-scroll-away';
 import { useUp } from '@/hooks/use-up';
 import { useViewportLock } from '@/hooks/use-viewport-lock';
+import { type ApprovalAnswer, ApprovalResponderContext } from '@/lib/approvals';
 import { type AttachmentEntry, buildEnvelope, formatBytes } from '@/lib/attachments';
 import { harnessLabel } from '@/lib/harness';
 import { takeStagedPrompt } from '@/lib/staged-prompt';
@@ -269,6 +271,17 @@ export function BoxThread() {
   // Bound to the box, because the attachment URLs name the box.
   const convert = useCallback((message: Message) => convertMessage(message, id), [id]);
 
+  /**
+   * Answers a permission request, from the runtime or from a card inside a sub agent. No option id means a
+   * refusal to choose, and the store then sends the cancelled outcome of ACP.
+   */
+  const respondToApproval = useCallback(
+    ({ approvalId, approved, optionId }: ApprovalAnswer) => {
+      store?.respondToApproval(approvalId, approved || optionId ? optionId : undefined);
+    },
+    [store],
+  );
+
   // The runtime keeps every message it was given as a branch. A rebuild can
   // bring messages back under other ids, so each rebuild gets a new repository.
   const repository = useMemo(() => new INTERNAL.MessageRepository(), [state.rebuilds]);
@@ -284,10 +297,7 @@ export function BoxThread() {
     onCancel: async () => store?.cancel(),
     onRefetchThread: async () => store?.refetch(),
     adapters: { attachments: attachmentAdapter },
-    onRespondToToolApproval: ({ approvalId, approved, optionId }) => {
-      // No option id means a refusal to choose. The store sends the cancelled outcome of ACP.
-      store?.respondToApproval(approvalId, approved || optionId ? optionId : undefined);
-    },
+    onRespondToToolApproval: respondToApproval,
   });
 
   // The runtime changes on every message, so the ref limits the effect to one
@@ -302,105 +312,112 @@ export function BoxThread() {
   return (
     <TooltipProvider>
       <AssistantRuntimeProvider runtime={runtime}>
-        <SlashCommandsProvider commands={state.commands}>
-          <div ref={container} className="flex h-dvh flex-col">
-            {/* Only the header hides on scroll. The notices below it stay. */}
-            <Shelf away={away}>
-              <ThreadHeader
-                boxId={id}
-                threadId={thread?.id ?? null}
-                up={up}
-                name={box?.name ?? id}
-                threadLabel={threadLabel}
-                harness={thread?.harness ?? null}
-                harnessLabel={harnessLabel(harnesses, thread?.harness)}
-                // Shows closed when the box could not be read, because nothing connects.
-                connection={loadError ? 'closed' : state.connection}
-                modes={state.modes}
-                configOptions={state.configOptions}
-                done={thread?.done === true}
-                canFork={thread?.canFork === true}
-                forking={forking}
-                onFork={onFork}
-                // Undefined until the box has been read, which hides the button.
-                onSetDone={thread ? onSetDone : undefined}
-                onSetMode={(modeId) => void store?.setMode(modeId)}
-                onSetConfigOption={(configId, value) =>
-                  void store?.setConfigOption(configId, value)
-                }
-              />
-            </Shelf>
-            {forked ? (
-              <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
-                <span>
-                  {threadName(forked)} branched from this conversation. It opens on everything said
-                  here so far and goes its own way from there.
-                </span>
-                {/* A plain link, so a popup blocker does not stop the new tab. */}
-                <Link
-                  to={`/boxes/${id}/threads/${forked.id}`}
-                  target="_blank"
-                  rel="noopener"
-                  className="font-medium underline"
-                >
-                  Open it in a new tab
-                </Link>
-                <button
-                  type="button"
-                  onClick={() => setForked(null)}
-                  className="ml-auto text-xs text-muted-foreground hover:underline"
-                >
-                  Dismiss
-                </button>
-              </div>
-            ) : null}
-            {forkError ? (
-              <Notice className="border-b px-4 py-2">
-                Could not fork this thread: {forkError}
-              </Notice>
-            ) : null}
-            {state.error ? <Notice className="border-b px-4 py-2">{state.error}</Notice> : null}
-            <div className="min-h-0 flex-1">
-              {/* A box that could not be read has no token, so the page shows no composer. */}
-              {loadError ? (
-                <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-                  <p className="text-sm">{loadError.message}</p>
-                  <p className="text-sm text-muted-foreground">{loadError.detail}</p>
-                  {/* Goes back in the same way as the back button of the header. */}
-                  <a href={up.href} onClick={up.onClick} className="text-sm font-medium underline">
-                    Back to boxes
-                  </a>
-                </div>
-              ) : state.loading ? (
-                // The box may still be starting. The conversation appears in one
-                // piece once it has been read.
-                <ThreadLoading />
-              ) : (
-                <Thread
-                  aboveMessages={
-                    state.truncated ? (
-                      <FullHistoryButton
-                        loading={state.loadingHistory}
-                        onLoad={() => void store?.loadFullHistory()}
-                      />
-                    ) : null
-                  }
-                  aboveComposer={
-                    <BackgroundBar
-                      processes={state.background}
-                      // Undefined until the box has been read, which hides the button.
-                      onStop={
-                        thread
-                          ? (processId) => void stopBackground(thread.id, processId)
-                          : undefined
-                      }
-                    />
+        <SubagentToolUI />
+        <ApprovalResponderContext.Provider value={respondToApproval}>
+          <SlashCommandsProvider commands={state.commands}>
+            <div ref={container} className="flex h-dvh flex-col">
+              {/* Only the header hides on scroll. The notices below it stay. */}
+              <Shelf away={away}>
+                <ThreadHeader
+                  boxId={id}
+                  threadId={thread?.id ?? null}
+                  up={up}
+                  name={box?.name ?? id}
+                  threadLabel={threadLabel}
+                  harness={thread?.harness ?? null}
+                  harnessLabel={harnessLabel(harnesses, thread?.harness)}
+                  // Shows closed when the box could not be read, because nothing connects.
+                  connection={loadError ? 'closed' : state.connection}
+                  modes={state.modes}
+                  configOptions={state.configOptions}
+                  done={thread?.done === true}
+                  canFork={thread?.canFork === true}
+                  forking={forking}
+                  onFork={onFork}
+                  // Undefined until the box has been read, which hides the button.
+                  onSetDone={thread ? onSetDone : undefined}
+                  onSetMode={(modeId) => void store?.setMode(modeId)}
+                  onSetConfigOption={(configId, value) =>
+                    void store?.setConfigOption(configId, value)
                   }
                 />
-              )}
+              </Shelf>
+              {forked ? (
+                <div className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm">
+                  <span>
+                    {threadName(forked)} branched from this conversation. It opens on everything
+                    said here so far and goes its own way from there.
+                  </span>
+                  {/* A plain link, so a popup blocker does not stop the new tab. */}
+                  <Link
+                    to={`/boxes/${id}/threads/${forked.id}`}
+                    target="_blank"
+                    rel="noopener"
+                    className="font-medium underline"
+                  >
+                    Open it in a new tab
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => setForked(null)}
+                    className="ml-auto text-xs text-muted-foreground hover:underline"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              ) : null}
+              {forkError ? (
+                <Notice className="border-b px-4 py-2">
+                  Could not fork this thread: {forkError}
+                </Notice>
+              ) : null}
+              {state.error ? <Notice className="border-b px-4 py-2">{state.error}</Notice> : null}
+              <div className="min-h-0 flex-1">
+                {/* A box that could not be read has no token, so the page shows no composer. */}
+                {loadError ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                    <p className="text-sm">{loadError.message}</p>
+                    <p className="text-sm text-muted-foreground">{loadError.detail}</p>
+                    {/* Goes back in the same way as the back button of the header. */}
+                    <a
+                      href={up.href}
+                      onClick={up.onClick}
+                      className="text-sm font-medium underline"
+                    >
+                      Back to boxes
+                    </a>
+                  </div>
+                ) : state.loading ? (
+                  // The box may still be starting. The conversation appears in one
+                  // piece once it has been read.
+                  <ThreadLoading />
+                ) : (
+                  <Thread
+                    aboveMessages={
+                      state.truncated ? (
+                        <FullHistoryButton
+                          loading={state.loadingHistory}
+                          onLoad={() => void store?.loadFullHistory()}
+                        />
+                      ) : null
+                    }
+                    aboveComposer={
+                      <BackgroundBar
+                        processes={state.background}
+                        // Undefined until the box has been read, which hides the button.
+                        onStop={
+                          thread
+                            ? (processId) => void stopBackground(thread.id, processId)
+                            : undefined
+                        }
+                      />
+                    }
+                  />
+                )}
+              </div>
             </div>
-          </div>
-        </SlashCommandsProvider>
+          </SlashCommandsProvider>
+        </ApprovalResponderContext.Provider>
       </AssistantRuntimeProvider>
     </TooltipProvider>
   );
