@@ -521,3 +521,176 @@ test('a truncated model plus the rest is the model the whole thread builds', () 
   // A reconnect can take the tail alone, because the result is the same.
   assert.deepEqual(resumed.messages, whole.messages);
 });
+
+/**
+ * The announcement of a sub agent.
+ *
+ * @param child The adapter's id for the session of the sub agent.
+ * @param name The name of the sub agent.
+ * @returns The update.
+ */
+function spawned(child: string, name = 'Find the words'): ThreadUpdate {
+  return {
+    sessionUpdate: 'subagent_spawned',
+    subagentSessionId: child,
+    name,
+    task: 'Read words.txt',
+  } as ThreadUpdate;
+}
+
+/**
+ * Finds the card of a sub agent in a message.
+ *
+ * @param message The message.
+ * @param child The adapter's id for the session of the sub agent.
+ * @returns The card.
+ */
+function cardOf(
+  message: { parts: readonly { type: string; toolCallId?: string }[] },
+  child: string,
+): ToolPart {
+  const part = message.parts.find((p) => p.type === 'tool' && p.toolCallId === child);
+  assert.ok(part, `no card for ${child}`);
+  return part as ToolPart;
+}
+
+test('a sub agent becomes a card, and its updates go into the run of the card', () => {
+  const model = fold(chunk('agent_message_chunk', 'Let me look.', 'msg_1'), spawned('child-1'));
+  applyUpdate(model, chunk('agent_message_chunk', 'Reading the file.'), 'child-1');
+  applyUpdate(
+    model,
+    { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read' } as ThreadUpdate,
+    'child-1',
+  );
+  applyUpdate(model, chunk('agent_message_chunk', 'Done after the sub agent.', 'msg_2'));
+
+  assert.deepEqual(
+    model.messages.map((m) => m.id),
+    ['msg_1', 'msg_2'],
+  );
+  const card = cardOf(model.messages[0]!, 'child-1');
+  assert.equal(card.name, 'boxes_subagent');
+  assert.equal(card.title, 'Find the words');
+  assert.deepEqual(card.rawInput, { name: 'Find the words', task: 'Read words.txt' });
+  assert.equal(card.status, 'in_progress');
+  // The run holds the text and the tool call of the sub agent, and nothing of the thread.
+  assert.deepEqual(
+    card.messages?.map((m) => m.parts.map((p) => p.type)),
+    [['text', 'tool']],
+  );
+  // A tool call of the sub agent is found by its id, which is how a permission request finds its card.
+  assert.equal(findTool(model, 'toolu_1')?.title, 'Read');
+});
+
+test('a change inside a sub agent refreshes the message of the thread that holds the card', () => {
+  const model = fold(chunk('agent_message_chunk', 'Let me look.', 'msg_1'), spawned('child-1'));
+  const touched = applyUpdate(model, chunk('agent_message_chunk', 'Reading.'), 'child-1');
+  assert.equal(touched, model.messages[0]);
+});
+
+test('a sub agent of a sub agent is a card inside the run', () => {
+  const model = fold(spawned('child-1'));
+  applyUpdate(model, spawned('child-2', 'Count the words'), 'child-1');
+  applyUpdate(model, chunk('agent_message_chunk', 'three'), 'child-2');
+
+  const outer = cardOf(model.messages[0]!, 'child-1');
+  const inner = cardOf(outer.messages![0]!, 'child-2');
+  assert.equal(inner.title, 'Count the words');
+  assert.deepEqual(
+    inner.messages?.map((m) => m.parts),
+    [[{ type: 'text', text: 'three' }]],
+  );
+  // The whole chain refreshes the one message of the thread.
+  assert.equal(applyUpdate(model, chunk('agent_message_chunk', '!'), 'child-2'), model.messages[0]);
+});
+
+test('the end of a sub agent sets the status of its card', () => {
+  const model = fold(spawned('child-1'), spawned('child-2'));
+  applyUpdate(model, {
+    sessionUpdate: 'subagent_state_update',
+    subagentSessionId: 'child-1',
+    state: 'completed',
+  } as ThreadUpdate);
+  applyUpdate(model, {
+    sessionUpdate: 'subagent_state_update',
+    subagentSessionId: 'child-2',
+    state: 'cancelled',
+  } as ThreadUpdate);
+
+  assert.equal(cardOf(model.messages[0]!, 'child-1').status, 'completed');
+  const cancelled = cardOf(model.messages[0]!, 'child-2');
+  assert.equal(cancelled.status, 'failed');
+  assert.equal(toolOutputText(cancelled), 'cancelled');
+});
+
+test('the thoughts of a sub agent are dropped, and an announcement sent again changes nothing', () => {
+  const model = fold(spawned('child-1'));
+  assert.equal(applyUpdate(model, chunk('agent_thought_chunk', 'hmm'), 'child-1'), null);
+  assert.equal(applyUpdate(model, spawned('child-1')), null);
+
+  const card = cardOf(model.messages[0]!, 'child-1');
+  assert.deepEqual(card.messages, []);
+  assert.equal(model.messages[0]!.parts.length, 1);
+});
+
+test('truncating drops the sub agents of the dropped messages', () => {
+  const model = fold(chunk('user_message_chunk', 'first', 'msg_1'), spawned('child-1'));
+  applyUpdate(
+    model,
+    { sessionUpdate: 'tool_call', toolCallId: 'toolu_1', title: 'Read' } as ThreadUpdate,
+    'child-1',
+  );
+
+  truncateFrom(model, model.messages[1]!.id);
+
+  assert.equal(findTool(model, 'child-1'), undefined);
+  assert.equal(findTool(model, 'toolu_1'), undefined);
+  // A late update of the dropped sub agent lands in the thread, like any update of an unknown session.
+  applyUpdate(model, chunk('agent_message_chunk', 'late'), 'child-1');
+  assert.deepEqual(
+    model.messages.map((m) => m.parts.map((p) => p.type)),
+    [['text'], ['text']],
+  );
+});
+
+test('the output of a command arrives in chunks beside the terminal, and its exit code can fail it', () => {
+  const model = fold(
+    {
+      sessionUpdate: 'tool_call',
+      toolCallId: 'exec-1',
+      title: 'ls',
+      content: [{ type: 'terminal', terminalId: 'exec-1' }],
+    } as ThreadUpdate,
+    {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'exec-1',
+      _meta: { terminal_output_delta: { data: 'a\n', terminal_id: 'exec-1' } },
+    } as ThreadUpdate,
+    {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'exec-1',
+      status: 'completed',
+      _meta: {
+        terminal_output_delta: { data: 'b\n', terminal_id: 'exec-1' },
+        terminal_exit: { exit_code: 2, signal: null, terminal_id: 'exec-1' },
+      },
+    } as ThreadUpdate,
+  );
+
+  const part = findTool(model, 'exec-1')!;
+  assert.equal(toolOutputText(part), 'a\nb\n');
+  assert.equal(part.status, 'failed');
+});
+
+test('a raw text result stands in when the content gives no text', () => {
+  const model = fold(
+    { sessionUpdate: 'tool_call', toolCallId: 'read-1', title: 'cat words.txt' } as ThreadUpdate,
+    {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'read-1',
+      status: 'completed',
+      rawOutput: 'alpha\nbeta\n',
+    } as ThreadUpdate,
+  );
+  assert.equal(toolOutputText(findTool(model, 'read-1')!), 'alpha\nbeta\n');
+});

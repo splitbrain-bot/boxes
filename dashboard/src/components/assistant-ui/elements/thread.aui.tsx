@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useFollowOutput } from "@/hooks/use-follow-output";
 import { TASK_NOTIFICATION_PART } from "@/lib/task-notifications";
+import { SUBAGENT_TOOL } from "@/stores/thread/translate";
 import { cn } from "@/lib/utils";
 import {
   ActionBarMorePrimitive,
@@ -352,8 +353,11 @@ const isTaskNotification = (s: AssistantState) =>
     (part) => part.type === "data" && part.name === TASK_NOTIFICATION_PART,
   );
 
-/** One message, rendered by its role. Boxes edit: task notifications get their own row. */
-const ThreadMessage: FC = () => {
+/**
+ * One message, rendered by its role. Boxes edit: task notifications get their own row, and the card of a sub
+ * agent renders the messages of its run with this component.
+ */
+export const ThreadMessage: FC = () => {
   const { AssistantMessage: AssistantMessageComponent = AssistantMessage } =
     useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
@@ -593,6 +597,9 @@ const AssistantMessage: FC = () => {
           groupBy={groupPartByType({
             reasoning: ["group-chainOfThought", "group-reasoning"],
             "tool-call": ["group-chainOfThought", "group-tool"],
+            // Boxes edit: the card of a sub agent stands on its own, outside
+            // the tool group.
+            [`tool-call:${SUBAGENT_TOOL}`]: [],
             "standalone-tool-call": [],
           })}
         >

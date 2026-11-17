@@ -858,3 +858,81 @@ test('a cut thread offers its full history at the top, and loads it in place', a
     await close();
   }
 });
+
+test('a sub agent is a closed card that shows its run when opened', async () => {
+  await start();
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+    'dark',
+    'desktop',
+  );
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+
+    stub.gateway.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'I ask a sub agent to read the file.' },
+    } as ThreadUpdate);
+    stub.gateway.emit({
+      sessionUpdate: 'subagent_spawned',
+      subagentSessionId: 'child-1',
+      name: 'Find the words',
+      task: 'Read words.txt and report the words in it.',
+    } as ThreadUpdate);
+    // The run of the sub agent arrives on its own session.
+    stub.gateway.emit(
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-child',
+        title: 'Read words.txt',
+        kind: 'read',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'alpha\nbeta\ngamma' } }],
+      } as ThreadUpdate,
+      undefined,
+      'child-1',
+    );
+    stub.gateway.emit(
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'The file has three words.' },
+      } as ThreadUpdate,
+      undefined,
+      'child-1',
+    );
+
+    // The card names the sub agent and is closed, so the run inside is not shown.
+    const card = page.locator('[data-slot="tool-fallback-trigger"]', { hasText: 'Find the words' });
+    await expect.poll(() => card.isVisible()).toBe(true);
+    expect(await card.textContent()).toContain('Sub agent');
+    expect(await page.getByText('The file has three words.').isVisible()).toBe(false);
+
+    await card.click();
+    await expect.poll(() => page.getByText('The file has three words.').isVisible()).toBe(true);
+    await expect.poll(() => page.getByText('Read words.txt and report').isVisible()).toBe(true);
+    // The tool call of the sub agent is a card of its own inside, in a tool group like in the thread.
+    const run = page.locator('[data-slot="subagent-run"]');
+    await run.locator('[data-slot="tool-group-trigger"]').click();
+    const inner = run.locator('[data-slot="tool-fallback-trigger"]', {
+      hasText: 'Read words.txt',
+    });
+    await expect.poll(() => inner.isVisible()).toBe(true);
+    // The row shimmers while the sub agent runs, and stops when it ends.
+    const label = card.locator('[data-slot="tool-fallback-trigger-label"]');
+    const shimmers = () => label.evaluate((el) => el.classList.contains('shimmer'));
+    expect(await shimmers()).toBe(true);
+
+    stub.gateway.emit({
+      sessionUpdate: 'subagent_state_update',
+      subagentSessionId: 'child-1',
+      state: 'completed',
+    } as ThreadUpdate);
+    await expect.poll(shimmers).toBe(false);
+    await shoot(page, 'thread-subagent');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});

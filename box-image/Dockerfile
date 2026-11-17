@@ -25,8 +25,8 @@
 # only after it names it again with a bare ARG.
 ARG NODE_MAJOR=26
 ARG NIX_VERSION=2.34.8
-ARG CODEX_VERSION=0.156.1
-ARG OPENCODE_VERSION=1.19.3
+ARG CODEX_VERSION=0.169.0
+ARG OPENCODE_VERSION=2.3.0
 
 # The agent's own account, and the defaults of the orchestrator's BOX_UID and
 # BOX_GID. 1020 keeps clear of the ubuntu user at 1000, which is often a
@@ -157,7 +157,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libicu78 \
 # /usr/local.
 RUN npm install -g --prefix /usr/local \
       @anthropic-ai/claude-code@^2 \
-      @agentclientprotocol/claude-agent-acp@^0.81.0 \
+      @agentclientprotocol/claude-agent-acp@^0.108.0 \
  && npm cache clean --force
 
 # The Codex CLI and its ACP adapter, both pinned exactly.
@@ -170,7 +170,7 @@ RUN npm install -g --prefix /usr/local \
 ARG CODEX_VERSION
 RUN npm install -g --prefix /usr/local @openai/codex@${CODEX_VERSION} \
  && npm install -g --prefix /usr/local --omit=optional \
-      @agentclientprotocol/codex-acp@1.13.0 \
+      @agentclientprotocol/codex-acp@2.7.0 \
  && npm cache clean --force
 ENV CODEX_PATH=/usr/local/bin/codex
 
@@ -179,17 +179,11 @@ COPY box-image/codex-config.toml /etc/codex/config.toml
 
 # opencode, pinned exactly. It is its own ACP adapter.
 #
-# The postinstall script of opencode-ai selects the platform binary by the CPU
-# of the build host. The install skips the script. The start script selects
-# the binary by the CPU of the host that runs the box.
-#
-# opencode installs @opencode-ai/plugin in its own version into
-# ~/.config/opencode at its start, when the folder has no node_modules. The
-# home seed holds that install, so a new box does not download it.
+# The postinstall script of @opencode/cli selects the platform binary by the
+# CPU of the build host. The install skips the script. The start script
+# selects the binary by the CPU of the host that runs the box.
 ARG OPENCODE_VERSION
-RUN npm install -g --prefix /usr/local --ignore-scripts opencode-ai@${OPENCODE_VERSION} \
- && npm install --prefix /usr/local/share/boxes/home/.config/opencode --ignore-scripts --save-exact \
-      @opencode-ai/plugin@${OPENCODE_VERSION} \
+RUN npm install -g --prefix /usr/local --ignore-scripts @opencode/cli@${OPENCODE_VERSION} \
  && npm cache clean --force
 COPY box-image/opencode.sh /usr/local/bin/opencode
 RUN chmod 0755 /usr/local/bin/opencode
@@ -328,11 +322,10 @@ RUN test "$(id -u)" = "${AGENT_UID}" \
  && test "$(command -v codex)" = "/usr/local/bin/codex" \
  && codex --version | grep -qF "${CODEX_VERSION}" \
  && test "$(command -v opencode)" = "/usr/local/bin/opencode" \
- && opencode --version | grep -qxF "${OPENCODE_VERSION}" \
+ && opencode --version | grep -qxF "opencode v${OPENCODE_VERSION}" \
  && { test "$(dpkg --print-architecture)" != amd64 \
-      || /usr/local/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64-baseline/bin/opencode \
-           --version | grep -qxF "${OPENCODE_VERSION}"; } \
- && test -f /home/agent/.config/opencode/node_modules/@opencode-ai/plugin/package.json \
+      || /usr/local/lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-x64-baseline/bin/opencode \
+           --version | grep -qxF "opencode v${OPENCODE_VERSION}"; } \
  && test "$(command -v boxes-files)" = "/usr/local/bin/boxes-files" \
  && boxes-files </dev/null \
  && test -d /usr/local/share/boxes/skills \

@@ -112,9 +112,10 @@ export class Broadcast {
    * watching that thread.
    *
    * @param params The params of the `session/update` notification.
+   * @param thread The adapter's id for the thread of the update. The update of a sub agent names the session of
+   *   the sub agent and belongs to the thread of its root.
    */
-  update(params: unknown): void {
-    const thread = threadOf(params);
+  update(params: unknown, thread: string | undefined = threadOf(params)): void {
     // An update that names no thread goes to nobody.
     if (!thread) return;
     const history = this.logs.get(thread);

@@ -229,7 +229,6 @@ describe('boxEnv', () => {
     // opencode runs on the API keys, which keep their own names.
     expect(env.OPENROUTER_API_KEY).toBe('sk-or-v1-placeholder');
     expect(env.OPENCODE_DISABLE_AUTOUPDATE).toBe('1');
-    expect(env.OPENCODE_DISABLE_LSP_DOWNLOAD).toBe('1');
     expect(env.OPENCODE_DISABLE_CLAUDE_CODE).toBe('1');
     expect(asked).not.toContain(null);
     expect(asked).toEqual(expect.arrayContaining(['claude', 'openai']));

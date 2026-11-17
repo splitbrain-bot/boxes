@@ -5,17 +5,17 @@
 # the build host.
 set -eu
 
-builds=/usr/local/lib/node_modules/opencode-ai/node_modules
+builds=/usr/local/lib/node_modules/@opencode/cli/node_modules/@opencode
 
 case "$(uname -m)" in
   x86_64)
     if grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
-      build=opencode-linux-x64
+      build=cli-linux-x64
     else
-      build=opencode-linux-x64-baseline
+      build=cli-linux-x64-baseline
     fi
     ;;
-  aarch64) build=opencode-linux-arm64 ;;
+  aarch64) build=cli-linux-arm64 ;;
   *)
     echo "opencode: no build for $(uname -m)" >&2
     exit 1

@@ -136,15 +136,32 @@ The ACP gateway is the part of the orchestrator that connects the browsers and t
 `upstream.ts` holds the gateway state of one box: one `AdapterConnection` per harness its threads use (`adapter.ts`),
 the attached browsers, the unanswered permission requests, and the probe that reads the container's process table.
 
-The `initialize` handshake advertises one client capability: the async-task extension. The connection keeps the
+The `initialize` handshake advertises the client capabilities of the extensions that Boxes uses. The async-task
+extension and the native sub agent sessions are AIR capabilities, which the Claude and Codex adapters implement. The
+`terminal_output_delta` capability makes the Codex adapter send the output of a command in chunks. The capability
+`opencode/child-session-updates` makes opencode send the updates of its child sessions. The connection keeps the
 adapter's `initialize` response and answers each browser's `initialize` with it, so the browser sees the capabilities of
 the agent that holds its conversation.
 
 The orchestrator parses the protocol with the ACP SDK (`@agentclientprotocol/sdk`). The SDK accepts only the
-`session/update` kinds that its schema defines, and the async-task extension adds kinds outside that schema. The
-connection therefore removes the async-task updates from the adapter's output stream before the SDK parses it, and
-delivers them itself.
+`session/update` kinds that its schema defines, and the extensions add kinds outside that schema. The connection
+therefore removes the async-task updates, the sub agent updates and the child session notifications of opencode from the
+adapter's output stream before the SDK parses it, and delivers them itself.
 
+### Sub agent sessions
+
+An adapter reports a sub agent as a session of its own. A `subagent_spawned` on the session of the parent names the new
+session. Every update and permission request of the sub agent then names that session, and a `subagent_state_update` on
+the session of the parent ends it. The Claude and Codex adapters send this form to an AIR client. opencode sends its own
+`opencode/session/child_update` notification, and the connection translates it into the same form. A created child
+becomes a `subagent_spawned`, an update of the child becomes an update on the session of the child, and an end state
+becomes a `subagent_state_update`.
+
+The connection records the thread of each sub agent session when the `subagent_spawned` arrives. The gateway resolves
+the thread of every adapter message through that record. So the updates of a sub agent go into the log of its thread and
+to the browsers of that thread, and a permission request of a sub agent goes to a browser of that thread. The messages
+keep the session id of the sub agent, and the dashboard tells the sub agents apart by it. The record ends with the
+adapter process, and a replay announces the sub agents again.
 ### Downstream: one connection per browser
 
 `downstream.ts` serves the WebSocket connections described above. The upgrade path is

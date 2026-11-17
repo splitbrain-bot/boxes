@@ -72,6 +72,16 @@ Some tool calls need a decision. The question renders on the tool call that caus
 All browsers on the thread show the question; the first answer removes it from the others. When nobody watches the
 thread, the orchestrator can send a push notification. See [notifications](notifications.md).
 
+## Sub agents
+
+An agent can give part of its work to a sub agent. The sub agent shows as a card at the point where the agent started
+it. The card shows the name of the sub agent, a spinner while it runs, and a check or an error mark when it ends. The
+card is closed. Open it to read the task that the agent gave the sub agent, the text of the sub agent and its tool
+calls. A sub agent that starts a sub agent shows a card inside the card. The reasoning of a sub agent is not shown.
+
+A permission request of a sub agent renders on its tool call inside the card, and the card opens itself for it.
+
+The `subagent` tool call of opencode stays a row of its own above the card.
 ## Marking a thread done
 
 Select the **Mark this thread done** button in the thread header to mark the thread done. The box list strikes the
@@ -149,6 +159,19 @@ For the same reason, the events cannot answer whether the box is busy: the orche
 known resident helper counts as work and prevents the idle reaper from stopping the box. The box-level stop reads the
 table again, sends TERM to the deepest processes first, and sends KILL to what survives shortly after, without waiting.
 
+### Sub agents
+
+The gateway sends the updates of a sub agent with the session id of the sub agent, as described in [sub agent
+sessions](acp.md#sub-agent-sessions). The thread model of the dashboard (`stores/thread/translate.ts`) turns the
+announcement of a sub agent into a tool part with the name `boxes_subagent`. The part holds the messages of the sub
+agent, and the model applies the updates of that session to those messages. The tool index of the model covers the calls
+of every sub agent, so a permission request finds its call. A change inside a sub agent refreshes the message of the
+thread that holds the card.
+
+`components/SubagentCard.tsx` registers the card for that tool name. The card renders the messages of the sub agent in a
+readonly thread of assistant-ui with the same message components as the thread. The runtime of a readonly thread drops
+the answer to a permission request. The thread view therefore provides the answer function through a React context, and
+the approval buttons use it.
 ### Forking
 
 The adapter branches the conversation in full but writes no transcript for the fork until its first prompt. So the fork

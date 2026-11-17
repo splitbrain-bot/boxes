@@ -118,10 +118,37 @@ export interface ToolPart {
   locations: ToolCallLocation[];
   /** The permission request on this call, while one exists. */
   approval?: ApprovalState;
+  /** The output of a command so far, from the chunks that the adapter sends beside the content. */
+  output?: string;
+  /** The raw result of the call, which stands in when the content gives no text. */
+  rawOutput?: unknown;
+  /**
+   * The messages of a sub agent, in order. Only the card of a sub agent, the part named {@link SUBAGENT_TOOL},
+   * has them.
+   */
+  messages?: Message[];
 }
+
+/** The tool name of the card of a sub agent. No adapter uses it. */
+export const SUBAGENT_TOOL = 'boxes_subagent';
 
 /** A part of a message. */
 export type Part = TextPart | ReasoningPart | ImagePart | AttachmentPart | TaskPart | ToolPart;
+
+/**
+ * The run of one sub agent, as the model holds it.
+ *
+ * `owner` is the message of the thread itself that holds the card, through any number of sub agents in between, so
+ * a change inside the run refreshes that message.
+ */
+interface SubagentRun {
+  /** The card of the sub agent. */
+  part: ToolPart;
+  /** The messages of the sub agent, the same list as `part.messages`. */
+  messages: Message[];
+  /** The message of the thread that holds the card. */
+  owner: Message;
+}
 
 /** One message in the thread. */
 export interface Message {
@@ -160,12 +187,14 @@ export interface ThreadModel {
    */
   unknown: Set<string>;
   /**
-   * Every tool call in the thread with the message that holds it, by the
-   * adapter's id for the call.
+   * Every tool call in the thread with the message of the thread that holds it, by the
+   * adapter's id for the call. For a call of a sub agent, that is the message that holds the card.
    *
    * A long thread holds thousands of calls, so lookups use this index.
    */
   tools: Map<string, { part: ToolPart; message: Message }>;
+  /** The run of every sub agent, by the adapter's id for its session. */
+  subagents: Map<string, SubagentRun>;
 }
 
 /**
@@ -182,6 +211,7 @@ export function emptyModel(): ThreadModel {
     commands: [],
     unknown: new Set(),
     tools: new Map(),
+    subagents: new Map(),
   };
 }
 
@@ -212,17 +242,17 @@ function newMessage(role: Message['role'], id?: string | null): Message {
  * are one message, and a change starts a new one. Without a messageId, a role
  * change starts a new message.
  *
- * @param model The thread model.
+ * @param messages The messages of the thread or of a sub agent.
  * @param role The role of the chunk.
  * @param messageId The adapter's id for the message of the chunk, if any.
- * @returns The message, which is the last one in the model.
+ * @returns The message, which is the last one in the list.
  */
 function messageFor(
-  model: ThreadModel,
+  messages: Message[],
   role: Message['role'],
   messageId: string | null | undefined,
 ): Message {
-  const last = model.messages.at(-1);
+  const last = messages.at(-1);
   if (last) {
     if (messageId) {
       if (last.id === messageId) return last;
@@ -231,8 +261,23 @@ function messageFor(
     }
   }
   const created = newMessage(role, messageId);
-  model.messages.push(created);
+  messages.push(created);
   return created;
+}
+
+/**
+ * The messages that an update of a session goes into, which are the thread's own or the run of a sub agent.
+ *
+ * @param model The thread model.
+ * @param sessionId The adapter's id for the session of the update, if known.
+ * @returns The messages, and for a sub agent the message of the thread that holds its card.
+ */
+function scopeOf(
+  model: ThreadModel,
+  sessionId: string | undefined,
+): { messages: Message[]; owner?: Message } {
+  const run = sessionId === undefined ? undefined : model.subagents.get(sessionId);
+  return run ? { messages: run.messages, owner: run.owner } : { messages: model.messages };
 }
 
 /**
@@ -321,14 +366,15 @@ function appendBlock(message: Message, kind: 'text' | 'reasoning', content: Cont
 export function truncateFrom(model: ThreadModel, messageId: string): Message[] {
   const from = model.messages.findIndex((m) => m.id === messageId);
   if (from < 0) return [];
-  const dropped = model.messages.splice(from);
-  // The tool index loses the calls of the dropped messages.
-  for (const message of dropped) {
-    for (const part of message.parts) {
-      if (part.type === 'tool') model.tools.delete(part.toolCallId);
-    }
+  const dropped = new Set(model.messages.splice(from));
+  // The indexes lose the calls and the sub agents of the dropped messages.
+  for (const [id, entry] of model.tools) {
+    if (dropped.has(entry.message)) model.tools.delete(id);
   }
-  return dropped;
+  for (const [id, run] of model.subagents) {
+    if (dropped.has(run.owner)) model.subagents.delete(id);
+  }
+  return [...dropped];
 }
 
 /**
@@ -360,28 +406,39 @@ export function messageOfTool(model: ThreadModel, toolCallId: string): Message |
  * noted by name and otherwise ignored, so a newer adapter does not break an
  * older dashboard.
  *
+ * An update of a sub agent goes into the run of that sub agent, and the changed message is the message of the
+ * thread that holds its card. The thoughts of a sub agent are dropped.
+ *
  * @param model The thread model.
  * @param update The update.
+ * @param sessionId The adapter's id for the session of the update. Without it, or for a session that is no sub
+ *   agent, the update is the thread's own.
  * @returns The changed message, so a caller can refresh only that message, or
  *   null when the update changed no message.
  */
-export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message | null {
+export function applyUpdate(
+  model: ThreadModel,
+  update: ThreadUpdate,
+  sessionId?: string,
+): Message | null {
+  const { messages, owner } = scopeOf(model, sessionId);
   switch (update.sessionUpdate) {
     case UPDATE_KIND.userMessageChunk: {
       const u = update as UpdateOf<typeof UPDATE_KIND.userMessageChunk>;
-      const message = messageFor(model, 'user', u.messageId);
+      const message = messageFor(messages, 'user', u.messageId);
       appendBlock(message, 'text', u.content);
-      return message;
+      return owner ?? message;
     }
     case UPDATE_KIND.agentMessageChunk: {
       const u = update as UpdateOf<typeof UPDATE_KIND.agentMessageChunk>;
-      const message = messageFor(model, 'assistant', u.messageId);
+      const message = messageFor(messages, 'assistant', u.messageId);
       appendBlock(message, 'text', u.content);
-      return message;
+      return owner ?? message;
     }
     case UPDATE_KIND.agentThoughtChunk: {
+      if (owner) return null;
       const u = update as UpdateOf<typeof UPDATE_KIND.agentThoughtChunk>;
-      const message = messageFor(model, 'assistant', u.messageId);
+      const message = messageFor(messages, 'assistant', u.messageId);
       appendBlock(message, 'reasoning', u.content);
       return message;
     }
@@ -389,14 +446,49 @@ export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message |
       const u = update as UpdateOf<typeof UPDATE_KIND.toolCall>;
       // A call announced again is an update and not a second card, because an
       // adapter can send a call again, and a replay always does.
-      return openTool(model, u, u.title);
+      return openTool(model, messages, owner, u, u.title);
     }
     case UPDATE_KIND.toolCallUpdate: {
       const u = update as UpdateOf<typeof UPDATE_KIND.toolCallUpdate>;
       // An update can arrive before the call that it belongs to, and dropping
       // it would lose the result of the tool. The update can lack a title, so
       // the id stands in until the announcement brings one.
-      return openTool(model, u, u.title ?? u.toolCallId);
+      return openTool(model, messages, owner, u, u.title ?? u.toolCallId);
+    }
+    case UPDATE_KIND.subagentSpawned: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.subagentSpawned>;
+      // A replay announces a sub agent again.
+      if (model.subagents.has(u.subagentSessionId)) return null;
+      const message = messageFor(messages, 'assistant', null);
+      const run: Message[] = [];
+      const part: ToolPart = {
+        type: 'tool',
+        toolCallId: u.subagentSessionId,
+        title: u.name || 'Sub agent',
+        name: SUBAGENT_TOOL,
+        status: 'in_progress',
+        rawInput: { name: u.name || 'Sub agent', ...(u.task ? { task: u.task } : {}) },
+        content: [],
+        locations: [],
+        messages: run,
+      };
+      message.parts.push(part);
+      model.tools.set(u.subagentSessionId, { part, message: owner ?? message });
+      model.subagents.set(u.subagentSessionId, { part, messages: run, owner: owner ?? message });
+      return owner ?? message;
+    }
+    case UPDATE_KIND.subagentState: {
+      const u = update as UpdateOf<typeof UPDATE_KIND.subagentState>;
+      const run = model.subagents.get(u.subagentSessionId);
+      if (!run) return null;
+      if (u.state === 'completed') run.part.status = 'completed';
+      else {
+        run.part.status = 'failed';
+        run.part.content = [
+          { type: 'content', content: { type: 'text', text: u.state ?? 'failed' } },
+        ];
+      }
+      return run.owner;
     }
     case UPDATE_KIND.plan: {
       const u = update as UpdateOf<typeof UPDATE_KIND.plan>;
@@ -434,17 +526,25 @@ export function applyUpdate(model: ThreadModel, update: ThreadUpdate): Message |
  * caller passes the title for a new card.
  *
  * @param model The thread model.
+ * @param messages The messages of the thread or of the sub agent that made the call.
+ * @param owner The message of the thread that holds the card of the sub agent, for a call of a sub agent.
  * @param u The tool call or the update.
  * @param title The title for a new card.
- * @returns The message that holds the call.
+ * @returns The message of the thread that holds the call.
  */
-function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message | null {
+function openTool(
+  model: ThreadModel,
+  messages: Message[],
+  owner: Message | undefined,
+  u: ToolCallUpdate,
+  title: string,
+): Message | null {
   const indexed = model.tools.get(u.toolCallId);
   if (indexed) {
     mergeTool(indexed.part, u);
     return indexed.message;
   }
-  const message = messageFor(model, 'assistant', null);
+  const message = messageFor(messages, 'assistant', null);
   const part: ToolPart = {
     type: 'tool',
     toolCallId: u.toolCallId,
@@ -456,9 +556,10 @@ function openTool(model: ThreadModel, u: ToolCallUpdate, title: string): Message
     content: u.content ?? [],
     locations: u.locations ?? [],
   };
+  mergeMeta(part, u);
   message.parts.push(part);
-  model.tools.set(u.toolCallId, { part, message });
-  return message;
+  model.tools.set(u.toolCallId, { part, message: owner ?? message });
+  return owner ?? message;
 }
 
 /**
@@ -480,6 +581,24 @@ function mergeTool(part: ToolPart, u: ToolCallUpdate): void {
   // in the schema an update carries the whole collection.
   if (u.content != null) part.content = u.content;
   if (u.locations != null) part.locations = u.locations;
+  if (u.rawOutput !== undefined) part.rawOutput = u.rawOutput;
+  mergeMeta(part, u);
+}
+
+/**
+ * Reads the extension fields of a tool call, which are the output chunk of a command and its exit. The Codex
+ * adapter sends the output of a command only in these chunks.
+ *
+ * @param part The existing part.
+ * @param u The tool call or the update.
+ */
+function mergeMeta(part: ToolPart, u: ToolCallUpdate): void {
+  const meta = u._meta;
+  if (!meta) return;
+  const delta = meta.terminal_output_delta as { data?: unknown } | undefined;
+  if (typeof delta?.data === 'string') part.output = (part.output ?? '') + delta.data;
+  const exit = meta.terminal_exit as { exit_code?: unknown } | undefined;
+  if (typeof exit?.exit_code === 'number' && exit.exit_code !== 0) part.status = 'failed';
 }
 
 /**
@@ -493,16 +612,20 @@ function mergeTool(part: ToolPart, u: ToolCallUpdate): void {
  * @returns The text, one line per content entry.
  */
 export function toolOutputText(part: ToolPart): string {
-  return part.content
+  const text = part.content
     .map((c) => {
       if (c.type === 'content') {
         return c.content?.type === 'image' ? imageFallbackText(c.content) : blockText(c.content);
       }
       if (c.type === 'diff') return diffText(c);
-      return `[terminal ${c.terminalId}]`;
+      // A terminal stands for the output of a command, which arrives in chunks.
+      return part.output ?? '';
     })
     .filter(Boolean)
     .join('\n');
+  if (text) return text;
+  // A search or list command of Codex has its output only here.
+  return typeof part.rawOutput === 'string' ? part.rawOutput : '';
 }
 
 /**

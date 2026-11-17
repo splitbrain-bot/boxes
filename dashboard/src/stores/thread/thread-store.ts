@@ -456,7 +456,7 @@ export class ThreadStore {
    * @param params The notification params.
    */
   private onUpdate(params: ThreadNotification): void {
-    const touched = applyUpdate(this.model, params.update);
+    const touched = applyUpdate(this.model, params.update, params.sessionId);
     // flushReplay publishes what a replay built.
     if (this.replaying) return;
     if (
