@@ -234,9 +234,11 @@ const ThreadRoot: FC<{
         ["--composer-padding" as string]: "8px",
       }}
     >
-      {/* Boxes edit: autoScroll with turnAnchor. A turn anchors its user
-          message to the top. Other content that grows the thread without an
-          anchor follows the bottom.
+      {/* Boxes edit: turnAnchor without autoScroll. A turn anchors its user
+          message to the top, and useFollowOutput follows the bottom. The
+          runtime's own follow counts a position within the footer height of
+          the bottom as the bottom, and scrolls a short swipe back down when
+          the header shelf resizes the viewport.
 
           Boxes edit: @container here as well, because a full-bleed block must
           fit the width of this element. The width of the root includes the
@@ -244,7 +246,7 @@ const ThreadRoot: FC<{
           root overflows. */}
       <ThreadPrimitive.Viewport
         ref={viewport}
-        autoScroll
+        autoScroll={false}
         turnAnchor="top"
         data-slot="aui_thread-viewport"
         className="@container relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
