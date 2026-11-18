@@ -272,6 +272,7 @@ const ThreadRoot: FC<{
             <ThreadPrimitive.Messages>
               {() => <ThreadMessage />}
             </ThreadPrimitive.Messages>
+            <TurnIndicator />
           </div>
 
           <ThreadPrimitive.ViewportFooter
@@ -370,6 +371,28 @@ export const ThreadMessage: FC = () => {
   if (role === "user")
     return isTask ? <TaskNotificationMessage /> : <UserMessage />;
   return <AssistantMessageComponent />;
+};
+
+/**
+ * Boxes edit: the spinner under the last message while the turn of the agent
+ * runs, whatever the last message holds. It shows that the agent has not
+ * handed the conversation back.
+ *
+ * It uses the spinner of the dashboard, because it is often the only thing on
+ * screen while a turn thinks, and a pulsing dot looks like a page that stopped
+ * repainting.
+ */
+const TurnIndicator: FC = () => {
+  const running = useAuiState((s) => s.thread.isRunning);
+  if (!running) return null;
+  return (
+    <span
+      data-slot="aui_turn-indicator"
+      className="inline-flex items-center px-2 py-1"
+    >
+      <Spinner label="Assistant is working" />
+    </span>
+  );
 };
 
 /** The round button that scrolls the thread to its end. It hides at the end. */
@@ -596,6 +619,8 @@ const AssistantMessage: FC = () => {
         className="text-foreground px-2 leading-relaxed wrap-break-word"
       >
         <MessagePrimitive.GroupedParts
+          /* Boxes edit: the thread shows the indicator, see TurnIndicator. */
+          indicator="never"
           groupBy={groupPartByType({
             reasoning: ["group-chainOfThought", "group-reasoning"],
             "tool-call": ["group-chainOfThought", "group-tool"],
@@ -651,18 +676,6 @@ const AssistantMessage: FC = () => {
                   <div data-slot="aui_assistant-message-image" className="py-1">
                     <Image {...part} />
                   </div>
-                );
-              case "indicator":
-                /* Boxes edit: uses the spinner of the dashboard. It is often the
-                   only thing on screen while a turn thinks, and a pulsing dot
-                   looks like a page that stopped repainting. */
-                return (
-                  <span
-                    data-slot="aui_assistant-message-indicator"
-                    className="inline-flex items-center py-1"
-                  >
-                    <Spinner label="Assistant is working" />
-                  </span>
                 );
               default:
                 return null;

@@ -236,10 +236,10 @@ test('an attached file that is not an image travels as a path, and reads as a ch
   }
 });
 
-test('a turn with nothing to show yet shows the spinner, and stops once it has', async () => {
+test('a turn shows the spinner from the send until it ends, also while text is the last thing said', async () => {
   await start({
-    // Long enough to read the spinner's style before the answer replaces it.
-    prompts: [{ match: () => true, gapMs: 2500, updates: reply('Eventually.') }],
+    // Long enough to read the spinner before the first chunk and between the chunks.
+    prompts: [{ match: () => true, gapMs: 2500, updates: reply('Eventually. ', 'Done.') }],
   });
 
   const { page, errors, close } = await openPage(
@@ -266,9 +266,15 @@ test('a turn with nothing to show yet shows the spinner, and stops once it has',
       )
       .toBe('spinner-block');
 
-    // And it is gone as soon as there is something to read instead.
+    // The turn is not over after the first text, so the spinner stays.
     await expect
       .poll(() => page.getByText('Eventually.').isVisible(), { timeout: 10_000 })
+      .toBe(true);
+    expect(await spinner.count()).toBe(1);
+
+    // And it is gone when the turn ends.
+    await expect
+      .poll(() => page.getByText('Eventually. Done.').isVisible(), { timeout: 10_000 })
       .toBe(true);
     await expect.poll(() => spinner.count()).toBe(0);
     expect(errors).toEqual([]);
@@ -923,6 +929,8 @@ test('a sub agent is a closed card that shows its run when opened', async () => 
     const label = card.locator('[data-slot="tool-fallback-trigger-label"]');
     const shimmers = () => label.evaluate((el) => el.classList.contains('shimmer'));
     expect(await shimmers()).toBe(true);
+    // No turn runs, so the card is the only thing that shows work.
+    expect(await page.getByRole('img', { name: 'Assistant is working' }).count()).toBe(0);
 
     stub.gateway.emit({
       sessionUpdate: 'subagent_state_update',
