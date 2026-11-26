@@ -15,6 +15,7 @@ import { useParams } from "react-router";
 import type { TextMessagePartProps } from "@assistant-ui/react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
+import { CodeHighlight } from "@/components/assistant-ui/elements/code-highlight";
 import { ImageZoom } from "@/components/assistant-ui/elements/image";
 import { MermaidDiagram } from "@/components/assistant-ui/elements/mermaid-diagram";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
@@ -379,4 +380,6 @@ const defaultComponents = memoizeMarkdownComponents({
     );
   },
   CodeHeader,
+  // Boxes edit: colours the code of a block with the highlighter of the review.
+  SyntaxHighlighter: CodeHighlight,
 });

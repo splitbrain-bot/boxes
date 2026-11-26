@@ -151,14 +151,17 @@
 );
 
 /*
- * The review's code pane. Shiki puts the light and the dark colour of each
- * token on its span as custom properties, and these rules pick one.
+ * The review's code pane and the code blocks in chat output. Shiki puts the
+ * light and the dark colour of each token on its span as custom properties,
+ * and these rules pick one.
  */
-[data-line] code span {
+[data-line] code span,
+.aui-md-pre code span {
   color: var(--shiki-light);
 }
 
-.dark [data-line] code span {
+.dark [data-line] code span,
+.dark .aui-md-pre code span {
   color: var(--shiki-dark);
 }
 
