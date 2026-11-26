@@ -182,6 +182,7 @@ export type ThreadUpdate =
   | { sessionUpdate: typeof UPDATE_KIND.configOption; configOptions?: ThreadConfigOption[] }
   | (SubagentSpawned & { sessionUpdate: typeof UPDATE_KIND.subagentSpawned })
   | (SubagentState & { sessionUpdate: typeof UPDATE_KIND.subagentState })
+  | { sessionUpdate: typeof UPDATE_KIND.sessionInfo; _meta?: Record<string, unknown> | null }
   // Forward compatibility, because an adapter can send a kind that is newer than this build.
   | { sessionUpdate: string; [key: string]: unknown };
 

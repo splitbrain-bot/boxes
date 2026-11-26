@@ -694,3 +694,46 @@ test('a raw text result stands in when the content gives no text', () => {
   );
   assert.equal(toolOutputText(findTool(model, 'read-1')!), 'alpha\nbeta\n');
 });
+
+/**
+ * Builds a session_info_update that carries a predicted next prompt.
+ *
+ * @param texts The texts of the suggestions.
+ * @returns The update.
+ */
+function suggest(...texts: string[]): ThreadUpdate {
+  return {
+    sessionUpdate: 'session_info_update',
+    _meta: { promptSuggestions: { suggestions: texts.map((text) => ({ text })) } },
+  } as ThreadUpdate;
+}
+
+test('a session info update sets the predicted next prompt', () => {
+  const model = fold(chunk('agent_message_chunk', 'Done.'), suggest('  ', 'run the tests '));
+  assert.equal(model.promptSuggestion, 'run the tests');
+  assert.equal(model.unknown.size, 0);
+});
+
+test('an empty suggestion list clears the predicted prompt', () => {
+  assert.equal(fold(suggest('run the tests'), suggest()).promptSuggestion, null);
+});
+
+test('a session info update without a suggestion keeps the predicted prompt', () => {
+  const model = fold(suggest('run the tests'), {
+    sessionUpdate: 'session_info_update',
+    title: 'A title',
+  } as ThreadUpdate);
+  assert.equal(model.promptSuggestion, 'run the tests');
+});
+
+test('a user message clears the predicted prompt', () => {
+  const model = fold(suggest('run the tests'), chunk('user_message_chunk', 'deploy it'));
+  assert.equal(model.promptSuggestion, null);
+});
+
+test('the updates of a sub agent neither set nor clear the predicted prompt', () => {
+  const model = fold(spawned('child-1'), suggest('run the tests'));
+  applyUpdate(model, chunk('user_message_chunk', 'a task notification'), 'child-1');
+  applyUpdate(model, suggest('something else'), 'child-1');
+  assert.equal(model.promptSuggestion, 'run the tests');
+});
