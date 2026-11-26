@@ -1,9 +1,10 @@
 /**
- * Client-side syntax highlighting for the review's code pane.
+ * Client-side syntax highlighting for the review's code pane and for the code
+ * blocks in chat output.
  *
- * The API sends plain text, so each line can be its own row. The engine, the
- * themes and the grammars are imported lazily, so only the review route loads
- * them.
+ * The text is tokenized into one token list per line, so each line can be its
+ * own row. The engine, the themes and the grammars are imported lazily, so only
+ * a view that shows code loads them.
  */
 
 import type { HighlighterCore, LanguageInput, ThemedToken } from 'shiki/core';
@@ -23,10 +24,12 @@ export interface Token {
   style: Record<string, string>;
 }
 
-/** The grammars that the code pane can load, by the language name that the API reports. */
+/** The grammars that can be loaded, by language name. */
 const GRAMMARS: Record<string, LanguageInput> = {
   typescript: () => import('@shikijs/langs/typescript'),
+  tsx: () => import('@shikijs/langs/tsx'),
   javascript: () => import('@shikijs/langs/javascript'),
+  jsx: () => import('@shikijs/langs/jsx'),
   json: () => import('@shikijs/langs/json'),
   css: () => import('@shikijs/langs/css'),
   scss: () => import('@shikijs/langs/scss'),
@@ -61,14 +64,42 @@ const GRAMMARS: Record<string, LanguageInput> = {
   diff: () => import('@shikijs/langs/diff'),
 };
 
+/** Other names of the languages in {@link GRAMMARS}, as the info string of a markdown code fence often gives them. */
+const ALIASES: Record<string, string> = {
+  ts: 'typescript',
+  mts: 'typescript',
+  cts: 'typescript',
+  js: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  sh: 'bash',
+  shell: 'bash',
+  zsh: 'bash',
+  py: 'python',
+  yml: 'yaml',
+  md: 'markdown',
+  dockerfile: 'docker',
+  make: 'makefile',
+  golang: 'go',
+  rb: 'ruby',
+  rs: 'rust',
+  'c++': 'cpp',
+  cs: 'csharp',
+  kt: 'kotlin',
+  htm: 'html',
+  patch: 'diff',
+};
+
 /**
- * Checks if a language has a grammar to load.
+ * Gives the name of the grammar for a language name or an alias.
  *
- * @param language The language name that the API reports.
- * @returns True when a grammar exists.
+ * @param language A language name that the API reports, or an alias of one.
+ * @returns The key in {@link GRAMMARS}, or null when no grammar exists.
  */
-function canHighlight(language: string): boolean {
-  return language in GRAMMARS;
+function grammarName(language: string): string | null {
+  const name = language.toLowerCase();
+  const resolved = ALIASES[name] ?? name;
+  return resolved in GRAMMARS ? resolved : null;
 }
 
 /** The shared highlighter, once {@link highlighter} has started creating it. */
@@ -109,7 +140,7 @@ const loaded = new Map<string, Promise<void>>();
 /**
  * Loads one grammar into the shared highlighter, at most once.
  *
- * @param language The language name that the API reports.
+ * @param language A key in {@link GRAMMARS}.
  */
 async function loadGrammar(language: string): Promise<void> {
   const grammar = GRAMMARS[language];
@@ -163,19 +194,20 @@ export function withinLineLimit(content: string): boolean {
  * failure in the grammar.
  *
  * @param content The text of the file.
- * @param language The language name that the API reports.
+ * @param language The language name that the API reports, or an alias of one.
  * @returns One token list per line, or null for a plain file.
  */
 export async function tokenizeLines(content: string, language: string): Promise<Token[][] | null> {
-  if (!canHighlight(language)) return null;
+  const grammar = grammarName(language);
+  if (!grammar) return null;
   if (!withinLineLimit(content)) return null;
   if (content.split('\n').some((line) => line.length > MAX_LINE)) return null;
 
   try {
-    await loadGrammar(language);
+    await loadGrammar(grammar);
     const core = await highlighter();
     const { tokens } = core.codeToTokens(content, {
-      lang: language,
+      lang: grammar,
       themes: THEMES,
       // No default colour, so the page's .dark class picks the theme.
       defaultColor: false,

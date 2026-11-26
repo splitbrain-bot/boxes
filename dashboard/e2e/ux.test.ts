@@ -740,6 +740,52 @@ test('a mermaid block shows its source while streaming, then a diagram that open
   }
 });
 
+// A code block gets syntax colours once the message is complete. A block in a
+// language without a grammar stays plain.
+test('a code block shows plain text while streaming, then syntax colours', async () => {
+  const code = '```ts\nconst answer: number = 42;\n```';
+  const plain = '```klingon\nqaplah\n```';
+  await start({
+    prompts: [
+      {
+        match: () => true,
+        updates: reply(`here it is\n\n${code}\n\nand another\n\n${plain}\n`),
+        hold: true,
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
+  try {
+    const input = page.getByLabel('Message input');
+    await input.fill('show me code');
+    await input.press('Control+Enter');
+
+    const block = page.locator('.aui-md-pre code').first();
+    await expect
+      .poll(() => block.textContent(), { timeout: 10_000 })
+      .toBe('const answer: number = 42;\n');
+    expect(await block.locator('span').count()).toBe(0);
+
+    stub.gateway.release();
+    await expect.poll(() => block.locator('span').count(), { timeout: 10_000 }).toBeGreaterThan(1);
+    // The text stays the same, and a keyword gets a colour of its own.
+    expect(await block.textContent()).toBe('const answer: number = 42;\n');
+    const colours = await block
+      .locator('span')
+      .evaluateAll((spans) => new Set(spans.map((span) => getComputedStyle(span).color)).size);
+    expect(colours).toBeGreaterThan(1);
+    expect(await page.locator('.aui-md-pre code').last().locator('span').count()).toBe(0);
+    await shoot(page, 'code-block-phone');
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test('the mode switcher lists the advertised modes and sets one', async () => {
   await start({
     modes: {
