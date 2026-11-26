@@ -824,9 +824,9 @@ function createBox(
   const now = Date.now();
   // A set ready_at marks the setup as done, so a start of the box runs no setup.
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, review_base_rev, status, agent_set_id, ws_token,
+    `INSERT INTO boxes (id, name, profile, review_base_rev, status, ws_token,
        created_at, last_active_at, ready_at)
-     VALUES (?, ?, 'DEFAULT', NULL, ?, NULL, ?, ?, ?, ?)`,
+     VALUES (?, ?, 'DEFAULT', NULL, ?, ?, ?, ?, ?)`,
   ).run(id, spec.name ?? DEFAULT_BOX.name, spec.status ?? 'running', WS_TOKEN, now, now, now);
 
   ws.createWorkspace(cfg.DATA_DIR, id);

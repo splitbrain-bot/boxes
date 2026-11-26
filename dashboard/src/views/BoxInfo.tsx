@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
+import { AgentSetPicker } from '@/components/AgentSetPicker';
 import { BackLink } from '@/components/BackLink';
 import { boxBadges } from '@/components/BoxCard';
 import { BoxWorkList } from '@/components/BoxWorkList';
@@ -19,7 +20,12 @@ import {
 import { useUp } from '@/hooks/use-up';
 import { pollWhileVisible } from '@/lib/poll';
 import { shortSize } from '@/lib/rough';
-import type { BoxDetail, EgressDenial, EgressProfileSummary } from '../../../shared/types.ts';
+import type {
+  AgentSetSummary,
+  BoxDetail,
+  EgressDenial,
+  EgressProfileSummary,
+} from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { refresh } from '../stores/boxes.ts';
 
@@ -56,6 +62,8 @@ export function BoxInfo() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /** The named agent sets, for the picker. Null while loading or when the request failed. */
+  const [agentSets, setAgentSets] = useState<AgentSetSummary[] | null>(null);
   /** The egress profiles, for the select. Null while loading or when the request failed. */
   const [profiles, setProfiles] = useState<EgressProfileSummary[] | null>(null);
   /** The targets that the egress profile refused. Null while loading or when the request failed. */
@@ -87,6 +95,13 @@ export function BoxInfo() {
   }, [load]);
 
   useEffect(() => {
+    void (async () => {
+      try {
+        setAgentSets((await api.listAgentSets()).filter((s) => !s.global));
+      } catch {
+        // Without the list, the page shows the names of the sets without the picker.
+      }
+    })();
     void (async () => {
       try {
         setProfiles(await api.listEgressProfiles());
@@ -173,8 +188,6 @@ export function BoxInfo() {
             {box.runtimeDetails.map(([label, value]) => (
               <Meta key={label} label={label} value={value} />
             ))}
-            {/* Every box gets the global set, so a box without a named set shows "global only". */}
-            <Meta label="Agent set" value={box.agentSetName ?? 'global only'} />
             <Meta label="Last active" value={new Date(box.lastActiveAt).toLocaleString()} />
             {/* Null before the first measurement. */}
             <Meta
@@ -186,6 +199,37 @@ export function BoxInfo() {
               <Meta label="Measured" value={new Date(box.diskMeasuredAt).toLocaleString()} />
             )}
           </dl>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Agent sets</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {agentSets ? (
+            <div className="flex flex-col gap-2">
+              <AgentSetPicker
+                sets={agentSets}
+                value={box.agentSets.map((s) => s.id)}
+                disabled={busy}
+                onChange={(ids) => void act(() => api.setBoxAgentSets(id, ids))}
+              />
+              <p className="text-xs text-muted-foreground">
+                A change applies at the next start of the box.{' '}
+                <Link to="/agents" className="underline hover:text-foreground">
+                  Edit the sets
+                </Link>
+                .
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm">
+              {box.agentSets.length > 0
+                ? box.agentSets.map((s) => s.name).join(', ')
+                : 'Global set only'}
+            </p>
+          )}
         </CardContent>
       </Card>
 

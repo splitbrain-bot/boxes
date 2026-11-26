@@ -1,15 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import type { McpServer } from '@agentclientprotocol/sdk';
-import {
-  type BoxDetail,
-  type BoxSummary,
-  type BoxTunnel,
-  type CreateBoxBody,
-  type CreateThreadBody,
-  GLOBAL_AGENT_SET,
-  type HarnessId,
-  type ThreadOptions,
-  type ThreadSummary,
+import type {
+  BoxDetail,
+  BoxSummary,
+  BoxTunnel,
+  CreateBoxBody,
+  CreateThreadBody,
+  HarnessId,
+  ThreadOptions,
+  ThreadSummary,
 } from '../../shared/types.ts';
 import type { AgentStore } from './agents.ts';
 import { boxEnv } from './boxenv.ts';
@@ -468,18 +467,7 @@ export class BoxManager {
     if (!name) throw new HttpError(400, 'name is required');
     if (name.length > 100) throw new HttpError(400, 'name must be 100 characters or fewer');
 
-    // Each box gets the global set of its owner, so a request that names it is
-    // the same as a request without a set, and the row stores null.
-    const requested = body.agentSet?.trim() ?? '';
-    const agentSetId =
-      requested === '' ||
-      requested === GLOBAL_AGENT_SET ||
-      requested === this.agents.globalId(owner)
-        ? null
-        : requested;
-    if (agentSetId && !this.agents.has(owner, agentSetId)) {
-      throw new HttpError(400, `Unknown agent set: ${agentSetId}`);
-    }
+    const agentSetIds = this.selectedAgentSets(owner, body.agentSets);
     const egressProfileId = this.selectedProfile(owner, body.egressProfile);
 
     // The check comes before any allocation, so an unknown harness gets a 400
@@ -510,7 +498,6 @@ export class BoxManager {
       // compares each repository with its own HEAD.
       review_base_rev: null,
       status: 'creating',
-      agent_set_id: agentSetId,
       // The box has its own token, which opens only the WebSocket of this box.
       ws_token: generateWsToken(),
       egress_profile_id: egressProfileId,
@@ -523,14 +510,17 @@ export class BoxManager {
       mcp_servers: '[]',
     };
 
-    this.db
-      .prepare(
-        `INSERT INTO boxes (id, name, owner, profile, status, agent_set_id,
-           ws_token, egress_profile_id, proxy_token, created_at, last_active_at)
-         VALUES (@id, @name, @owner, @profile, @status, @agent_set_id,
-           @ws_token, @egress_profile_id, @proxy_token, @created_at, @last_active_at)`,
-      )
-      .run(row);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO boxes (id, name, owner, profile, status,
+             ws_token, egress_profile_id, proxy_token, created_at, last_active_at)
+           VALUES (@id, @name, @owner, @profile, @status,
+             @ws_token, @egress_profile_id, @proxy_token, @created_at, @last_active_at)`,
+        )
+        .run(row);
+      this.agents.selectForBox(id, agentSetIds);
+    })();
     // The proxy must know the box before the box makes its first request.
     await this.syncEgress();
 
@@ -554,6 +544,46 @@ export class BoxManager {
       throw new HttpError(500, `Failed to create box: ${(err as Error).message}`);
     }
 
+    return this.detail(id);
+  }
+
+  /**
+   * Checks the agent sets that a request selects for a box of a user. Each box
+   * gets the global set of its owner, so the list cannot name it.
+   *
+   * @param owner The owner of the box.
+   * @param requested The ids of the sets in the order of the merge, or undefined for the global set only.
+   * @returns The ids to store.
+   * @throws {HttpError} A 400 when an id names the global set, when the user has no set with an id, or when an id is in
+   *   the list twice.
+   */
+  private selectedAgentSets(owner: string, requested: readonly string[] | undefined): string[] {
+    const ids: string[] = [];
+    for (const id of requested ?? []) {
+      if (id === this.agents.globalId(owner)) {
+        throw new HttpError(400, 'The global set applies to every box and cannot be selected');
+      }
+      if (!this.agents.has(owner, id)) throw new HttpError(400, `Unknown agent set: ${id}`);
+      if (ids.includes(id)) throw new HttpError(400, `Agent set selected twice: ${id}`);
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  /**
+   * Selects the agent sets of a box. The box gets the files and the MCP
+   * servers of the sets at its next start. The egress proxy allows the hosts
+   * of the MCP servers of the sets at once.
+   *
+   * @param id The id of the box.
+   * @param requested The ids of the sets in the order of the merge. An empty list selects the global set only.
+   * @returns The detail of the box.
+   * @throws {HttpError} A 404 when the box does not exist, or a 400 when the list is not valid.
+   */
+  async setAgentSets(id: string, requested: readonly string[]): Promise<BoxDetail> {
+    const row = this.mustGet(id);
+    this.agents.selectForBox(id, this.selectedAgentSets(row.owner, requested));
+    void this.syncEgress();
     return this.detail(id);
   }
 
@@ -718,14 +748,15 @@ export class BoxManager {
     const slog = log.box(row.id);
     const settings = readSettings(this.db, row.owner);
     // The adapters read the row, so a change to a set applies at the next start.
-    const mcpServers = this.agents.mcpSnapshot(row.owner, row.agent_set_id);
+    const agentSetIds = this.agents.setsOf(row.id).map((set) => set.id);
+    const mcpServers = this.agents.mcpSnapshot(row.owner, agentSetIds);
     try {
       await setUpBox(
         row.id,
         {
           caCertificate: this.egress.caCertificate(),
           identity: { gitName: settings.gitName, gitEmail: settings.gitEmail },
-          agentSet: this.agents.pack(row.owner, row.agent_set_id),
+          agentSet: this.agents.pack(row.owner, agentSetIds),
         },
         slog,
       );
@@ -1054,8 +1085,7 @@ export class BoxManager {
           upstream?.forkableHarnesses ?? new Set<HarnessId>(),
         ),
       ),
-      agentSetId: row.agent_set_id,
-      agentSetName: this.agents.nameOf(row.agent_set_id),
+      agentSets: this.agents.setsOf(row.id),
       // The last measurement, or null until there is one.
       diskBytes: row.disk_bytes,
       diskMeasuredAt: row.disk_measured_at,

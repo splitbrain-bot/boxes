@@ -289,13 +289,9 @@ test('the agent tables arrive with a global set, and existing boxes select none'
     const sets = upgraded.prepare('SELECT id, name FROM agent_sets').all();
     assert.deepEqual(sets, [{ id: 'global', name: 'Global' }]);
 
-    // A box that predates the feature gets the global set and nothing
-    // else, which is what a null column means.
-    assert.ok(columns(upgraded, 'boxes').includes('agent_set_id'));
-    const row = upgraded.prepare("SELECT agent_set_id FROM boxes WHERE id = 'live'").get() as {
-      agent_set_id: string | null;
-    };
-    assert.equal(row.agent_set_id, null);
+    // A box that predates the feature gets the global set and nothing else.
+    const rows = upgraded.prepare("SELECT set_id FROM box_agent_sets WHERE box_id = 'live'").all();
+    assert.deepEqual(rows, []);
   } finally {
     upgraded.close();
   }
@@ -802,6 +798,38 @@ test('the MCP servers from before the secret rows are deleted, also from the box
       { mcp_servers: '[]' },
     ]);
     assert.deepEqual(upgraded.prepare('SELECT * FROM agent_mcp_secrets').all(), []);
+  } finally {
+    upgraded.close();
+  }
+});
+
+test('the agent set of each box moves into the ordered list of the box', () => {
+  const before = MIGRATIONS.findIndex((sql) => sql.includes('CREATE TABLE box_agent_sets'));
+  const db = new Database(join(dir, 'boxes.db'));
+  for (const sql of MIGRATIONS.slice(0, before)) db.exec(sql);
+  db.pragma(`user_version = ${before}`);
+  db.prepare(
+    `INSERT INTO agent_sets (id, name, agents_md, created_at, updated_at)
+     VALUES ('go', 'Go', '', 1, 1)`,
+  ).run();
+  for (const [id, setId] of [
+    ['b1', 'go'],
+    ['b2', null],
+  ]) {
+    db.prepare(
+      `INSERT INTO boxes (id, name, owner, status, ws_token, agent_set_id, created_at, last_active_at)
+       VALUES (?, 'box', '', 'stopped', 'ws', ?, 1, 1)`,
+    ).run(id, setId);
+  }
+  db.close();
+
+  const upgraded = openDb(dir);
+  try {
+    assert.deepEqual(
+      upgraded.prepare('SELECT box_id, set_id, position FROM box_agent_sets').all(),
+      [{ box_id: 'b1', set_id: 'go', position: 0 }],
+    );
+    assert.ok(!columns(upgraded, 'boxes').includes('agent_set_id'));
   } finally {
     upgraded.close();
   }

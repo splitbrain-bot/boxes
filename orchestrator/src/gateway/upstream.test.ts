@@ -3332,7 +3332,7 @@ function boxMcpServers(servers: AgentMcpServer[]): void {
   const id = agents.globalId('');
   for (const server of servers) agents.putMcpServer('', id, server);
   db.prepare("UPDATE boxes SET mcp_servers = ? WHERE id = 's1'").run(
-    JSON.stringify(agents.mcpSnapshot('', null)),
+    JSON.stringify(agents.mcpSnapshot('', [])),
   );
 }
 

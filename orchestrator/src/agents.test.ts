@@ -73,11 +73,11 @@ afterEach(() => {
 /**
  * Packs a set and reads the tar back. It fails when the tar holds a path more than once.
  *
- * @param setId The id of the selected set, or null for only the global set.
+ * @param setIds The ids of the selected sets, in the order of the merge.
  * @returns The content and the mode of each file, by its path relative to the home.
  */
 async function packed(
-  setId: string | null,
+  setIds: readonly string[],
 ): Promise<Map<string, { content: string; mode: number }>> {
   const files = new Map<string, { content: string; mode: number }>();
   const twice: string[] = [];
@@ -97,7 +97,7 @@ async function packed(
   await new Promise<void>((resolve, reject) => {
     entries.on('finish', resolve);
     entries.on('error', reject);
-    store.pack('', setId).pipe(entries);
+    store.pack('', setIds).pipe(entries);
   });
   assert.deepEqual(twice, [], 'paths packed more than once');
   return files;
@@ -106,24 +106,25 @@ async function packed(
 /**
  * Packs a set and lists its paths.
  *
- * @param setId The id of the selected set, or null for only the global set.
+ * @param setIds The ids of the selected sets, in the order of the merge.
  * @returns The paths relative to the home, sorted.
  */
-async function paths(setId: string | null): Promise<string[]> {
-  return [...(await packed(setId)).keys()].sort();
+async function paths(setIds: readonly string[]): Promise<string[]> {
+  return [...(await packed(setIds)).keys()].sort();
 }
 
 /**
  * Inserts a running box row with the columns that the box count of a set reads.
  *
  * @param id The id of the box.
- * @param agentSetId The id of the set that the box selected, or null.
+ * @param agentSetIds The ids of the sets that the box selected.
  */
-function insertBox(id: string, agentSetId: string | null): void {
+function insertBox(id: string, agentSetIds: readonly string[]): void {
   db.prepare(
-    `INSERT INTO boxes (id, name, profile, status, agent_set_id, created_at, last_active_at)
-     VALUES (?, 'test', 'DEFAULT', 'running', ?, 0, 0)`,
-  ).run(id, agentSetId);
+    `INSERT INTO boxes (id, name, profile, status, created_at, last_active_at)
+     VALUES (?, 'test', 'DEFAULT', 'running', 0, 0)`,
+  ).run(id);
+  store.selectForBox(id, agentSetIds);
 }
 
 test('the global set exists from the first boot and cannot be deleted', () => {
@@ -178,9 +179,50 @@ test('skills are a union, and the set wins a name clash', async () => {
   // `overrides` names the global skill that the set replaces.
   assert.deepEqual(bundle.overrides, ['review']);
   assert.equal(
-    (await packed(set.id)).get('.claude/skills/review/SKILL.md')?.content,
+    (await packed([set.id])).get('.claude/skills/review/SKILL.md')?.content,
     'go review\n',
   );
+});
+
+test('several sets merge in the order of the list, and a later set wins', async () => {
+  store.updateSet('', 'global', { agentsMd: 'House rules.' });
+  store.putItem('', 'global', { name: 'review', content: 'global review' });
+  const go = store.createSet('', 'go');
+  store.updateSet('', go.id, { agentsMd: 'Go rules.' });
+  store.putItem('', go.id, { name: 'review', content: 'go review' });
+  store.putItem('', go.id, { name: 'bench', content: 'go bench' });
+  const web = store.createSet('', 'web');
+  store.updateSet('', web.id, { agentsMd: 'Web rules.' });
+  store.putItem('', web.id, { name: 'bench', content: 'web bench' });
+
+  const files = await packed([go.id, web.id]);
+  assert.equal(
+    files.get('.claude/CLAUDE.md')?.content,
+    'House rules.\n\nGo rules.\n\nWeb rules.\n',
+  );
+  assert.equal(files.get('.claude/skills/review/SKILL.md')?.content, 'go review\n');
+  assert.equal(files.get('.claude/skills/bench/SKILL.md')?.content, 'web bench\n');
+
+  const reversed = await packed([web.id, go.id]);
+  assert.equal(
+    reversed.get('.claude/CLAUDE.md')?.content,
+    'House rules.\n\nWeb rules.\n\nGo rules.\n',
+  );
+  assert.equal(reversed.get('.claude/skills/bench/SKILL.md')?.content, 'go bench\n');
+});
+
+test('a box keeps its sets in the order of selection, and a new selection replaces it', () => {
+  const go = store.createSet('', 'go');
+  const web = store.createSet('', 'web');
+  insertBox('s1', [web.id, go.id]);
+  assert.deepEqual(store.setsOf('s1'), [
+    { id: web.id, name: 'web' },
+    { id: go.id, name: 'go' },
+  ]);
+
+  store.selectForBox('s1', [go.id]);
+  assert.deepEqual(store.setsOf('s1'), [{ id: go.id, name: 'go' }]);
+  assert.equal(store.getSet('', web.id).boxCount, 0);
 });
 
 test('naming the global set as the extra one changes nothing', () => {
@@ -194,7 +236,7 @@ test('a merged set is packed in every harness layout', async () => {
   const set = store.createSet('', 'go');
   store.putItem('', set.id, { name: 'bench', content: 'Run the benchmarks.' });
 
-  const files = await packed(set.id);
+  const files = await packed([set.id]);
 
   assert.deepEqual([...files.keys()].sort(), [
     '.agents/skills/bench/SKILL.md',
@@ -221,7 +263,7 @@ test('every packed path is home-relative and inside a layout', async () => {
   store.updateSet('', 'global', { agentsMd: 'House rules.' });
   store.putItem('', 'global', { name: 'review', content: 'x' });
 
-  for (const rel of await paths(null)) {
+  for (const rel of await paths([])) {
     assert.match(
       rel,
       /^(\.claude\/(CLAUDE\.md|skills\/)|\.codex\/AGENTS\.md|\.config\/opencode\/AGENTS\.md|\.agents\/skills\/)/,
@@ -231,7 +273,7 @@ test('every packed path is home-relative and inside a layout', async () => {
 });
 
 test('a box with nothing configured gets an empty set', async () => {
-  assert.deepEqual(await paths(null), []);
+  assert.deepEqual(await paths([]), []);
 });
 
 test('the skills of the orchestrator are packed, and a skill of the set wins', async () => {
@@ -242,13 +284,13 @@ test('the skills of the orchestrator are packed, and a skill of the set wins', a
   store = new AgentStore(db, dir, undefined, () => builtins);
   store.putItem('', 'global', { name: 'diagrams', content: 'own diagrams' });
 
-  const files = await packed(null);
+  const files = await packed([]);
   assert.equal(files.get('.claude/skills/diagrams/SKILL.md')?.content, 'own diagrams\n');
   assert.equal(files.get('.agents/skills/share-app/SKILL.md')?.content, 'orchestrator share-app\n');
 
   // The next tar holds only the skills of the set, so the next install removes the built-in skills.
   builtins = [];
-  assert.deepEqual(await paths(null), [
+  assert.deepEqual(await paths([]), [
     '.agents/skills/diagrams/SKILL.md',
     '.claude/skills/diagrams/SKILL.md',
   ]);
@@ -315,7 +357,7 @@ test('a repository skill is copied with all its files, without its links', async
   chmodSync(join(tree, 'scripts', 'run.sh'), 0o755);
   symlinkSync('/etc/passwd', join(tree, 'passwd'));
 
-  const files = await packed(null);
+  const files = await packed([]);
 
   assert.deepEqual([...files.keys()].sort(), [
     '.agents/skills/pdf/SKILL.md',
@@ -336,10 +378,7 @@ test('a skill that changes source leaves no file of the old one behind', async (
   await store.addRepo('', 'global', { url: 'https://example.com/skills' });
   store.putItem('', 'global', { name: 'pdf', content: 'mine' });
 
-  assert.deepEqual(await paths(null), [
-    '.agents/skills/pdf/SKILL.md',
-    '.claude/skills/pdf/SKILL.md',
-  ]);
+  assert.deepEqual(await paths([]), ['.agents/skills/pdf/SKILL.md', '.claude/skills/pdf/SKILL.md']);
 });
 
 test('a failed pull is recorded, and the skills of the last good pull stay', async () => {
@@ -351,7 +390,7 @@ test('a failed pull is recorded, and the skills of the last good pull stay', asy
 
   assert.equal(after.repos[0]!.error, 'repository not found');
   assert.deepEqual(after.repos[0]!.skills, ['pdf']);
-  assert.equal((await packed(null)).get('.claude/skills/pdf/SKILL.md')?.content, 'pdf');
+  assert.equal((await packed([])).get('.claude/skills/pdf/SKILL.md')?.content, 'pdf');
 });
 
 test('a repository that cannot be pulled at all is still added', async () => {
@@ -485,23 +524,21 @@ test('an unknown set is a 404 on every route into it', () => {
 
 test('a set counts the live boxes that selected it', () => {
   const set = store.createSet('', 'go');
-  insertBox('s1', set.id);
-  insertBox('s2', null);
+  insertBox('s1', [set.id]);
+  insertBox('s2', []);
   assert.equal(store.getSet('', set.id).boxCount, 1);
 });
 
-test('deleting a set leaves its boxes alone and falls them back to global', () => {
-  const set = store.createSet('', 'go');
-  insertBox('s1', set.id);
+test('deleting a set leaves its boxes alone and removes it from their lists', () => {
+  const go = store.createSet('', 'go');
+  const web = store.createSet('', 'web');
+  insertBox('s1', [go.id, web.id]);
 
-  store.deleteSet('', set.id);
+  store.deleteSet('', go.id);
 
-  const row = db.prepare('SELECT agent_set_id, status FROM boxes WHERE id = ?').get('s1') as {
-    agent_set_id: string | null;
-    status: string;
-  };
+  const row = db.prepare('SELECT status FROM boxes WHERE id = ?').get('s1') as { status: string };
   assert.equal(row.status, 'running');
-  assert.equal(row.agent_set_id, null);
+  assert.deepEqual(store.setsOf('s1'), [{ id: web.id, name: 'web' }]);
 });
 
 test('a set going away takes its skills with it', () => {
@@ -832,7 +869,7 @@ test('the MCP servers of a set replace the servers of the global set with the sa
   assert.deepEqual(preview.mcpOverrides, ['docs']);
   assert.deepEqual(mcp.bundle('', null).mcpOverrides, []);
   assert.deepEqual(
-    mcp.mcpSnapshot('', set.id).map((server) => [server.setId, server.url]),
+    mcp.mcpSnapshot('', [set.id]).map((server) => [server.setId, server.url]),
     [
       [set.id, 'https://docs.example.org/mcp'],
       [globalId, GITHUB_MCP.url],
@@ -868,7 +905,7 @@ test('the secrets of an MCP server become placeholders, and a server without a s
    */
   const placeholder = (server: string, header: string): string =>
     rowsOf(id, server)[header]?.[1] ?? '';
-  const snapshot = mcp.mcpSnapshot('', null);
+  const snapshot = mcp.mcpSnapshot('', []);
 
   assert.deepEqual(mcp.mcpServersFor('', snapshot), [
     {

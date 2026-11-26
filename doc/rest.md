@@ -38,6 +38,7 @@ adapter's last advertised modes and config options (when one has answered), and 
 | POST | `/api/boxes/:id/start` | `BoxDetail` |
 | POST | `/api/boxes/:id/stop` | `BoxDetail` |
 | DELETE | `/api/boxes/:id` | 204 |
+| PUT | `/api/boxes/:id/agent-sets` | `BoxDetail` |
 | PUT | `/api/boxes/:id/egress-profile` | `BoxDetail` |
 | GET | `/api/boxes/:id/denials` | `EgressDenial[]` |
 
@@ -46,16 +47,20 @@ adapter's last advertised modes and config options (when one has answered), and 
 ```json
 {
   "name": "my-box",
-  "agentSet": "set-id-or-null",
+  "agentSets": ["set-id"],
   "egressProfile": "profile-id-or-null",
   "thread": { "harness": "claude", "modeId": "…", "config": { } }
 }
 ```
 
 Every [box](boxes.md) is created with one thread. `thread` selects its harness and its initial mode and config; absent,
-it is Claude on its defaults. `profile` is accepted but ignored. An unknown `agentSet` or `egressProfile` gets a 400.
+it is Claude on its defaults. `profile` is accepted but ignored. An unknown `egressProfile` gets a 400.
 
-`PUT …/egress-profile` accepts `{ "egressProfile": "…" }`, or null for the default profile. `GET …/denials` answers the
+`agentSets` lists the [agent sets](agent-sets.md) of the box in the order of the merge. An absent or empty list selects
+the global set only. A list with the global set, an unknown set, or one set twice gets a 400.
+
+`PUT …/agent-sets` accepts `{ "agentSets": [...] }` with the same rules. `PUT …/egress-profile` accepts
+`{ "egressProfile": "…" }`, or null for the default profile. `GET …/denials` answers the
 [refused hosts](egress-profiles.md#refused-hosts) from the proxy, and a 502 when the proxy does not answer.
 
 ## Threads
@@ -172,8 +177,8 @@ one callback for each login, in the 10 minutes after the connect.
 `POST …/repos` accepts an `AgentRepoBody` with `url` and an optional `ref`, adds the repository, and pulls it. A failed
 pull is not an error of the request: the set's `repos` list shows it. `POST …/pull` pulls the repository again.
 
-The preview answers what a box that selects this [agent set](agent-sets.md) receives: the global set, with this set laid
-over it. Each skill in `skills` names the repository it comes from, or `null`.
+The preview answers what a box that selects only this [agent set](agent-sets.md) receives: the global set, with this
+set laid over it. Each skill in `skills` names the repository it comes from, or `null`.
 
 ## Egress profiles
 

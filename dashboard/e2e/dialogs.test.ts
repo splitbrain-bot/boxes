@@ -104,7 +104,7 @@ test('the new-box form creates the box and its first thread in one request', asy
     await expect.poll(() => stub.boxCalls.length).toBe(1);
     expect(stub.boxCalls[0]).toEqual({
       name: 'second box',
-      agentSet: null,
+      agentSets: [],
       // The form preselects the default profile. The orchestrator makes its id.
       egressProfile: expect.stringMatching(/^ep[0-9a-f]{10}$/),
       thread: {

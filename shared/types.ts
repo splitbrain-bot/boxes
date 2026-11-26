@@ -392,13 +392,11 @@ export interface BoxSummary {
   /** All threads of the box, oldest first. */
   threads: ThreadSummary[];
   /**
-   * The agent set that the user selected when the box was created, or null
-   * for the global set only. The value is also null when the set was deleted
-   * later.
+   * The agent sets that the user selected for the box, in the order of the
+   * merge. The list is empty for the global set only. A deleted set leaves the
+   * list.
    */
-  agentSetId: string | null;
-  /** The current name of the agent set, for the UI. Null when `agentSetId` is null. */
-  agentSetName: string | null;
+  agentSets: Array<{ id: string; name: string }>;
   /**
    * The disk space of the box in bytes: its workspace, its home and its Nix
    * store together. Null before the first measurement.
@@ -490,11 +488,11 @@ export interface CreateBoxBody {
    */
   profile?: string;
   /**
-   * The id of the agent set whose AGENTS.md and skills are merged over the
-   * global ones for this box. Absent, empty or the id of the global set means
-   * the global set only.
+   * The ids of the agent sets that are merged over the global set for this
+   * box, in the order of the merge. A later set wins. Absent or empty means the
+   * global set only.
    */
-  agentSet?: string | null;
+  agentSets?: string[];
   /** The id of the egress profile of the box. Absent or null means the default profile of the user. */
   egressProfile?: string | null;
   /**
@@ -1106,12 +1104,6 @@ export interface ReviewBaseResponse {
   repos: ReviewRepo[];
 }
 
-/**
- * The name for the global agent set in a request that creates a box. Such a
- * request is the same as a request without an agent set.
- */
-export const GLOBAL_AGENT_SET = 'global';
-
 /** One skill of an agent set, as stored and as the API reports it. */
 export interface AgentItem {
   /**
@@ -1140,7 +1132,7 @@ export interface AgentSetSummary {
   skillCount: number;
   /** The number of repositories that the set takes skills from. */
   repoCount: number;
-  /** The number of live boxes that were created with this set. */
+  /** The number of live boxes that use this set. */
   boxCount: number;
   /** The creation time of the set, in epoch milliseconds. */
   createdAt: number;
