@@ -334,6 +334,18 @@ export const api = {
   deleteReview: (id: string) => request<void>(`/api/boxes/${id}/review`, { method: 'DELETE' }),
 
   /**
+   * Selects the agent sets of a box.
+   *
+   * @param id The id of the box.
+   * @param agentSets The ids of the sets in the order of the merge, or an empty list for the global set only.
+   * @returns The box after the change.
+   */
+  setBoxAgentSets: (id: string, agentSets: string[]) =>
+    request<BoxDetail>(`/api/boxes/${id}/agent-sets`, {
+      method: 'PUT',
+      body: JSON.stringify({ agentSets }),
+    }),
+  /**
    * Selects the egress profile of a box.
    *
    * @param id The id of the box.

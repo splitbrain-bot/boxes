@@ -48,7 +48,7 @@ const threadOptions = z.object({
 export const createBoxBody = z.object({
   name: z.string(),
   profile: z.string().optional(),
-  agentSet: z.string().nullable().optional(),
+  agentSets: z.array(z.string()).optional(),
   egressProfile: z.string().nullable().optional(),
   thread: threadOptions.optional(),
 });
@@ -59,6 +59,14 @@ export const createBoxBody = z.object({
  */
 export const boxEgressProfileBody = z.object({
   egressProfile: z.string().nullable(),
+});
+
+/**
+ * The body of PUT /api/boxes/:id/agent-sets, with the agent sets of the box in
+ * the order of the merge. An empty list selects the global set only.
+ */
+export const boxAgentSetsBody = z.object({
+  agentSets: z.array(z.string()),
 });
 
 /** The body of POST /api/boxes/:id/threads, with the thread to add. */

@@ -92,11 +92,11 @@ interface Bundle {
   agentsMd: string;
   /** Every skill, sorted by name. */
   skills: BundleSkill[];
-  /** The names of the skills in the selected set that replace a skill of the global set. */
+  /** The names of the skills in the selected sets that replace a skill of the global set or of an earlier set. */
   overrides: string[];
   /** Every MCP server, sorted by name. */
   mcpServers: McpSnapshotEntry[];
-  /** The names of the MCP servers in the selected set that replace a server of the global set. */
+  /** The names of the MCP servers in the selected sets that replace a server of the global set or of an earlier set. */
   mcpOverrides: string[];
 }
 
@@ -339,7 +339,10 @@ export class AgentStore {
       .prepare('SELECT COUNT(*) AS n FROM agent_repos WHERE set_id = ?')
       .get(row.id) as { n: number };
     const used = this.db
-      .prepare("SELECT COUNT(*) AS n FROM boxes WHERE agent_set_id = ? AND status != 'deleted'")
+      .prepare(
+        `SELECT COUNT(*) AS n FROM box_agent_sets JOIN boxes ON boxes.id = box_agent_sets.box_id
+         WHERE box_agent_sets.set_id = ? AND boxes.status != 'deleted'`,
+      )
       .get(row.id) as { n: number };
     return {
       id: row.id,
@@ -369,17 +372,35 @@ export class AgentStore {
   }
 
   /**
-   * Gives the display name of a set.
+   * Gives the agent sets that a box selected, in the order of the merge.
    *
-   * @param id The id of the set, or null.
-   * @returns The name, or null when the id is null or the set does not exist.
+   * @param boxId The id of the box.
+   * @returns The id and the name of each set. The list is empty for the global set only.
    */
-  nameOf(id: string | null): string | null {
-    if (!id) return null;
-    const row = this.db.prepare('SELECT name FROM agent_sets WHERE id = ?').get(id) as
-      | { name: string }
-      | undefined;
-    return row?.name ?? null;
+  setsOf(boxId: string): Array<{ id: string; name: string }> {
+    return this.db
+      .prepare(
+        `SELECT agent_sets.id, agent_sets.name FROM box_agent_sets
+         JOIN agent_sets ON agent_sets.id = box_agent_sets.set_id
+         WHERE box_agent_sets.box_id = ? ORDER BY box_agent_sets.position`,
+      )
+      .all(boxId) as Array<{ id: string; name: string }>;
+  }
+
+  /**
+   * Stores the agent sets that a box selects, and replaces the earlier selection.
+   *
+   * @param boxId The id of the box.
+   * @param setIds The ids of the sets, in the order of the merge, without the global set.
+   */
+  selectForBox(boxId: string, setIds: readonly string[]): void {
+    const insert = this.db.prepare(
+      'INSERT INTO box_agent_sets (box_id, set_id, position) VALUES (?, ?, ?)',
+    );
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM box_agent_sets WHERE box_id = ?').run(boxId);
+      for (const [position, setId] of setIds.entries()) insert.run(boxId, setId, position);
+    })();
   }
 
   /**
@@ -760,14 +781,17 @@ export class AgentStore {
   }
 
   /**
-   * Gives the merged set for a box, in the form that the editor shows.
+   * Gives the merge of one set over the global set, in the form that the editor shows.
    *
-   * @param owner The owner of the box.
-   * @param setId The id of the set that the box selected, or null for only the global set.
+   * @param owner The owner of the set.
+   * @param setId The id of the set, or null for only the global set.
    * @returns The merged AGENTS.md, the skills with their sources, and the overridden skill names.
    */
   bundle(owner: string, setId: string | null): AgentBundlePreview {
-    const { agentsMd, skills, overrides, mcpServers, mcpOverrides } = this.merge(owner, setId);
+    const { agentsMd, skills, overrides, mcpServers, mcpOverrides } = this.merge(
+      owner,
+      setId ? [setId] : [],
+    );
     return {
       agentsMd,
       skills: skills.map((skill) => ({ name: skill.name, repo: skill.repo })),
@@ -782,11 +806,11 @@ export class AgentStore {
    * list until its next start.
    *
    * @param owner The owner of the box.
-   * @param setId The id of the set that the box selected, or null for only the global set.
+   * @param setIds The ids of the sets that the box selected, in the order of the merge.
    * @returns The servers, sorted by name.
    */
-  mcpSnapshot(owner: string, setId: string | null): McpSnapshotEntry[] {
-    return this.merge(owner, setId).mcpServers;
+  mcpSnapshot(owner: string, setIds: readonly string[]): McpSnapshotEntry[] {
+    return this.merge(owner, setIds).mcpServers;
   }
 
   /**
@@ -815,49 +839,59 @@ export class AgentStore {
   }
 
   /**
-   * Merges the selected set over the global set of the owner.
+   * Merges the selected sets over the global set of the owner, in the order of
+   * the list.
    *
-   * The merged AGENTS.md is the global AGENTS.md, then a blank line, then the
-   * AGENTS.md of the selected set. A skill or an MCP server of the selected set
-   * replaces a skill or a server of the global set with the same name. A
-   * selected set of another user counts as no selection.
+   * The merged AGENTS.md is the global AGENTS.md and the AGENTS.md of each
+   * selected set, joined by blank lines. A skill or an MCP server of a selected
+   * set replaces a skill or a server with the same name of the global set or
+   * of an earlier set. A selected set of another user and the global set count
+   * as no selection.
    *
    * @param owner The owner of the box.
-   * @param setId The id of the selected set, or null for only the global set.
+   * @param setIds The ids of the selected sets, in the order of the merge.
    * @returns The merged set.
    */
-  private merge(owner: string, setId: string | null): Bundle {
+  private merge(owner: string, setIds: readonly string[]): Bundle {
     const global = this.globalRow(owner);
-    const extra = setId
-      ? (this.db
-          .prepare('SELECT * FROM agent_sets WHERE id = ? AND owner = ? AND global = 0')
-          .get(setId, owner) as AgentSetRow | undefined)
-      : undefined;
+    const select = this.db.prepare(
+      'SELECT * FROM agent_sets WHERE id = ? AND owner = ? AND global = 0',
+    );
+    const extras = setIds
+      .map((id) => select.get(id, owner) as AgentSetRow | undefined)
+      .filter((row): row is AgentSetRow => row !== undefined);
 
-    const agentsMd = [global?.agents_md ?? '', extra?.agents_md ?? '']
+    const agentsMd = [global?.agents_md ?? '', ...extras.map((extra) => extra.agents_md)]
       .map((part) => part.trim())
       .filter((part) => part !== '')
       .join('\n\n');
 
     const byName = global ? this.skillsOf(global.id) : new Map<string, BundleSkill>();
-    const overrides: string[] = [];
-    for (const skill of extra ? this.skillsOf(extra.id).values() : []) {
-      if (byName.has(skill.name)) overrides.push(skill.name);
-      byName.set(skill.name, skill);
-    }
-
-    const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-
+    const overrides = new Set<string>();
     const servers = new Map(
       (global ? this.mcpServers(global.id) : []).map((server) => [server.name, server]),
     );
-    const mcpOverrides: string[] = [];
-    for (const server of extra ? this.mcpServers(extra.id) : []) {
-      if (servers.has(server.name)) mcpOverrides.push(server.name);
-      servers.set(server.name, server);
+    const mcpOverrides = new Set<string>();
+    for (const extra of extras) {
+      for (const skill of this.skillsOf(extra.id).values()) {
+        if (byName.has(skill.name)) overrides.add(skill.name);
+        byName.set(skill.name, skill);
+      }
+      for (const server of this.mcpServers(extra.id)) {
+        if (servers.has(server.name)) mcpOverrides.add(server.name);
+        servers.set(server.name, server);
+      }
     }
+
+    const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
     const mcpServers = [...servers.values()].sort((a, b) => a.name.localeCompare(b.name));
-    return { agentsMd, skills, overrides, mcpServers, mcpOverrides };
+    return {
+      agentsMd,
+      skills,
+      overrides: [...overrides],
+      mcpServers,
+      mcpOverrides: [...mcpOverrides],
+    };
   }
 
   /**
@@ -894,11 +928,11 @@ export class AgentStore {
    * skill with the same name.
    *
    * @param owner The owner of the box.
-   * @param setId The id of the set that the box selected, or null for only the global set.
+   * @param setIds The ids of the sets that the box selected, in the order of the merge.
    * @returns The tar stream.
    */
-  pack(owner: string, setId: string | null): Readable {
-    const bundle = this.merge(owner, setId);
+  pack(owner: string, setIds: readonly string[]): Readable {
+    const bundle = this.merge(owner, setIds);
     const names = new Set(bundle.skills.map((skill) => skill.name));
     for (const skill of this.builtins(owner)) {
       if (!names.has(skill.name))

@@ -30,6 +30,7 @@ import {
   agentMcpServerBody,
   agentRepoBody,
   backgroundStopBody,
+  boxAgentSetsBody,
   boxEgressProfileBody,
   createAgentSetBody,
   createBoxBody,
@@ -375,7 +376,10 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     const rows = db.prepare("SELECT * FROM boxes WHERE status != 'deleted'").all() as BoxRow[];
     return rows.map((row) => {
       const profile = profiles.forBox(row.owner, row.egress_profile_id);
-      const servers = agents.mcpSnapshot(row.owner, row.agent_set_id);
+      const servers = agents.mcpSnapshot(
+        row.owner,
+        agents.setsOf(row.id).map((set) => set.id),
+      );
       return {
         id: row.id,
         owner: row.owner,
@@ -715,6 +719,12 @@ export function buildApp(cfg: Config, db: Db, opts: BuildOptions = {}): Orchestr
     // The review service caches data for each box, so it forgets the deleted box.
     review.forget(id);
     return reply.code(204).send();
+  });
+
+  app.put('/api/boxes/:id/agent-sets', async (req) => {
+    const { id } = req.params as { id: string };
+    const body = parseBody(boxAgentSetsBody, req.body);
+    return manager.setAgentSets(id, body.agentSets);
   });
 
   app.put('/api/boxes/:id/egress-profile', async (req) => {

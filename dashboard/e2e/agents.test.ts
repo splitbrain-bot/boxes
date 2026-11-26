@@ -2,7 +2,7 @@
 
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { closeBrowser, openPage, shoot } from './browser.ts';
-import { startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
+import { DEFAULT_BOX, startOrchestrator, type TestOrchestrator } from './orchestrator.ts';
 
 /** The orchestrator that the tests in this file share. */
 let stub: TestOrchestrator;
@@ -144,17 +144,80 @@ test('a SKILL.md with no front matter is called out before it is saved', async (
   }
 });
 
-test('a box is created against a named set, and the global one is not offered', async () => {
-  const { page, close } = await openPage(stub.url, '/new');
+test('a box is created with named sets, and the global one is not offered', async () => {
+  const { page, errors, close } = await openPage(stub.url, '/new');
   try {
-    await expect.poll(() => page.getByLabel('Agent set').isVisible()).toBe(true);
+    const add = page.getByRole('combobox', { name: 'Add an agent set' });
+    await expect.poll(() => add.isVisible()).toBe(true);
     await page.getByLabel('Name').fill('a new box');
-    await page.getByLabel('Agent set').click();
+    await add.click();
     // The global set always applies, so it is not an option.
-    expect(await page.getByRole('option').allInnerTexts()).toEqual([
-      'Global set only',
-      'Go projects',
-    ]);
+    expect(await page.getByRole('option').allInnerTexts()).toEqual(['Go projects']);
+    await page.getByRole('option', { name: 'Go projects' }).click();
+    await expect.poll(() => page.getByRole('listitem').allInnerTexts()).toEqual(['Go projects']);
+
+    await page.getByRole('button', { name: 'Create' }).click();
+    await expect.poll(() => stub.boxCalls.length).toBe(1);
+    expect(stub.boxCalls[0]).toMatchObject({ name: 'a new box', agentSets: ['as1'] });
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
+test('the box details page adds and removes the agent sets of the box', async () => {
+  const res = await fetch(`${stub.url}/api/agent-sets`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Web' }),
+  });
+  const web = ((await res.json()) as { id: string }).id;
+  const { page, errors, close } = await openPage(stub.url, `/boxes/${DEFAULT_BOX.id}/info`);
+  try {
+    const add = page.getByRole('combobox', { name: 'Add an agent set' });
+    await expect.poll(() => page.getByText('Global set only').isVisible()).toBe(true);
+
+    /**
+     * Changes the sets with one action and gives the body of the request.
+     *
+     * @param action The action in the page.
+     * @returns The JSON body of the PUT request.
+     */
+    const change = async (action: () => Promise<void>): Promise<unknown> => {
+      const put = page.waitForRequest(
+        (req) =>
+          req.method() === 'PUT' && req.url().endsWith(`/api/boxes/${DEFAULT_BOX.id}/agent-sets`),
+      );
+      await action();
+      return (await put).postDataJSON();
+    };
+
+    expect(
+      await change(async () => {
+        await add.click();
+        await page.getByRole('option', { name: 'Go projects' }).click();
+      }),
+    ).toEqual({ agentSets: ['as1'] });
+    await expect.poll(() => page.getByRole('listitem').allInnerTexts()).toEqual(['Go projects']);
+
+    // A new set goes to the end of the list.
+    expect(
+      await change(async () => {
+        await add.click();
+        await page.getByRole('option', { name: 'Web' }).click();
+      }),
+    ).toEqual({ agentSets: ['as1', web] });
+    await expect
+      .poll(() => page.getByRole('listitem').allInnerTexts())
+      .toEqual(['Go projects', 'Web']);
+    // Each set is in the list, so the page offers no more sets.
+    await expect.poll(() => add.count()).toBe(0);
+
+    expect(
+      await change(() => page.getByRole('button', { name: 'Remove Go projects' }).click()),
+    ).toEqual({ agentSets: [web] });
+    await expect.poll(() => page.getByRole('listitem').allInnerTexts()).toEqual(['Web']);
+    expect(errors).toEqual([]);
   } finally {
     await close();
   }

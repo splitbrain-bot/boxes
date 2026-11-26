@@ -38,11 +38,6 @@ export interface BoxRow {
   review_base_rev: string | null;
   /** The lifecycle state. A deleted box keeps its row as a tombstone. */
   status: BoxStatus;
-  /**
-   * The extra agent set of this box, or null for only the global set. The
-   * database clears it when the set is deleted.
-   */
-  agent_set_id: string | null;
   /** The bearer token that a WebSocket upgrade must give. It opens only this box. */
   ws_token: string;
   /**
@@ -786,6 +781,19 @@ export const MIGRATIONS: string[] = [
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (owner, host)
   );
+  `,
+  // Replaces the one agent set of each box with an ordered list of sets.
+  `
+  CREATE TABLE box_agent_sets (
+    box_id   TEXT NOT NULL REFERENCES boxes(id) ON DELETE CASCADE,
+    set_id   TEXT NOT NULL REFERENCES agent_sets(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (box_id, set_id)
+  );
+  CREATE INDEX idx_box_agent_sets_set ON box_agent_sets(set_id);
+  INSERT INTO box_agent_sets (box_id, set_id, position)
+    SELECT id, agent_set_id, 0 FROM boxes WHERE agent_set_id IS NOT NULL;
+  ALTER TABLE boxes DROP COLUMN agent_set_id;
   `,
 ];
 

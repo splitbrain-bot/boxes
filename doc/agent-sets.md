@@ -13,25 +13,24 @@ use. The global set applies to every box of its owner, and the user cannot delet
 More sets can be added in the dashboard. A set has a display name, an optional `AGENTS.md`, any number of skills, and
 up to 20 MCP servers.
 
-A set is selected when a [box is created](boxes.md). The selection is stored with the box and cannot change later. A box
-that selects no set gets the global set alone. Naming the global set is the same as naming nothing.
+A box has an ordered list of named sets. The user selects the list when the [box is created](boxes.md), and can change
+it on the details page of the box. A new set goes to the end of the list. To change the order, the user removes a set
+and adds it again. The global set is never in the list, because every box gets it. A box with an empty list gets the
+global set alone.
 
 ## Merging
 
-A box always gets the global set. When another set is selected, the orchestrator merges the two. The two kinds of
-content merge differently:
+A box always gets the global set. The orchestrator merges the sets of the list over the global set, in the order of the
+list. The kinds of content merge differently:
 
-- The `AGENTS.md` files are concatenated: the global one first, the selected set's one after it, separated by a blank
-  line.
-- A skill is addressed by its name. When two skills have the same name, one wins. The order, highest first:
-  1. a skill of the selected set
-  2. a skill from a repository of the selected set, in the order of the repository list
-  3. a skill of the global set
-  4. a skill from a repository of the global set, in the order of the repository list
-- An MCP server is addressed by its name. An MCP server of the selected set replaces an MCP server of the global set
-  with the same name.
+- The `AGENTS.md` files are joined in the order of the merge, with a blank line between two files.
+- A skill is addressed by its name. A skill of a set replaces a skill with the same name of the global set or of an
+  earlier set. Inside one set, a skill of the set replaces a skill from its repositories. A skill from an earlier
+  repository of the set replaces a skill from a later repository.
+- An MCP server is addressed by its name. An MCP server of a set replaces an MCP server with the same name of the global
+  set or of an earlier set.
 
-The editor of a named set shows the merged result under "Merged result".
+The editor of a named set shows the merge of the global set and this set under "Merged result".
 
 ## Skills
 
@@ -102,12 +101,13 @@ At each box start, the [file service](files.md) in the box installs the merged s
 
 The practical effects:
 
-- Changes to a set reach a box the next time the box starts. A running box keeps what it has. A new secret or a new
-  OAuth login of an MCP server applies without a restart of the box.
+- Changes to a set and changes to the list of a box reach the box the next time the box starts. A running box keeps
+  what it has. A new secret or a new OAuth login of an MCP server applies without a restart of the box. The egress
+  proxy allows the hosts of the MCP servers of a newly selected set at once.
 - An item deleted from a set is removed from the box at the next start. A built-in skill whose condition no longer
   holds is removed in the same way.
-- When a set is deleted, the boxes that selected it keep what is already installed, and get the global set alone at the
-  next start.
+- When a set is deleted, the orchestrator removes it from the list of each box. A box keeps what is already installed,
+  and gets the other sets of its list at the next start.
 
 ## Managing sets
 
@@ -155,8 +155,9 @@ managed file cannot name `.ssh` or all of `.claude`.
 
 ### Deleting a set
 
-The box's `agent_set_id` column references the set with `ON DELETE SET NULL`, and the set's items and repositories are
-deleted with it, together with the repository checkouts.
+The `box_agent_sets` table holds the list of each box, with the position of each set. Its rows reference the box and
+the set with `ON DELETE CASCADE`. The items and the repositories of a set are deleted with the set, together with the
+repository checkouts.
 
 ### MCP servers
 

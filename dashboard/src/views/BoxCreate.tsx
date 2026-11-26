@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
+import { AgentSetPicker } from '@/components/AgentSetPicker';
 import { Notice } from '@/components/Notice';
 import { ThreadOptions, useThreadOptions } from '@/components/ThreadOptions';
 import { Button } from '@/components/ui/button';
@@ -17,9 +18,6 @@ import type { AgentSetSummary, EgressProfileSummary } from '../../../shared/type
 import { api } from '../api.ts';
 import { refresh } from '../stores/boxes.ts';
 
-/** Picker value for no extra set. The form sends it as null. */
-const NO_SET = 'none';
-
 /** Form that creates a box and then opens its first thread. */
 export function BoxCreate() {
   const navigate = useNavigate();
@@ -33,7 +31,8 @@ export function BoxCreate() {
    * Null while loading. The form hides the picker while the list is null or empty.
    */
   const [agentSets, setAgentSets] = useState<AgentSetSummary[] | null>(null);
-  const [agentSet, setAgentSet] = useState(NO_SET);
+  /** The ids of the selected sets, in the order of the merge. */
+  const [selectedSets, setSelectedSets] = useState<string[]>([]);
   /** The egress profiles. Null while loading. The form hides the select while null. */
   const [profiles, setProfiles] = useState<EgressProfileSummary[] | null>(null);
   /** The id of the selected profile. The empty string sends null, so the box uses the default profile. */
@@ -70,7 +69,7 @@ export function BoxCreate() {
     try {
       const created = await api.createBox({
         name: name.trim(),
-        agentSet: agentSet === NO_SET ? null : agentSet,
+        agentSets: selectedSets,
         egressProfile: profile === '' ? null : profile,
         ...(thread.value ? { thread: thread.value } : {}),
       });
@@ -105,20 +104,13 @@ export function BoxCreate() {
 
       {agentSets && agentSets.length > 0 ? (
         <div className="flex flex-col gap-2">
-          <Label htmlFor="box-agent-set">Agent set</Label>
-          <Select value={agentSet} onValueChange={setAgentSet}>
-            <SelectTrigger id="box-agent-set" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NO_SET}>Global set only</SelectItem>
-              {agentSets.map((s) => (
-                <SelectItem key={s.id} value={s.id}>
-                  {s.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <Label htmlFor="box-agent-sets">Agent sets</Label>
+          <AgentSetPicker
+            id="box-agent-sets"
+            sets={agentSets}
+            value={selectedSets}
+            onChange={setSelectedSets}
+          />
           <p className="text-xs text-muted-foreground">
             Merged over the global AGENTS.md and skills, which every box gets.{' '}
             <Link to="/agents" className="underline hover:text-foreground">

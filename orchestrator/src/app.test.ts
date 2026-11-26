@@ -829,6 +829,69 @@ test('a set is created, filled and read back over the API', async () => {
   );
 });
 
+test('a box changes its agent sets over the API', async () => {
+  insertBox('abc123');
+  fakeDocker();
+  /**
+   * Creates a named set.
+   *
+   * @param name The name of the set.
+   * @returns The id of the set.
+   */
+  const create = async (name: string): Promise<string> =>
+    (
+      (
+        await orchestrator.app.inject({ method: 'POST', url: '/api/agent-sets', payload: { name } })
+      ).json() as { id: string }
+    ).id;
+  const go = await create('Go projects');
+  const web = await create('Web');
+  /**
+   * Selects the agent sets of the box.
+   *
+   * @param agentSets The ids of the sets.
+   * @param box The id of the box.
+   * @returns The response.
+   */
+  const select = (agentSets: string[], box = 'abc123') =>
+    orchestrator.app.inject({
+      method: 'PUT',
+      url: `/api/boxes/${box}/agent-sets`,
+      payload: { agentSets },
+    });
+
+  const selected = await select([web, go]);
+  assert.equal(selected.statusCode, 200);
+  assert.deepEqual(selected.json().agentSets, [
+    { id: web, name: 'Web' },
+    { id: go, name: 'Go projects' },
+  ]);
+  const listed = await orchestrator.app.inject({ url: '/api/agent-sets' });
+  assert.deepEqual(
+    (listed.json() as Array<{ id: string; boxCount: number }>).map((s) => [s.id, s.boxCount]),
+    [
+      ['global', 0],
+      [go, 1],
+      [web, 1],
+    ],
+  );
+
+  const none = await select([]);
+  assert.equal(none.statusCode, 200);
+  assert.deepEqual(none.json().agentSets, []);
+
+  const unknown = await select(['nope']);
+  assert.equal(unknown.statusCode, 400);
+  assert.match((unknown.json() as { error: string }).error, /Unknown agent set/);
+  const global = await select(['global']);
+  assert.equal(global.statusCode, 400);
+  assert.match((global.json() as { error: string }).error, /global set/);
+  const twice = await select([go, go]);
+  assert.equal(twice.statusCode, 400);
+  assert.match((twice.json() as { error: string }).error, /selected twice/);
+  assert.equal((await select([], 'nope')).statusCode, 404);
+});
+
 test('the preview shows the merge, overrides named', async () => {
   await orchestrator.app.inject({
     method: 'PATCH',
@@ -942,7 +1005,7 @@ test('creating a box against an unknown set is refused before anything is built'
   const res = await orchestrator.app.inject({
     method: 'POST',
     url: '/api/boxes',
-    payload: { name: 'a box', agentSet: 'nope' },
+    payload: { name: 'a box', agentSets: ['nope'] },
   });
   assert.equal(res.statusCode, 400);
   assert.match((res.json() as { error: string }).error, /Unknown agent set/);

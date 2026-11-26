@@ -8,7 +8,8 @@ network. The [glossary](glossary.md) defines these terms.
 Select **New** on the box list. The form asks for:
 
 - a name (100 characters or fewer),
-- an optional agent set, merged over the global set (see [agent sets](agent-sets.md)),
+- an optional list of agent sets, merged over the global set in the order of the list (see
+  [agent sets](agent-sets.md)),
 - the [egress profile](egress-profiles.md), with the default profile preselected,
 - the agent and settings of the first [thread](threads.md).
 
@@ -39,8 +40,8 @@ The info icon on a card opens the box's details page.
 ## Box details
 
 The details page shows the box's identity and runtime state: the facts of the runtime (on Docker the container id, the
-network name with its subnet, and the image id), agent set, last activity, disk use, and the ACP session id of the most
-recently active thread. It shows the egress profile of the box, which the user can change there, and the
+network name with its subnet, and the image id), last activity, disk use, and the ACP session id of the most recently
+active thread. It shows the agent sets and the egress profile of the box, which the user can change there, and the
 [refused hosts](egress-profiles.md#refused-hosts). It lists the dev tunnels the box hosts and the processes the
 orchestrator last read in the box.
 For a running box whose network isolation is not complete, it shows a warning.
@@ -166,10 +167,11 @@ tick.
 ### Boot and sweep
 
 At boot the orchestrator reconciles its rows with Docker by the `boxes.box` label: it adopts live containers, marks
-missing ones as stopped, marks an interrupted create as an error, and repairs the isolation of every running box. The periodic sweep uses the same label in the opposite direction: it removes every labelled container,
-network and box directory that has no live row, containers before networks. One guard: when the strays outnumber the
-known boxes by a wide margin, the sweep refuses, because that pattern usually means a wrongly mounted data volume rather
-than real garbage. The sweep removes login containers by age.
+missing ones as stopped, marks an interrupted create as an error, and repairs the isolation of every running box. The
+periodic sweep uses the same label in the opposite direction: it removes every labelled container, network and box
+directory that has no live row, containers before networks. One guard: when the strays outnumber the known boxes by a
+wide margin, the sweep refuses, because that pattern usually means a wrongly mounted data volume rather than real
+garbage. The sweep removes login containers by age.
 
 ### The subnet pool
 
