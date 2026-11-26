@@ -166,10 +166,11 @@ tick.
 ### Boot and sweep
 
 At boot the orchestrator reconciles its rows with Docker by the `boxes.box` label: it adopts live containers, marks
-missing ones as stopped, marks an interrupted create as an error, and repairs the isolation of every running box. The periodic sweep uses the same label in the opposite direction: it removes every labelled container,
-network and box directory that has no live row, containers before networks. One guard: when the strays outnumber the
-known boxes by a wide margin, the sweep refuses, because that pattern usually means a wrongly mounted data volume rather
-than real garbage. The sweep removes login containers by age.
+missing ones as stopped, marks an interrupted create as an error, and repairs the isolation of every running box. The
+periodic sweep uses the same label in the opposite direction: it removes every labelled container, network and box
+directory that has no live row, containers before networks. One guard: when the strays outnumber the known boxes by a
+wide margin, the sweep refuses, because that pattern usually means a wrongly mounted data volume rather than real
+garbage. The sweep removes login containers by age.
 
 ### The subnet pool
 
