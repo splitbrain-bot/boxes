@@ -179,6 +179,8 @@ export interface ThreadModel {
   plan: PlanEntry[] | null;
   /** The slash commands the adapter accepts, for the composer to complete. */
   commands: AvailableCommand[];
+  /** The prompt that the agent expects the user to send next, or null. */
+  promptSuggestion: string | null;
   /**
    * Kinds of update this build does not know, by name.
    *
@@ -209,6 +211,7 @@ export function emptyModel(): ThreadModel {
     configOptions: [],
     plan: null,
     commands: [],
+    promptSuggestion: null,
     unknown: new Set(),
     tools: new Map(),
     subagents: new Map(),
@@ -425,6 +428,9 @@ export function applyUpdate(
   switch (update.sessionUpdate) {
     case UPDATE_KIND.userMessageChunk: {
       const u = update as UpdateOf<typeof UPDATE_KIND.userMessageChunk>;
+      // The user has answered, so the suggestion for this answer is old. A sub agent's
+      // user message is no answer of the user.
+      if (!owner) model.promptSuggestion = null;
       const message = messageFor(messages, 'user', u.messageId);
       appendBlock(message, 'text', u.content);
       return owner ?? message;
@@ -512,10 +518,42 @@ export function applyUpdate(
       if (model.modes) model.modes = { ...model.modes, currentModeId: u.currentModeId };
       return null;
     }
+    case UPDATE_KIND.sessionInfo: {
+      // The suggestion is for the prompt of the user, which only the thread itself takes.
+      if (owner) return null;
+      const u = update as UpdateOf<typeof UPDATE_KIND.sessionInfo>;
+      const suggestion = promptSuggestionOf(u._meta);
+      if (suggestion !== undefined) model.promptSuggestion = suggestion;
+      return null;
+    }
     default:
       model.unknown.add(update.sessionUpdate);
       return null;
   }
+}
+
+/** The `_meta` key under which `claude-agent-acp` sends the predicted next prompt. */
+export const PROMPT_SUGGESTIONS_META_KEY = 'promptSuggestions';
+
+/**
+ * Reads the predicted next prompt from the `_meta` of a session_info_update.
+ *
+ * The value is `{ suggestions: [{ text }] }`. An empty list clears the prediction.
+ *
+ * @param meta The `_meta` of the update.
+ * @returns The first text that is not blank, null when the update clears the prediction, or undefined when the
+ *   update says nothing about it.
+ */
+function promptSuggestionOf(
+  meta: Record<string, unknown> | null | undefined,
+): string | null | undefined {
+  const value = meta?.[PROMPT_SUGGESTIONS_META_KEY] as { suggestions?: unknown } | undefined;
+  if (!value || !Array.isArray(value.suggestions)) return undefined;
+  for (const entry of value.suggestions) {
+    const text = (entry as { text?: unknown } | null)?.text;
+    if (typeof text === 'string' && text.trim()) return text.trim();
+  }
+  return null;
 }
 
 /**

@@ -944,3 +944,58 @@ test('a sub agent is a closed card that shows its run when opened', async () => 
     await close();
   }
 });
+
+test('the predicted next prompt fills the empty draft on Tab and on a long press, and the draft grows to show it', async () => {
+  /** A suggestion that needs more than one line on a phone. */
+  const long = 'run the whole test suite again and then tell me which of the failing tests are new';
+  await start({
+    prompts: [
+      {
+        match: () => true,
+        updates: [
+          ...reply('Done.'),
+          {
+            sessionUpdate: 'session_info_update',
+            _meta: { promptSuggestions: { suggestions: [{ text: long }] } },
+          } as ThreadUpdate,
+        ],
+      },
+    ],
+  });
+
+  const { page, errors, close } = await openPage(
+    stub.url,
+    `/boxes/${BOX.id}/threads/${BOX.threadId}`,
+  );
+  try {
+    await expect.poll(() => page.getByText('connected').isVisible()).toBe(true);
+    const input = page.getByLabel('Message input');
+    const oneLine = (await input.boundingBox())!.height;
+
+    await input.fill('fix the build');
+    await input.press('Control+Enter');
+    await expect.poll(() => input.getAttribute('placeholder')).toBe(long);
+    // The empty draft grows to show the whole suggestion.
+    await expect.poll(async () => (await input.boundingBox())!.height).toBeGreaterThan(oneLine);
+    await shoot(page, 'thread-prompt-suggestion');
+
+    await input.press('Tab');
+    expect(await input.inputValue()).toBe(long);
+    expect(stub.gateway.prompts).toEqual(['fix the build']);
+
+    // A short touch does nothing, a long one takes the suggestion.
+    await input.fill('');
+    const touch = { pointerType: 'touch', isPrimary: true, pointerId: 7 };
+    await input.dispatchEvent('pointerdown', touch);
+    await input.dispatchEvent('pointerup', touch);
+    await page.waitForTimeout(700);
+    expect(await input.inputValue()).toBe('');
+    await input.dispatchEvent('pointerdown', touch);
+    await expect.poll(() => input.inputValue()).toBe(long);
+    await input.dispatchEvent('pointerup', touch);
+
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
