@@ -430,10 +430,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       php-sqlite3 \
       php-gd \
       php-bcmath \
+      php-bz2 \
+      php-gmp \
+      php-mysql \
+      php-pgsql \
+      php-ldap \
+      php-soap \
       composer \
       pkg-config \
       libssl-dev \
  && rm -rf /var/lib/apt/lists/*
+
+# PHP keeps its sessions in /tmp, because the root filesystem is read-only at
+# runtime. Ubuntu removes old sessions with a cron job, and a box runs no
+# cron. So PHP removes them itself.
+RUN printf 'session.save_path = /tmp\nsession.gc_probability = 1\n' \
+      > "$(php -r 'echo PHP_CONFIG_FILE_SCAN_DIR;')/99-boxes.ini"
 
 # Tools for documents, archives and databases. /usr is read-only at runtime,
 # so the agent cannot add them later.
@@ -684,6 +696,10 @@ RUN set -eu; \
     cd /tmp/hello-rs && cargo build --quiet --offline && ./target/debug/hello-rs >/dev/null; \
     command -v rustfmt >/dev/null && command -v cargo-clippy >/dev/null; \
     test "$(php -r 'echo "ok";')" = "ok"; \
+    test "$(php -r 'echo session_save_path();')" = "/tmp"; \
+    for m in bz2 gmp mysqli pdo_mysql pgsql pdo_pgsql ldap soap; do \
+      php -m | grep -qx "$m" || { echo "missing PHP extension: $m" >&2; exit 1; }; \
+    done; \
     composer --version >/dev/null
 
 RUN touch /tmp/checks-passed
