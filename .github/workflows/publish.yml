@@ -456,12 +456,13 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      # Without a WATCHTOWER_URL, as in a fork, the step succeeds with a
-      # note. WATCHTOWER_URL is a repository variable, because it is not a
-      # credential. The token is a secret.
+      # Without a WATCHTOWER_URL secret, as in a fork, the step succeeds with
+      # a note. The watchtower can also update the containers of other
+      # projects, so the image parameter limits the update to the
+      # orchestrator and the egress proxy.
       - name: Ask watchtower to pull what was just published
         env:
-          WATCHTOWER_URL: ${{ vars.WATCHTOWER_URL }}
+          WATCHTOWER_URL: ${{ secrets.WATCHTOWER_URL }}
           WATCHTOWER_TOKEN: ${{ secrets.WATCHTOWER_HTTP_API_TOKEN }}
         # set -eu and the :- defaults keep the script's behaviour the same
         # outside the runner.
@@ -469,14 +470,18 @@ jobs:
           set -eu
           url=${WATCHTOWER_URL:-}
           if [ -z "$url" ]; then
-            echo 'No WATCHTOWER_URL variable set; nothing to notify.'
+            echo 'No WATCHTOWER_URL secret set; nothing to notify.'
             exit 0
           fi
-          # --fail turns a refused ping into a red check. Watchtower answers
-          # only after it has pulled and recreated its containers, so the
-          # timeout is minutes long.
-          answer=$(curl --fail --silent --show-error --max-time 300 \
-            -X POST "$url" \
+          base="$REGISTRY/${GITHUB_REPOSITORY,,}"
+          images="$base/orchestrator,$base/egress-proxy"
+          # Watchtower answers only after it has pulled and recreated its
+          # containers, so the timeout is minutes long. The answer is the only
+          # record of the deployment.
+          answer="$RUNNER_TEMP/watchtower-answer"
+          status=$(curl --silent --show-error --max-time 300 \
+            --output "$answer" --write-out '%{http_code}' \
+            -X POST "$url?image=$images" \
             -H "Authorization: Bearer ${WATCHTOWER_TOKEN:-}")
-          # The answer is the only record of the deployment.
-          printf 'Watchtower answered: %s\n' "$answer"
+          printf 'Watchtower answered with HTTP %s: %s\n' "$status" "$(cat "$answer")"
+          [ "$status" = 200 ]
